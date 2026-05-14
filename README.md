@@ -1,5 +1,7 @@
 # apc-hsm-proxy
 
+**GitHub:** [github.com/J8k3/aws-payment-cryptography-hsm-proxy](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy)
+
 A Rust TCP proxy that sits between HSM-dependent payment applications and [AWS Payment Cryptography (APC)](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/what-is.html). It speaks the wire protocol your application already sends — Thales payShield host commands or Futurex Excrypt — and translates them into APC API calls on the outbound side, without changing the application.
 
 **If you are refactoring the application, use the APC SDK directly.** That is the better path: lower latency, simpler deployment, no protocol translation layer. This proxy exists for the case where refactoring is not on the table — the application is a black box, a third-party system, or the migration budget doesn't cover application changes. In that case, the proxy lets you move key management and cryptographic operations to APC while leaving the application untouched.
@@ -113,6 +115,20 @@ AWS credentials are consumed via the standard AWS SDK chain: IAM role, environme
 3. Register an instance in `Registry::build()` in `src/handlers/mod.rs`.
 
 The Futurex `parse_params()` helper in `src/protocol/futurex.rs` splits Excrypt payloads into a `HashMap<[u8; 2], Vec<u8>>` keyed by 2-char parameter code. Wrap sensitive fields in `Zeroizing<Vec<u8>>` so they are wiped from memory on drop.
+
+---
+
+## Discovery Log → Handler Generation
+
+The proxy's discovery mode and the [AWS Payment Cryptography Claude Agent](https://github.com/J8k3/aws-payment-cryptography-claude-agent-template) are designed to work together. The workflow:
+
+1. Run the proxy in discovery mode with `log_file: discovery.jsonl`. Each unique command your application sends is written once as a JSON record — command code, vendor, parameter names (sensitive values redacted).
+
+2. Open `discovery.jsonl` in Claude Code alongside the agent MCP server. Call `hsm_analyze_discovery_log` with the file contents. The tool looks up each command in the HSM registry, maps it to the APC operation and key type, reports which commands already have proxy handlers, and generates `next_steps` for each command that needs one.
+
+3. Claude writes the Rust handler file for each needed command, modeled on the existing handlers in `src/handlers/<vendor>/`. The `next_steps` output tells you exactly where to put each file and what APC operation to call.
+
+The discovery log is the handoff point between the proxy and the agent. It's intentionally small — one record per unique command, not one per transaction — so it fits cleanly as source context in a Claude Code session.
 
 ---
 
