@@ -2,7 +2,7 @@
 
 **GitHub:** [github.com/J8k3/aws-payment-cryptography-hsm-proxy](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy)
 
-A Rust TCP proxy that sits between HSM-dependent payment applications and [AWS Payment Cryptography (APC)](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/what-is.html). It speaks the wire protocol your application already sends — Thales payShield host commands or Futurex Excrypt — and translates them to APC API calls on the outbound side, without changing the application.
+A Rust TCP proxy that sits between HSM-dependent payment applications and [AWS Payment Cryptography (APC)](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/what-is.html). It speaks the wire protocol your application already sends — Thales payShield 10K host commands or Futurex Excrypt Enterprise SSP v.2 — and translates them to APC API calls on the outbound side, without changing the application.
 
 **If you are refactoring the application, use the APC SDK directly.** That is the better path: lower latency, simpler deployment, no protocol translation layer. This proxy exists for the case where refactoring is not on the table — the application is a black box, a third-party system, or the migration budget doesn't cover application changes.
 
@@ -75,9 +75,9 @@ Commands with registered handlers are translated to APC. Commands without a hand
 
 ## Supported Protocols
 
-**Thales payShield** (`thales_payshield`) — 2-byte length prefix + 2-byte command code framing. Implemented handlers: CA/CC/CI/G0 (PIN translate), C2/C4/M6/M8 (MAC generate/verify), CW/CY (CVV generate/verify), B2 (diagnostics).
+**Thales payShield 10K** (`thales_payshield`) — 2-byte length prefix + 2-byte command code framing. Implemented handlers: CA/CC/CI/G0 (PIN translate), C2/C4/M6/M8 (MAC generate/verify), CW/CY (CVV generate/verify), B2 (diagnostics).
 
-**Futurex Excrypt** (`futurex_excrypt`) — `[AOCCCC;param;param;]` bracket-delimited framing. Implemented handlers: TPIN (PIN translate).
+**Futurex Excrypt Enterprise SSP v.2** (`futurex_excrypt`) — `[AOCCCC;param;param;]` bracket-delimited framing. Implemented handlers: TPIN (PIN translate).
 
 Coverage is intentionally narrow. Each handler maps one HSM command to one APC data plane call. The handler registry is the extension point — add a file under `src/handlers/<vendor>/`, register it in `src/handlers/mod.rs`, and the proxy routes that command to it.
 
@@ -138,4 +138,4 @@ The Futurex `parse_params()` helper (`src/protocol/futurex.rs`) splits Excrypt p
 
 ## Contributing
 
-If you have access to a Thales payShield or Futurex KMES and can test this against a real application, that is the most valuable contribution possible. Protocol edge cases, TLS compatibility, latency behavior, and handler correctness against real hardware can't be validated without the equipment. Open an issue with what you found or a PR with the fix.
+If you have access to a Thales payShield 10K or Futurex Excrypt Enterprise SSP v.2 and can test this against a real application, that is the most valuable contribution possible. Protocol edge cases, TLS compatibility, latency behavior, and handler correctness against real hardware can't be validated without the equipment. Open an issue with what you found or a PR with the fix.
