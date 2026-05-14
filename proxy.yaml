@@ -1,0 +1,56 @@
+listen:
+  host: 0.0.0.0
+  port: 1500
+  # TLS — required for production. Omit for local development only.
+  #
+  # One-way TLS:
+  #   tls:
+  #     cert_file: /etc/apc-proxy/server.crt
+  #     key_file:  /etc/apc-proxy/server.key
+  #
+  # Mutual TLS (require client cert):
+  #   tls:
+  #     cert_file: /etc/apc-proxy/server.crt
+  #     key_file:  /etc/apc-proxy/server.key
+  #     ca_file:   /etc/apc-proxy/client-ca.crt
+  #
+  # FIPS: swap the `ring` feature for `aws-lc-rs` in Cargo.toml and recompile.
+
+# Protocol variant: thales_payshield | futurex_excrypt
+vendor: thales_payshield
+
+aws:
+  region: us-east-1
+  # Named credential profile. Omit to use default chain: IAM role → env → instance metadata.
+  # profile: apc-proxy
+
+# Discovery / passthrough mode.
+#
+# When enabled, commands with no registered plugin handler are forwarded to the
+# real HSM instead of returning error 68. The command code and non-sensitive
+# parameters are logged to stdout (key blocks and PIN blocks are redacted).
+#
+# Use this mode to observe what commands your application sends before writing
+# plugin handlers for them. All implemented commands are still translated to APC —
+# only unhandled ones pass through.
+#
+# discover:
+#   enabled: false
+#   hsm_host: 192.168.1.10
+#   hsm_port: 1500
+
+# Map legacy key identifiers to APC key ARNs.
+#
+# The key is whatever your application sends in the key field of a command:
+#   - 32-char hex (LMK-encrypted key under Thales)
+#   - TR-31 key block value (Futurex AX/BT parameters)
+#   - A human-readable label
+#
+# The value is the APC key ARN or alias.
+# Values already starting with arn:aws:payment-cryptography: or alias/ pass through unchanged.
+key_mappings:
+  # ZPK_INBOUND:  arn:aws:payment-cryptography:us-east-1:123456789012:key/abc123
+  # ZPK_OUTBOUND: arn:aws:payment-cryptography:us-east-1:123456789012:key/def456
+  # BDK_TERMINAL: arn:aws:payment-cryptography:us-east-1:123456789012:key/ghi789
+  # CVK_VISA:     arn:aws:payment-cryptography:us-east-1:123456789012:key/jkl012
+  # ZAK_MAC:      arn:aws:payment-cryptography:us-east-1:123456789012:key/mno345
