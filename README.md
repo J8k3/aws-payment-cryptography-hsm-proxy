@@ -47,7 +47,7 @@ discover:
 
 Sensitive parameters — key blocks (`AX`, `BT`) and PIN blocks (`AL`) — are always redacted. Parameter names are preserved so you know what the command uses.
 
-**Feed `discovery.jsonl` to the [AWS Payment Cryptography Claude Agent](https://github.com/J8k3/aws-payment-cryptography-claude-agent-template).** Call `hsm_analyze_discovery_log` with the file contents. The tool returns: which commands already have handlers in this repo, which need to be written, the APC operation and key type for each, and the exact file path and handler structure to implement. Claude writes the Rust handler code for each command you need.
+**Feed `discovery.jsonl` to the [AWS Payment Cryptography MCP](https://github.com/J8k3/aws-payment-cryptography-mcp).** Call `hsm_analyze_discovery_log` with the file contents. The tool returns: which commands already have handlers in this repo, which need to be written, the APC operation and key type for each, and the exact file path and handler structure to implement. Claude writes the Rust handler code for each command you need.
 
 ### Phase 2 — Translation
 
