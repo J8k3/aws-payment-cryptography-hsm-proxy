@@ -99,6 +99,27 @@ pub fn parse_params(payload: &[u8]) -> std::collections::HashMap<[u8; 2], Vec<u8
     map
 }
 
+/// Return a redacted copy of the param map as `HashMap<String, String>` for JSON serialization.
+///
+/// Sensitive codes (AX/BT = key blocks, AL = PIN block) are replaced with "[REDACTED]".
+pub fn params_redacted_map(
+    params: &std::collections::HashMap<[u8; 2], Vec<u8>>,
+) -> std::collections::HashMap<String, String> {
+    const SENSITIVE: &[[u8; 2]] = &[*b"AX", *b"BT", *b"AL"];
+    params
+        .iter()
+        .map(|(code, val)| {
+            let key = String::from_utf8_lossy(code).to_string();
+            let value = if SENSITIVE.contains(code) {
+                "[REDACTED]".to_string()
+            } else {
+                String::from_utf8_lossy(val).to_string()
+            };
+            (key, value)
+        })
+        .collect()
+}
+
 /// Redact known-sensitive Futurex parameter codes from a param map for safe logging.
 ///
 /// AX/BT = key blocks, AL = PIN block — never logged in plaintext.

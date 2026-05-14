@@ -38,6 +38,8 @@ aws:
 #   enabled: false
 #   hsm_host: 192.168.1.10
 #   hsm_port: 1500
+#   log_file: discovery.jsonl   # structured NDJSON — one record per unique command code
+#                               # feed directly to Claude Code to generate handler stubs
 
 # Map legacy key identifiers to APC key ARNs.
 #

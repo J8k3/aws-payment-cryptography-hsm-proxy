@@ -64,6 +64,9 @@ pub struct DiscoverConfig {
     /// Hostname or IP of the real HSM to forward unhandled commands to.
     pub hsm_host: String,
     pub hsm_port: u16,
+    /// Path to write the structured discovery log (NDJSON). Each unique command
+    /// code is written once. Safe to feed directly to Claude Code as source context.
+    pub log_file: Option<PathBuf>,
 }
 
 fn default_host() -> String {

@@ -1,5 +1,8 @@
 use anyhow::Result;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn};
@@ -8,6 +11,73 @@ use crate::config::{DiscoverConfig, ProxyConfig, TlsConfig};
 use crate::handlers::{AppState, Registry};
 use crate::key_map::KeyMap;
 use crate::protocol::{futurex::FuturexExcrypt, thales::ThalesPayShield, Protocol};
+
+/// Writes a structured NDJSON discovery log. Each unique command code is written once,
+/// so the file stays small and is immediately usable as context for Claude Code.
+struct DiscoveryLog {
+    writer: Mutex<BufWriter<File>>,
+    seen: Mutex<HashSet<String>>,
+    vendor: String,
+}
+
+impl DiscoveryLog {
+    fn open(path: &std::path::Path, vendor: &str) -> Result<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| anyhow::anyhow!("opening discovery log {:?}: {e}", path))?;
+        Ok(Self {
+            writer: Mutex::new(BufWriter::new(file)),
+            seen: Mutex::new(HashSet::new()),
+            vendor: vendor.to_string(),
+        })
+    }
+
+    fn record_futurex(&self, command_code: &[u8], params: &std::collections::HashMap<[u8; 2], Vec<u8>>) {
+        let cmd = String::from_utf8_lossy(command_code).to_string();
+        if !self.seen.lock().unwrap().insert(cmd.clone()) {
+            return; // already logged this command code
+        }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let param_map = crate::protocol::futurex::params_redacted_map(params);
+        let record = serde_json::json!({
+            "ts": ts,
+            "vendor": self.vendor,
+            "cmd": cmd,
+            "params": param_map,
+        });
+        if let Ok(mut w) = self.writer.lock() {
+            let _ = writeln!(w, "{}", record);
+            let _ = w.flush();
+        }
+    }
+
+    fn record_thales(&self, command_code: &[u8], payload_len: usize) {
+        let cmd = String::from_utf8_lossy(command_code).to_string();
+        if !self.seen.lock().unwrap().insert(cmd.clone()) {
+            return;
+        }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let record = serde_json::json!({
+            "ts": ts,
+            "vendor": self.vendor,
+            "cmd": cmd,
+            "payload_len": payload_len,
+            "note": "Thales fields are positional and command-specific; payload not parsed in discovery mode",
+        });
+        if let Ok(mut w) = self.writer.lock() {
+            let _ = writeln!(w, "{}", record);
+            let _ = w.flush();
+        }
+    }
+}
 
 pub async fn run(cfg: ProxyConfig) -> Result<()> {
     let mut aws_builder = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -39,6 +109,21 @@ pub async fn run(cfg: ProxyConfig) -> Result<()> {
         .transpose()?
         .map(|sc| tokio_rustls::TlsAcceptor::from(Arc::new(sc)));
 
+    let discovery_log: Option<Arc<DiscoveryLog>> = cfg
+        .discover
+        .as_ref()
+        .and_then(|d| d.log_file.as_deref())
+        .and_then(|path| match DiscoveryLog::open(path, &cfg.vendor) {
+            Ok(dl) => {
+                info!(path = %path.display(), "discovery log opened");
+                Some(Arc::new(dl))
+            }
+            Err(e) => {
+                warn!(err = %e, "could not open discovery log; commands will not be persisted to file");
+                None
+            }
+        });
+
     let discover = cfg.discover.map(Arc::new);
 
     let addr = format!("{}:{}", cfg.listen.host, cfg.listen.port);
@@ -66,17 +151,18 @@ pub async fn run(cfg: ProxyConfig) -> Result<()> {
         let tls_acceptor = tls_acceptor.clone();
         let discover = discover.clone();
 
+        let discovery_log = discovery_log.clone();
         tokio::spawn(async move {
             let result = if let Some(acceptor) = tls_acceptor {
                 match acceptor.accept(socket).await {
-                    Ok(stream) => handle_connection(stream, state, registry, protocol, discover).await,
+                    Ok(stream) => handle_connection(stream, state, registry, protocol, discover, discovery_log).await,
                     Err(e) => {
                         error!(%peer, err = %e, "TLS handshake failed");
                         return;
                     }
                 }
             } else {
-                handle_connection(socket, state, registry, protocol, discover).await
+                handle_connection(socket, state, registry, protocol, discover, discovery_log).await
             };
 
             if let Err(e) = result {
@@ -147,6 +233,7 @@ async fn handle_connection<S>(
     registry: Arc<Registry>,
     protocol: Arc<dyn Protocol>,
     discover: Option<Arc<DiscoverConfig>>,
+    discovery_log: Option<Arc<DiscoveryLog>>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -187,7 +274,7 @@ where
                     // No handler registered for this command.
                     if let Some(ref dcfg) = discover {
                         if dcfg.enabled {
-                            log_discovery_command(&command_code, &payload);
+                            log_discovery_command(&command_code, &payload, discovery_log.as_deref());
                             match forward_to_hsm(&buf[..frame_len], dcfg).await {
                                 Ok(resp) => resp,
                                 Err(e) => {
@@ -213,23 +300,28 @@ where
 }
 
 /// Log a command seen in discovery mode, redacting known-sensitive fields.
+/// Writes to tracing and, if configured, to the structured NDJSON discovery log.
 ///
-/// For Futurex: individual parameters are inspected, key blocks and PIN blocks masked.
-/// For Thales: only the command code and payload length are logged (field offsets vary).
-fn log_discovery_command(command_code: &[u8], payload: &[u8]) {
-    use crate::protocol::futurex::redact_for_log;
+/// For Futurex: parameters are parsed; key blocks and PIN blocks are masked.
+/// For Thales: only command code and payload length are logged (field layout is positional
+/// and command-specific, so field-level parsing is not attempted).
+fn log_discovery_command(command_code: &[u8], payload: &[u8], log: Option<&DiscoveryLog>) {
+    use crate::protocol::futurex::{parse_params, redact_for_log};
 
     let cmd = String::from_utf8_lossy(command_code);
 
-    // Futurex: 4-byte command codes, parameters are parseable
     if command_code.len() == 4 {
-        let params = crate::protocol::futurex::parse_params(payload);
+        let params = parse_params(payload);
         let safe = redact_for_log(&params);
         info!(cmd = %cmd, params = %safe, "DISCOVERY: unhandled Futurex command");
+        if let Some(dl) = log {
+            dl.record_futurex(command_code, &params);
+        }
     } else {
-        // Thales: log command code and payload length only — field layout is positional
-        // and sensitive offsets are command-specific. Full content analysis not attempted.
         info!(cmd = %cmd, payload_len = payload.len(), "DISCOVERY: unhandled Thales command");
+        if let Some(dl) = log {
+            dl.record_thales(command_code, payload.len());
+        }
     }
 }
 
