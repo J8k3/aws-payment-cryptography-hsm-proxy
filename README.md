@@ -2,9 +2,9 @@
 
 **GitHub:** [github.com/J8k3/aws-payment-cryptography-hsm-proxy](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy)
 
-A Rust TCP proxy that sits between HSM-dependent payment applications and [AWS Payment Cryptography (APC)](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/what-is.html). It speaks the wire protocol your application already sends — Thales payShield host commands or Futurex Excrypt — and translates them into APC API calls on the outbound side, without changing the application.
+A Rust TCP proxy that sits between HSM-dependent payment applications and [AWS Payment Cryptography (APC)](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/what-is.html). It speaks the wire protocol your application already sends — Thales payShield host commands or Futurex Excrypt — and translates them to APC API calls on the outbound side, without changing the application.
 
-**If you are refactoring the application, use the APC SDK directly.** That is the better path: lower latency, simpler deployment, no protocol translation layer. This proxy exists for the case where refactoring is not on the table — the application is a black box, a third-party system, or the migration budget doesn't cover application changes. In that case, the proxy lets you move key management and cryptographic operations to APC while leaving the application untouched.
+**If you are refactoring the application, use the APC SDK directly.** That is the better path: lower latency, simpler deployment, no protocol translation layer. This proxy exists for the case where refactoring is not on the table — the application is a black box, a third-party system, or the migration budget doesn't cover application changes.
 
 I spent years working on AWS Payment Cryptography. The question of how existing HSM-dependent applications could move to APC without a rewrite came up constantly. It was never something I could build while working on the service. This is that tool.
 
@@ -14,86 +14,90 @@ APC removes the hardware dependency, the key ceremony overhead, and the operatio
 
 ## Status
 
-**This has not been tested against a real HSM client application.** The protocol parsers are built from specification and reference documentation, not from live traffic. There are known areas of uncertainty — TLS cipher suite compatibility with older HSM SDKs, Thales length field variants across payShield versions, APC API latency vs. the sub-millisecond response times applications may expect from hardware. These are solvable problems, but they require someone with access to a real application and a real HSM to work through them.
-
-If you use this and hit a protocol issue, a connection failure, or a handler bug, please open an issue or a PR. The core architecture is sound; the gaps are in the edge cases that only show up under real traffic.
+**This has not been tested against a real HSM client application.** The protocol parsers are built from specification and reference documentation, not from live traffic. There are known areas of uncertainty covered in the [Known Risks](#known-risks) section below. If you use this against a real application and hit a protocol issue, open an issue or PR. The core architecture is sound; the gaps are in edge cases that only surface under real traffic.
 
 ---
 
-## How It Works
+## How to Use This
 
+There are two phases: **discovery** and **translation**.
+
+### Phase 1 — Discovery
+
+Run the proxy in passthrough mode between your application and the real HSM. The proxy forwards all commands transparently while logging what it sees. The goal is to build a complete map of which commands your application actually uses before writing a single handler.
+
+**Configure `proxy.yaml`:**
+```yaml
+vendor: futurex_excrypt    # or thales_payshield
+discover:
+  enabled: true
+  hsm_host: 192.168.1.10  # your real HSM
+  hsm_port: 1500
+  log_file: discovery.jsonl
 ```
-Application → TCP (TLS/mTLS) → apc-proxy → AWS Payment Cryptography API
-                                   │
-                              proxy.yaml
-                              key_mappings
-                                   │
-                              (no handler?)
-                                   └── discovery mode: forward to real HSM
-                                                        + log (redacted)
-                                                        + return response
+
+**Point your application at the proxy instead of the HSM.** Run it through a representative set of transactions — enough to exercise every command path you care about.
+
+**Stop the proxy.** Open `discovery.jsonl`. It contains one JSON record per unique command code your application sent:
+
+```json
+{"ts":1715688000,"vendor":"futurex_excrypt","cmd":"TPIN","params":{"AW":"3","AK":"1234567890","AX":"[REDACTED]","BT":"[REDACTED]","AL":"[REDACTED]"}}
+{"ts":1715688001,"vendor":"futurex_excrypt","cmd":"GKEY","params":{"BC":"01","AK":"9876543210"}}
 ```
 
-Commands with registered handlers are translated to APC. Commands without a handler either return an unsupported error or — when discovery mode is enabled — are forwarded transparently to a real HSM while the proxy logs the command code and non-sensitive parameters. Discovery mode is a temporary migration tool: run it between your application and a real HSM to observe what commands are actually being sent before you write handlers for them. Once handlers exist, discovery mode can be disabled.
+Sensitive parameters — key blocks (`AX`, `BT`) and PIN blocks (`AL`) — are always redacted. Parameter names are preserved so you know what the command uses.
 
-The `key_mappings` table in `proxy.yaml` maps whatever key identifiers your application sends — a 32-char LMK-encrypted blob, a TR-31 key block value, a label — to the APC key ARN or alias. Key references that already look like ARNs or `alias/` names pass through unchanged.
+**Feed `discovery.jsonl` to the [AWS Payment Cryptography Claude Agent](https://github.com/J8k3/aws-payment-cryptography-claude-agent-template).** Call `hsm_analyze_discovery_log` with the file contents. The tool returns: which commands already have handlers in this repo, which need to be written, the APC operation and key type for each, and the exact file path and handler structure to implement. Claude writes the Rust handler code for each command you need.
 
-Sensitive parameters are never written to logs. In discovery mode, Futurex `AX` (inbound key block), `BT` (outbound key block), and `AL` (PIN block) parameters are replaced with `[REDACTED]`. Thales payloads log only command code and payload length.
+### Phase 2 — Translation
+
+Once handlers are written and registered, disable discovery mode and run the proxy in production configuration:
+
+```yaml
+vendor: futurex_excrypt
+aws:
+  region: us-east-1
+listen:
+  host: 0.0.0.0
+  port: 1500
+  # tls:              — add for production; see TLS section below
+  #   cert_file: ...
+  #   key_file:  ...
+key_mappings:
+  ZPK_INBOUND:  arn:aws:payment-cryptography:us-east-1:123456789012:key/abc123
+  ZPK_OUTBOUND: alias/zpk-outbound
+  BDK_TERMINAL: arn:aws:payment-cryptography:us-east-1:123456789012:key/ghi789
+```
+
+Commands with registered handlers are translated to APC. Commands without a handler return error 68 (unsupported). The `key_mappings` table resolves whatever key identifiers your application sends — LMK-encrypted blobs, TR-31 key block values, labels — to the APC key ARN or alias before making the API call.
 
 ---
 
 ## Supported Protocols
 
-**Thales payShield** (`thales_payshield`) — 2-byte command code framing. Implemented handlers: CA/CC/CI/G0 (PIN translate), C2/C4/M6/M8 (MAC generate/verify), CW/CY (CVV generate/verify), B2 (diagnostics).
+**Thales payShield** (`thales_payshield`) — 2-byte length prefix + 2-byte command code framing. Implemented handlers: CA/CC/CI/G0 (PIN translate), C2/C4/M6/M8 (MAC generate/verify), CW/CY (CVV generate/verify), B2 (diagnostics).
 
-**Futurex Excrypt** (`futurex_excrypt`) — `[AOCCCC;param;param;]` framing. Implemented handlers: TPIN (PIN translate).
+**Futurex Excrypt** (`futurex_excrypt`) — `[AOCCCC;param;param;]` bracket-delimited framing. Implemented handlers: TPIN (PIN translate).
 
-Coverage is narrow by design. Each handler maps one HSM command to one APC data plane call. The handler registry is the extension point — add a file under `src/handlers/<vendor>/`, register it in `src/handlers/mod.rs`, and the proxy routes that command code to it.
-
----
-
-## Known Risks Before You Deploy
-
-**TLS compatibility** — The proxy uses rustls 0.23, which requires TLS 1.2 minimum. Older HSM client SDKs compiled against old OpenSSL versions may only offer TLS 1.0 or 1.1, or cipher suites rustls doesn't support. If your application fails the TLS handshake, this is the likely cause. Start without TLS (`tls:` block omitted) to rule it out.
-
-**Latency** — Hardware HSMs respond in under a millisecond. APC API calls are network round-trips — typically 20–100ms depending on region and load. Applications with tight socket timeouts will time out. Check your application's HSM connection timeout before assuming the proxy is broken.
-
-**Thales length field** — The 2-byte length prefix in the payShield framing may or may not include the header bytes depending on the host API version your application was written against. If commands parse incorrectly, this is the first thing to check in `src/protocol/thales.rs`.
-
-**Session state** — The proxy is stateless per command. HSM integrations that rely on keyed sessions or sequence numbers across multiple commands will not work without extending the server to track connection state.
-
-**Key map gaps** — Every key reference your application sends must have an entry in `key_mappings`. Missing entries cause handler failures. Discovery mode against a real HSM is the reliable way to enumerate what key references your application actually uses.
+Coverage is intentionally narrow. Each handler maps one HSM command to one APC data plane call. The handler registry is the extension point — add a file under `src/handlers/<vendor>/`, register it in `src/handlers/mod.rs`, and the proxy routes that command to it.
 
 ---
 
-## Configuration
+## TLS
+
+HSM connections in production use TLS, often mTLS. Configure it under the `listen:` block:
 
 ```yaml
 listen:
   host: 0.0.0.0
   port: 1500
-  # tls:
-  #   cert_file: /etc/apc-proxy/server.crt
-  #   key_file:  /etc/apc-proxy/server.key
-  #   ca_file:   /etc/apc-proxy/client-ca.crt  # present = require mTLS
-
-vendor: thales_payshield   # thales_payshield | futurex_excrypt
-
-aws:
-  region: us-east-1
-  # profile: apc-proxy     # omit to use default chain: IAM role → env → instance metadata
-
-# discover:
-#   enabled: true
-#   hsm_host: 192.168.1.10
-#   hsm_port: 1500
-
-key_mappings:
-  ZPK_INBOUND:  arn:aws:payment-cryptography:us-east-1:123456789012:key/abc123
-  ZPK_OUTBOUND: alias/zpk-outbound
+  tls:
+    cert_file: /etc/apc-proxy/server.crt
+    key_file:  /etc/apc-proxy/server.key
+    ca_file:   /etc/apc-proxy/client-ca.crt   # present = require client cert (mTLS)
 ```
 
-**FIPS** — swap the `ring` feature for `aws-lc-rs` in `Cargo.toml` and recompile. No code changes needed.
+Omit `tls:` for plaintext. Acceptable for local development; not for production. For FIPS-compliant TLS, swap the `ring` feature for `aws-lc-rs` in `Cargo.toml` and recompile — no code changes needed.
 
 ---
 
@@ -104,34 +108,34 @@ cargo build --release
 ./target/release/apc-proxy --config proxy.yaml
 ```
 
-AWS credentials are consumed via the standard AWS SDK chain: IAM role, environment variables, `~/.aws/credentials`. Set `aws.profile` in `proxy.yaml` to use a named profile.
+AWS credentials via the standard chain: IAM role, environment variables, `~/.aws/credentials`. Set `aws.profile` in `proxy.yaml` to use a named profile.
 
 ---
 
 ## Adding a Handler
 
-1. Create `src/handlers/<vendor>/<command>.rs`. Implement the `Handler` trait — `handle()` receives the parsed command code and payload bytes, returns a `HandlerResult`.
-2. Add the file to `src/handlers/<vendor>/mod.rs`.
+1. Create `src/handlers/<vendor>/<command>.rs`. Implement the `Handler` trait — `handle()` receives the command code and payload bytes, returns `HandlerResult`.
+2. Add the module to `src/handlers/<vendor>/mod.rs`.
 3. Register an instance in `Registry::build()` in `src/handlers/mod.rs`.
 
-The Futurex `parse_params()` helper in `src/protocol/futurex.rs` splits Excrypt payloads into a `HashMap<[u8; 2], Vec<u8>>` keyed by 2-char parameter code. Wrap sensitive fields in `Zeroizing<Vec<u8>>` so they are wiped from memory on drop.
+The Futurex `parse_params()` helper (`src/protocol/futurex.rs`) splits Excrypt payloads into a `HashMap<[u8; 2], Vec<u8>>` keyed by 2-char parameter code. Wrap sensitive fields (key blocks, PIN blocks) in `Zeroizing<Vec<u8>>` so they are wiped from memory on drop. Look at `src/handlers/futurex/tpin.rs` as the reference implementation.
 
 ---
 
-## Discovery Log → Handler Generation
+## Known Risks
 
-The proxy's discovery mode and the [AWS Payment Cryptography Claude Agent](https://github.com/J8k3/aws-payment-cryptography-claude-agent-template) are designed to work together. The workflow:
+**TLS cipher compatibility** — The proxy requires TLS 1.2 minimum (rustls 0.23). Older HSM client SDKs built against old OpenSSL may only offer TLS 1.0/1.1 or unsupported cipher suites. If the TLS handshake fails, omit the `tls:` block first to rule this out, then investigate the client's TLS version and cipher support.
 
-1. Run the proxy in discovery mode with `log_file: discovery.jsonl`. Each unique command your application sends is written once as a JSON record — command code, vendor, parameter names (sensitive values redacted).
+**APC latency** — Hardware HSMs respond in under a millisecond. APC API calls are network round-trips — typically 20–100ms. Applications with tight socket timeouts will time out. Check the application's HSM connection timeout before assuming the proxy is broken.
 
-2. Open `discovery.jsonl` in Claude Code alongside the agent MCP server. Call `hsm_analyze_discovery_log` with the file contents. The tool looks up each command in the HSM registry, maps it to the APC operation and key type, reports which commands already have proxy handlers, and generates `next_steps` for each command that needs one.
+**Thales length field variants** — The 2-byte length prefix may or may not include the header bytes depending on which payShield host API version the application was built against. If commands parse incorrectly, check the length calculation in `src/protocol/thales.rs`.
 
-3. Claude writes the Rust handler file for each needed command, modeled on the existing handlers in `src/handlers/<vendor>/`. The `next_steps` output tells you exactly where to put each file and what APC operation to call.
+**Session state** — The proxy is stateless per command. HSM integrations that rely on keyed sessions or sequence numbers across multiple commands will not work without extending the server to track connection state.
 
-The discovery log is the handoff point between the proxy and the agent. It's intentionally small — one record per unique command, not one per transaction — so it fits cleanly as source context in a Claude Code session.
+**Key map completeness** — Every key reference the application sends must appear in `key_mappings`. Discovery mode against a real HSM is the reliable way to enumerate them — look for parameter codes that carry key material (`AX`, `BT` in Futurex; the key field in Thales commands) and make sure each value has a mapping.
 
 ---
 
 ## Contributing
 
-If you have access to a Thales payShield or Futurex KMES and can test this against a real application, that is the most valuable contribution you can make. Protocol edge cases, TLS compatibility issues, latency behavior under load, and handler correctness against real hardware are all things that cannot be validated without the equipment. Open an issue with what you found, or a PR with the fix.
+If you have access to a Thales payShield or Futurex KMES and can test this against a real application, that is the most valuable contribution possible. Protocol edge cases, TLS compatibility, latency behavior, and handler correctness against real hardware can't be validated without the equipment. Open an issue with what you found or a PR with the fix.
