@@ -4,6 +4,10 @@ A Rust TCP proxy that sits between HSM-dependent payment applications and [AWS P
 
 **If you are refactoring the application, use the APC SDK directly.** That is the better path: lower latency, simpler deployment, no protocol translation layer. This proxy exists for the case where refactoring is not on the table — the application is a black box, a third-party system, or the migration budget doesn't cover application changes. In that case, the proxy lets you move key management and cryptographic operations to APC while leaving the application untouched.
 
+I spent years working on AWS Payment Cryptography. The question of how existing HSM-dependent applications could move to APC without a rewrite came up constantly. It was never something I could build while working on the service. This is that tool.
+
+APC removes the hardware dependency, the key ceremony overhead, and the operational burden of running physical HSMs. Customers on Thales, Futurex, or Atalla who want those benefits — API-based cryptography as a service, managed key storage, no hardware to rack — now have a path that doesn't require touching application code. That lift-and-shift path is what this proxy is for.
+
 ---
 
 ## Status
