@@ -1,6 +1,7 @@
-# apc-hsm-proxy
+# AWS Payment Cryptography HSM Proxy
 
-**GitHub:** [github.com/J8k3/aws-payment-cryptography-hsm-proxy](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy)
+[![CI](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 A Rust TCP proxy that sits between HSM-dependent payment applications and [AWS Payment Cryptography (APC)](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/what-is.html). It speaks the wire protocol your application already sends — Thales payShield 10K host commands or Futurex Excrypt Enterprise SSP v.2 — and translates them to APC API calls on the outbound side, without changing the application.
 
@@ -81,9 +82,9 @@ Commands with registered handlers are translated to APC. Commands without a hand
 
 ## Supported Protocols
 
-**Thales payShield 10K** (`thales_payshield`) — 2-byte length prefix + 2-byte command code framing. Implemented handlers: CA/CC/CI/G0 (PIN translate), C2/C4/M6/M8 (MAC generate/verify), CW/CY (CVV generate/verify), B2 (diagnostics).
+**Thales payShield 10K** (`thales_payshield`) — 2-byte length prefix + 2-byte command code framing. Implemented handlers: CA/CC/CI/G0 (PIN translate), C2/C4/M6/M8 (MAC generate/verify), CW/CY (CVV generate/verify), B2 (echo/heartbeat).
 
-**Futurex Excrypt Enterprise SSP v.2** (`futurex_excrypt`) — `[AOCCCC;param;param;]` bracket-delimited framing. Implemented handlers: TPIN (PIN translate).
+**Futurex Excrypt Enterprise SSP v.2** (`futurex_excrypt`) — `[AOCCCC;param;param;]` bracket-delimited framing. Implemented handlers: ECHO (connectivity heartbeat), TPIN (PIN translate).
 
 **Atalla/NCR Payments** — Not currently supported. The companion [AWS Payment Cryptography MCP](https://github.com/J8k3/aws-payment-cryptography-mcp) includes Atalla command mappings at directory quality (command names and APC equivalents; no parameter detail), but no protocol framing or handlers exist in this proxy. If you have access to Atalla hardware and documentation and want to contribute, the handler registry is the extension point.
 
@@ -141,6 +142,8 @@ The Futurex `parse_params()` helper (`src/protocol/futurex.rs`) splits Excrypt p
 **Discovery passthrough is single-chunk** — In discovery mode, the proxy opens a fresh TCP connection per forwarded command and reads exactly one response chunk. Stateful protocols, multi-read responses, and commands that require connection continuity will not work correctly in discovery mode. For complex command sequences, capture them with a network sniffer instead.
 
 **PAN representation in PIN translation** — Thales CA/CC commands supply 12 digits (the rightmost digits of the PAN excluding the check digit). Futurex TPIN supplies the same via the `AK` parameter. The proxy passes this 12-digit value as `primary_account_number` to APC `TranslatePinData`. This matches the field APC uses internally to reconstruct the ISO PIN block, but it has not been verified against a live APC endpoint with real traffic. If PIN translation returns an error related to the PAN value, check whether your APC configuration expects the full PAN instead.
+
+**Futurex error codes** — When the proxy returns an error on a Futurex connection (key not found, malformed payload, APC failure), the `BB` status field carries a payShield-style error code (10, 15, 23, 41) rather than a Futurex-native code. These values are not defined in the Futurex Excrypt protocol. Most applications treat any non-`Y` status as failure and log the raw value, so this usually does not cause incorrect behavior — but an application that pattern-matches on specific `BB` codes will not recognize them as expected Futurex error codes.
 
 **Session state** — The proxy is stateless per command. HSM integrations that rely on keyed sessions or sequence numbers across multiple commands will not work without extending the server to track connection state.
 

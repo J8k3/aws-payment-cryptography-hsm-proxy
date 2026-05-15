@@ -8,10 +8,6 @@ pub enum ProxyError {
     #[error("malformed command payload: {0}")]
     MalformedPayload(String),
 
-    #[allow(dead_code)]
-    #[error("command not supported by proxy: {0}")]
-    UnsupportedCommand(String),
-
     #[error("APC API error: {0}")]
     ApcError(String),
 
@@ -33,7 +29,6 @@ impl ProxyError {
         match self {
             ProxyError::KeyNotFound(_) => b"10",
             ProxyError::MalformedPayload(_) => b"15",
-            ProxyError::UnsupportedCommand(_) => b"68",
             ProxyError::ApcError(_) => b"41",
             ProxyError::UnsupportedPinFormat(_) => b"23",
             ProxyError::UnsupportedMacMode(_) => b"15",

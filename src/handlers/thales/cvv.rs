@@ -169,6 +169,12 @@ async fn handle_cy(body: &[u8], state: &Arc<AppState>) -> HandlerResult {
             .build()
             .map(CardVerificationAttributes::CardVerificationValue2)
             .map_err(|e| ProxyError::ApcError(e.to_string())),
+        b'2' => CardVerificationValue1::builder()
+            .card_expiry_date(&expiry)
+            .service_code("999")
+            .build()
+            .map(CardVerificationAttributes::CardVerificationValue1)
+            .map_err(|e| ProxyError::ApcError(e.to_string())),
         other => Err(ProxyError::MalformedPayload(format!("unknown CY mode: {}", other as char))),
     };
     let attrs = match attrs_result {

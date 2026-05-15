@@ -80,7 +80,9 @@ fn format_code_to_apc(code: &[u8]) -> Result<String, ProxyError> {
     match code {
         b"00" => Ok("IsoFormat0".to_string()),
         b"01" => Ok("IsoFormat1".to_string()),
-        b"02" => Ok("IsoFormat2".to_string()),
+        // ISO Format 2 uses random padding and is not a network PIN block format;
+        // APC does not support it for translation.
+        b"02" => Err(ProxyError::UnsupportedPinFormat("02 (ISO Format 2 not supported by APC)".to_string())),
         b"03" => Ok("IsoFormat3".to_string()),
         b"04" => Ok("IsoFormat4".to_string()),
         other => Err(ProxyError::UnsupportedPinFormat(
