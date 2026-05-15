@@ -142,6 +142,14 @@ The Futurex `parse_params()` helper (`src/protocol/futurex.rs`) splits Excrypt p
 
 ---
 
+## Development Note
+
+This project was built with AI-assisted development. AI was used to accelerate implementation, testing, documentation, and research synthesis. Architecture, scope, source selection, review, and final publish decisions were made by the author.
+
+The protocol parsers are derived from specification and reference documentation rather than live traffic capture. Known gaps and uncertainties are documented explicitly in the [Known Risks](#known-risks) section and in inline code comments. If you have access to real HSM hardware and can validate behavior against it, that is the most valuable contribution possible — see Contributing below.
+
+---
+
 ## Contributing
 
 If you have access to a Thales payShield 10K or Futurex Excrypt Enterprise SSP v.2 and can test this against a real application, that is the most valuable contribution possible. Protocol edge cases, TLS compatibility, latency behavior, and handler correctness against real hardware can't be validated without the equipment. Open an issue with what you found or a PR with the fix.
