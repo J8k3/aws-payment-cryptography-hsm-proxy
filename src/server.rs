@@ -173,13 +173,22 @@ pub async fn run(cfg: ProxyConfig) -> Result<()> {
     }
 }
 
+fn default_crypto_provider() -> std::sync::Arc<rustls::crypto::CryptoProvider> {
+    #[cfg(feature = "ring")]
+    return std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    #[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
+    return std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    #[cfg(not(any(feature = "ring", feature = "aws-lc-rs")))]
+    compile_error!("one of features 'ring' or 'aws-lc-rs' must be enabled");
+}
+
 fn build_tls_config(tls: &TlsConfig) -> Result<rustls::ServerConfig> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use rustls_pemfile::{certs, private_key};
     use std::fs::File;
     use std::io::BufReader;
 
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = default_crypto_provider();
 
     let cert_chain: Vec<CertificateDer<'static>> =
         certs(&mut BufReader::new(File::open(&tls.cert_file).map_err(|e| {

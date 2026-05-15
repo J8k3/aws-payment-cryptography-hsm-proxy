@@ -157,23 +157,23 @@ async fn handle_cy(body: &[u8], state: &Arc<AppState>) -> HandlerResult {
         CardVerificationAttributes, CardVerificationValue1, CardVerificationValue2,
     };
 
-    let attrs: CardVerificationAttributes = match mode {
-        b'0' => CardVerificationAttributes::CardVerificationValue1(
-            CardVerificationValue1::builder()
-                .card_expiry_date(&expiry)
-                .service_code(&service_code)
-                .build()
-                .unwrap(),
-        ),
-        b'1' => CardVerificationAttributes::CardVerificationValue2(
-            CardVerificationValue2::builder()
-                .card_expiry_date(&expiry)
-                .build()
-                .unwrap(),
-        ),
-        other => return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(
-            format!("unknown CY mode: {}", other as char)
-        )),
+    let attrs_result: Result<CardVerificationAttributes, ProxyError> = match mode {
+        b'0' => CardVerificationValue1::builder()
+            .card_expiry_date(&expiry)
+            .service_code(&service_code)
+            .build()
+            .map(CardVerificationAttributes::CardVerificationValue1)
+            .map_err(|e| ProxyError::ApcError(e.to_string())),
+        b'1' => CardVerificationValue2::builder()
+            .card_expiry_date(&expiry)
+            .build()
+            .map(CardVerificationAttributes::CardVerificationValue2)
+            .map_err(|e| ProxyError::ApcError(e.to_string())),
+        other => Err(ProxyError::MalformedPayload(format!("unknown CY mode: {}", other as char))),
+    };
+    let attrs = match attrs_result {
+        Ok(a) => a,
+        Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
     match state

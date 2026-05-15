@@ -15,6 +15,7 @@ listen:
   #     ca_file:   /etc/apc-proxy/client-ca.crt
   #
   # FIPS: swap the `ring` feature for `aws-lc-rs` in Cargo.toml and recompile.
+  #        The crypto provider is selected at compile time — no other code changes needed.
 
 # Protocol variant: thales_payshield | futurex_excrypt
 vendor: thales_payshield

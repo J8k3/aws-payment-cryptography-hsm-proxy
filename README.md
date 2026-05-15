@@ -24,7 +24,9 @@ There are two phases: **discovery** and **translation**.
 
 ### Phase 1 — Discovery
 
-Run the proxy in passthrough mode between your application and the real HSM. The proxy forwards all commands transparently while logging what it sees. The goal is to build a complete map of which commands your application actually uses before writing a single handler.
+Run the proxy in passthrough mode between your application and the real HSM. The proxy forwards unhandled commands to the real HSM and returns the response, logging what it sees. The goal is to build a complete map of which commands your application actually uses before writing a single handler.
+
+**Passthrough limitations:** The proxy opens a fresh TCP connection per forwarded command and reads a single response chunk. This is sufficient for stateless single-exchange commands but will not work correctly for multi-read responses or applications that rely on persistent connection state to the HSM. See [Known Risks](#known-risks) for details.
 
 **Configure `proxy.yaml`:**
 ```yaml
@@ -45,7 +47,7 @@ discover:
 {"ts":1715688001,"vendor":"futurex_excrypt","cmd":"GKEY","params":{"BC":"01","AK":"9876543210"}}
 ```
 
-Sensitive parameters — key blocks (`AX`, `BT`) and PIN blocks (`AL`) — are always redacted. Parameter names are preserved so you know what the command uses.
+For Futurex commands, parameters are parsed and logged by name. Key blocks (`AX`, `BT`) and PIN blocks (`AL`) are replaced with `[REDACTED]`; all other parameter names and values are preserved. For Thales commands, only the command code and payload length are logged — Thales payloads are positional and command-specific, so field-level parsing is not attempted in discovery mode.
 
 **Feed `discovery.jsonl` to the [AWS Payment Cryptography MCP](https://github.com/J8k3/aws-payment-cryptography-mcp).** Call `hsm_analyze_discovery_log` with the file contents. The tool returns: which commands already have handlers in this repo, which need to be written, the APC operation and key type for each, and the exact file path and handler structure to implement. Claude writes the Rust handler code for each command you need.
 
@@ -97,7 +99,7 @@ listen:
     ca_file:   /etc/apc-proxy/client-ca.crt   # present = require client cert (mTLS)
 ```
 
-Omit `tls:` for plaintext. Acceptable for local development; not for production. For FIPS-compliant TLS, swap the `ring` feature for `aws-lc-rs` in `Cargo.toml` and recompile — no code changes needed.
+Omit `tls:` for plaintext. Acceptable for local development; not for production. For FIPS-compliant TLS, swap the `ring` feature for `aws-lc-rs` in `Cargo.toml` and recompile — no other code changes needed. The crypto provider is selected at compile time via the feature flag.
 
 ---
 
@@ -129,6 +131,10 @@ The Futurex `parse_params()` helper (`src/protocol/futurex.rs`) splits Excrypt p
 **APC latency** — Hardware HSMs respond in under a millisecond. APC API calls are network round-trips — typically 20–100ms. Applications with tight socket timeouts will time out. Check the application's HSM connection timeout before assuming the proxy is broken.
 
 **Thales length field variants** — The 2-byte length prefix may or may not include the header bytes depending on which payShield host API version the application was built against. If commands parse incorrectly, check the length calculation in `src/protocol/thales.rs`.
+
+**Discovery passthrough is single-chunk** — In discovery mode, the proxy opens a fresh TCP connection per forwarded command and reads exactly one response chunk. Stateful protocols, multi-read responses, and commands that require connection continuity will not work correctly in discovery mode. For complex command sequences, capture them with a network sniffer instead.
+
+**PAN representation in PIN translation** — Thales CA/CC commands supply 12 digits (the rightmost digits of the PAN excluding the check digit). Futurex TPIN supplies the same via the `AK` parameter. The proxy passes this 12-digit value as `primary_account_number` to APC `TranslatePinData`. This matches the field APC uses internally to reconstruct the ISO PIN block, but it has not been verified against a live APC endpoint with real traffic. If PIN translation returns an error related to the PAN value, check whether your APC configuration expects the full PAN instead.
 
 **Session state** — The proxy is stateless per command. HSM integrations that rely on keyed sessions or sequence numbers across multiple commands will not work without extending the server to track connection state.
 

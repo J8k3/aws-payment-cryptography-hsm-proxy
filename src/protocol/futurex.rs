@@ -139,3 +139,75 @@ pub fn redact_for_log(params: &std::collections::HashMap<[u8; 2], Vec<u8>>) -> S
     parts.sort();
     parts.join(";")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::Protocol;
+
+    #[test]
+    fn parse_valid_tpin_frame() {
+        let input = b"[AOTPIN;AW1;AK561237487695;BBY;]";
+        let cmd = FuturexExcrypt.parse(input).expect("should parse");
+        assert_eq!(&cmd.command_code, b"TPIN");
+        assert_eq!(cmd.frame_len, input.len());
+    }
+
+    #[test]
+    fn parse_returns_none_for_incomplete_frame() {
+        assert!(FuturexExcrypt.parse(b"[AOTPIN;AW1").is_none());
+    }
+
+    #[test]
+    fn parse_returns_none_for_missing_ao_prefix() {
+        assert!(FuturexExcrypt.parse(b"[XXTPIN;AW1;]").is_none());
+    }
+
+    #[test]
+    fn parse_params_splits_semicolon_delimited() {
+        let payload = b"AW1;AK561237487695;BBY;";
+        let params = parse_params(payload);
+        assert_eq!(params.get(b"AW"), Some(&b"1".to_vec()));
+        assert_eq!(params.get(b"AK"), Some(&b"561237487695".to_vec()));
+    }
+
+    #[test]
+    fn parse_params_ignores_short_tokens() {
+        let payload = b"AW1;;X;";
+        let params = parse_params(payload);
+        assert!(params.get(b"AW").is_some());
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn redaction_masks_ax_bt_al() {
+        let mut params = std::collections::HashMap::new();
+        params.insert(*b"AW", b"1".to_vec());
+        params.insert(*b"AX", b"supersecretkey".to_vec());
+        params.insert(*b"BT", b"anothersecretkey".to_vec());
+        params.insert(*b"AL", b"secretpinblock".to_vec());
+        params.insert(*b"AK", b"561237487695".to_vec());
+        let redacted = params_redacted_map(&params);
+        assert_eq!(redacted["AX"], "[REDACTED]");
+        assert_eq!(redacted["BT"], "[REDACTED]");
+        assert_eq!(redacted["AL"], "[REDACTED]");
+        assert_eq!(redacted["AW"], "1");
+        assert_eq!(redacted["AK"], "561237487695");
+    }
+
+    #[test]
+    fn frame_response_produces_bracket_delimited_output() {
+        let out = FuturexExcrypt.frame_response([0, 0], b"TPIN", b"00", b"AL<pin>;");
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.starts_with("[AOTPIN;"));
+        assert!(s.ends_with(']'));
+        assert!(s.contains("BBY;")); // "00" maps to "Y"
+    }
+
+    #[test]
+    fn frame_response_error_code_passthrough() {
+        let out = FuturexExcrypt.frame_response([0, 0], b"TPIN", b"68", b"");
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("BB68;"));
+    }
+}

@@ -145,12 +145,15 @@ impl Handler for PinHandler {
 
         if let Some(ksn) = &fields.ksn {
             use aws_sdk_paymentcryptographydata::types::DukptDerivationAttributes;
-            req = req.incoming_dukpt_attributes(
-                DukptDerivationAttributes::builder()
-                    .key_serial_number(ksn)
-                    .build()
-                    .unwrap(),
-            );
+            let dukpt_attrs = match DukptDerivationAttributes::builder()
+                .key_serial_number(ksn)
+                .build()
+                .map_err(|e| ProxyError::ApcError(e.to_string()))
+            {
+                Ok(a) => a,
+                Err(e) => return HandlerResult::from_proxy_error(&e),
+            };
+            req = req.incoming_dukpt_attributes(dukpt_attrs);
         }
 
         match req.send().await {

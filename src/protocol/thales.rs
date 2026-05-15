@@ -63,3 +63,76 @@ impl Protocol for ThalesPayShield {
         self.frame_response(header, &rc, error_code, &[])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::Protocol;
+
+    fn make_frame(header: [u8; 2], cmd: &[u8], payload: &[u8]) -> Vec<u8> {
+        let body_len = 2 + cmd.len() + payload.len();
+        let mut out = Vec::new();
+        out.extend_from_slice(&(body_len as u16).to_be_bytes());
+        out.extend_from_slice(&header);
+        out.extend_from_slice(cmd);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[test]
+    fn parse_valid_frame() {
+        let frame = make_frame([0x00, 0x00], b"CA", b"somedata");
+        let cmd = ThalesPayShield.parse(&frame).expect("should parse");
+        assert_eq!(&cmd.command_code, b"CA");
+        assert_eq!(cmd.header, [0x00, 0x00]);
+        assert_eq!(&*cmd.payload, b"somedata");
+        assert_eq!(cmd.frame_len, frame.len());
+    }
+
+    #[test]
+    fn parse_returns_none_for_short_input() {
+        assert!(ThalesPayShield.parse(b"\x00\x04\x00\x00").is_none()); // claims 4 bytes body but only 2 follow
+    }
+
+    #[test]
+    fn parse_returns_none_for_empty() {
+        assert!(ThalesPayShield.parse(b"").is_none());
+    }
+
+    #[test]
+    fn response_code_increments_second_byte() {
+        assert_eq!(ThalesPayShield.response_code(b"CA"), b"CB");
+        assert_eq!(ThalesPayShield.response_code(b"M6"), b"M7");
+        assert_eq!(ThalesPayShield.response_code(b"G0"), b"G1");
+    }
+
+    #[test]
+    fn frame_response_length_prefix_matches_body() {
+        let out = ThalesPayShield.frame_response([0x00, 0x00], b"CB", b"00", b"payload");
+        let body_len = u16::from_be_bytes([out[0], out[1]]) as usize;
+        assert_eq!(body_len, out.len() - 2);
+    }
+
+    #[test]
+    fn frame_response_round_trip() {
+        let header = [0x61, 0x62];
+        let response_code = b"CB";
+        let error_code = b"00";
+        let payload = b"someresponsedata";
+        let out = ThalesPayShield.frame_response(header, response_code, error_code, payload);
+        // Parse it back
+        let parsed = ThalesPayShield.parse(&out).expect("framed output should be parseable");
+        assert_eq!(parsed.header, header);
+        // response code + error code + payload is the parsed payload
+        assert!(out.len() > 2);
+    }
+
+    #[test]
+    fn frame_error_produces_no_payload() {
+        let out = ThalesPayShield.frame_error([0x00, 0x00], b"CA", b"68");
+        let parsed = ThalesPayShield.parse(&out).expect("error frame should parse");
+        // payload should be just error code (2 bytes) since frame_error passes empty payload
+        // header(2) + response_code(2) + error_code(2) = 6 bytes body
+        assert_eq!(&*parsed.payload, b"68");
+    }
+}
