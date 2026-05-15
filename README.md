@@ -1,6 +1,8 @@
 # AWS Payment Cryptography HSM Proxy
 
 [![CI](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/actions/workflows/ci.yml)
+[![Release](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/actions/workflows/release.yml/badge.svg)](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/actions/workflows/release.yml)
+[![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 A Rust TCP proxy that sits between HSM-dependent payment applications and [AWS Payment Cryptography (APC)](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/what-is.html). It speaks the wire protocol your application already sends — Thales payShield 10K host commands or Futurex Excrypt Enterprise SSP v.2 — and translates them to APC API calls on the outbound side, without changing the application.
