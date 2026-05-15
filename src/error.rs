@@ -8,6 +8,7 @@ pub enum ProxyError {
     #[error("malformed command payload: {0}")]
     MalformedPayload(String),
 
+    #[allow(dead_code)]
     #[error("command not supported by proxy: {0}")]
     UnsupportedCommand(String),
 

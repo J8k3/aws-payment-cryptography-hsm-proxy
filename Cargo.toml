@@ -16,7 +16,6 @@ aws-lc-rs = ["rustls/aws-lc-rs", "tokio-rustls/aws-lc-rs"]
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-paymentcryptography = "1"
 aws-sdk-paymentcryptographydata = "1"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"

@@ -10,6 +10,8 @@ I spent years working on AWS Payment Cryptography. The question of how existing 
 
 APC removes the hardware dependency, the key ceremony overhead, and the operational burden of running physical HSMs. Customers on Thales, Futurex, or Atalla who want those benefits — API-based cryptography as a service, managed key storage, no hardware to rack — now have a path that doesn't require touching application code. That lift-and-shift path is what this proxy is for.
 
+**Compliance boundary:** This proxy operates inside your existing PCI compliance boundary. You are responsible for reviewing its behavior as part of your security and compliance process — validating handler implementations, key mapping correctness, and protocol fidelity against your specific application before deploying in a production cardholder data environment. If you take this through a formal compliance assessment, sharing what you found — gaps, confirmations, compensating controls — via a GitHub issue or PR helps others on the same path.
+
 ---
 
 ## Status
@@ -49,7 +51,7 @@ discover:
 
 For Futurex commands, parameters are parsed and logged by name. Key blocks (`AX`, `BT`) and PIN blocks (`AL`) are replaced with `[REDACTED]`; all other parameter names and values are preserved. For Thales commands, only the command code and payload length are logged — Thales payloads are positional and command-specific, so field-level parsing is not attempted in discovery mode.
 
-**Feed `discovery.jsonl` to the [AWS Payment Cryptography MCP](https://github.com/J8k3/aws-payment-cryptography-mcp).** Call `hsm_analyze_discovery_log` with the file contents. The tool returns: which commands already have handlers in this repo, which need to be written, the APC operation and key type for each, and the exact file path and handler structure to implement. Claude writes the Rust handler code for each command you need.
+**Feed `discovery.jsonl` to the [AWS Payment Cryptography MCP](https://github.com/J8k3/aws-payment-cryptography-mcp).** Call `hsm_analyze_discovery_log` with the file contents. The tool returns: which commands already have handlers in this repo, which need to be written, the APC operation and key type for each, and the exact file path and handler structure to implement. The AI writes the Rust handler code for each command you need.
 
 ### Phase 2 — Translation
 
@@ -81,7 +83,9 @@ Commands with registered handlers are translated to APC. Commands without a hand
 
 **Futurex Excrypt Enterprise SSP v.2** (`futurex_excrypt`) — `[AOCCCC;param;param;]` bracket-delimited framing. Implemented handlers: TPIN (PIN translate).
 
-Coverage is intentionally narrow. Each handler maps one HSM command to one APC data plane call. The handler registry is the extension point — add a file under `src/handlers/<vendor>/`, register it in `src/handlers/mod.rs`, and the proxy routes that command to it.
+**Atalla/NCR Payments** — Not currently supported. The companion [AWS Payment Cryptography MCP](https://github.com/J8k3/aws-payment-cryptography-mcp) includes Atalla command mappings at directory quality (command names and APC equivalents; no parameter detail), but no protocol framing or handlers exist in this proxy. If you have access to Atalla hardware and documentation and want to contribute, the handler registry is the extension point.
+
+Coverage is otherwise intentionally narrow. Each handler maps one HSM command to one APC data plane call. The handler registry is the extension point — add a file under `src/handlers/<vendor>/`, register it in `src/handlers/mod.rs`, and the proxy routes that command to it.
 
 ---
 

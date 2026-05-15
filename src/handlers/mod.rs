@@ -13,7 +13,6 @@ use crate::key_map::KeyMap;
 /// Shared application state cloned into every connection task.
 pub struct AppState {
     pub key_map: KeyMap,
-    pub control: aws_sdk_paymentcryptography::Client,
     pub data: aws_sdk_paymentcryptographydata::Client,
 }
 

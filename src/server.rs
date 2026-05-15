@@ -13,7 +13,7 @@ use crate::key_map::KeyMap;
 use crate::protocol::{futurex::FuturexExcrypt, thales::ThalesPayShield, Protocol};
 
 /// Writes a structured NDJSON discovery log. Each unique command code is written once,
-/// so the file stays small and is immediately usable as context for Claude Code.
+/// so the file stays small and is immediately usable as context in an AI coding session.
 struct DiscoveryLog {
     writer: Mutex<BufWriter<File>>,
     seen: Mutex<HashSet<String>>,
@@ -89,7 +89,6 @@ pub async fn run(cfg: ProxyConfig) -> Result<()> {
 
     let state = Arc::new(AppState {
         key_map: KeyMap::new(cfg.key_mappings.clone()),
-        control: aws_sdk_paymentcryptography::Client::new(&aws_cfg),
         data: aws_sdk_paymentcryptographydata::Client::new(&aws_cfg),
     });
 
