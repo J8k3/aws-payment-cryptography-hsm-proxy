@@ -6,7 +6,7 @@ use super::{ParsedCommand, Protocol};
 /// Request wire format:
 ///   [2B big-endian length][2B header][2B command code][variable payload]
 ///
-/// Length field convention (PUGD0538-002 standard): counts every byte after the length field
+/// Length field convention (standard payShield 10K framing): counts every byte after the length field
 /// itself — header (2) + command code (2) + payload. An older variant counts only the payload.
 /// If traffic from your payShield parses incorrectly, compare the frame_len calculation here
 /// against the length field definition in your Host Programmer's Guide.
