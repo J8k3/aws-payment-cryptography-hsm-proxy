@@ -5,7 +5,11 @@ use super::{ParsedCommand, Protocol};
 ///
 /// Request wire format:
 ///   [2B big-endian length][2B header][2B command code][variable payload]
-///   The length field counts every byte that follows it (header + command + payload).
+///
+/// Length field convention (PUGD0538-002 standard): counts every byte after the length field
+/// itself — header (2) + command code (2) + payload. An older variant counts only the payload.
+/// If traffic from your payShield parses incorrectly, compare the frame_len calculation here
+/// against the length field definition in your Host Programmer's Guide.
 ///
 /// Response wire format:
 ///   [2B big-endian length][2B header][2B response code][2B error code][variable payload]
@@ -142,5 +146,46 @@ mod tests {
         // payload should be just error code (2 bytes) since frame_error passes empty payload
         // header(2) + response_code(2) + error_code(2) = 6 bytes body
         assert_eq!(&*parsed.payload, b"68");
+    }
+
+    // ── property-based tests ──────────────────────────────────────────────────
+
+    proptest::proptest! {
+        #[test]
+        fn arbitrary_bytes_never_panic(data: Vec<u8>) {
+            let _ = ThalesPayShield.parse(&data);
+        }
+
+        #[test]
+        fn partial_frame_returns_none(body_len in 1u16..1024, actual_len in 0usize..4usize) {
+            // Claim a body longer than what we actually provide — must return None
+            let mut data = Vec::new();
+            data.extend_from_slice(&body_len.to_be_bytes());
+            for i in 0..actual_len {
+                data.push(i as u8);
+            }
+            // Only assert None when the provided bytes are shorter than the claimed frame
+            let frame_len = 2 + body_len as usize;
+            if data.len() < frame_len {
+                proptest::prop_assert!(ThalesPayShield.parse(&data).is_none());
+            }
+        }
+
+        #[test]
+        fn valid_frame_parse_frame_len_matches_consumed(payload in proptest::collection::vec(0u8..128, 0..32)) {
+            let frame = make_frame([0x00, 0x01], b"CA", &payload);
+            let cmd = ThalesPayShield.parse(&frame).expect("valid frame should parse");
+            proptest::prop_assert_eq!(cmd.frame_len, frame.len());
+        }
+
+        #[test]
+        fn is_response_complete_consistent_with_length_prefix(payload in proptest::collection::vec(0u8..128, 0..64)) {
+            let frame = make_frame([0x00, 0x00], b"CB", &payload);
+            // A complete frame always reports true; truncations must report false
+            proptest::prop_assert!(ThalesPayShield.is_response_complete(&frame));
+            if frame.len() > 2 {
+                proptest::prop_assert!(!ThalesPayShield.is_response_complete(&frame[..frame.len()-1]));
+            }
+        }
     }
 }

@@ -39,7 +39,7 @@ impl Handler for TpinHandler {
     async fn handle(&self, _command_code: &[u8], payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         let params = parse_params(payload);
 
-        let aw = params.get(b"AW").map(|v| v.first().copied()).flatten().unwrap_or(b'0');
+        let aw = params.get(b"AW").and_then(|v| v.first().copied()).unwrap_or(b'0');
         let format = match format_code_to_apc(aw) {
             Ok(f) => f,
             Err(e) => return HandlerResult::from_proxy_error(&e),

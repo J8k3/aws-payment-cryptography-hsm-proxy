@@ -136,7 +136,7 @@ The Futurex `parse_params()` helper (`src/protocol/futurex.rs`) splits Excrypt p
 
 **APC latency** — Hardware HSMs respond in under a millisecond. APC API calls are network round-trips — typically 20–100ms. Applications with tight socket timeouts will time out. Check the application's HSM connection timeout before assuming the proxy is broken.
 
-**Thales length field variants** — The 2-byte length prefix may or may not include the header bytes depending on which payShield host API version the application was built against. If commands parse incorrectly, check the length calculation in `src/protocol/thales.rs`.
+**Thales length field variant** — The proxy implements the standard payShield 10K framing where the 2-byte big-endian length prefix counts every byte that follows it — header (2 bytes) + command code (2 bytes) + payload. Some older payShield host API versions count only the payload, excluding the header. If commands parse incorrectly or responses are misframed, that is the first place to look: compare the value in `src/protocol/thales.rs` against the length field definition in your payShield Host Programmer's Guide (PUGD0538).
 
 **Discovery passthrough is single-chunk** — In discovery mode, the proxy opens a fresh TCP connection per forwarded command and reads exactly one response chunk. Stateful protocols, multi-read responses, and commands that require connection continuity will not work correctly in discovery mode. For complex command sequences, capture them with a network sniffer instead.
 

@@ -214,4 +214,40 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("BB68;"));
     }
+
+    // ── property-based tests ──────────────────────────────────────────────────
+
+    proptest::proptest! {
+        #[test]
+        fn arbitrary_bytes_never_panic(data: Vec<u8>) {
+            let _ = FuturexExcrypt.parse(&data);
+        }
+
+        #[test]
+        fn partial_frame_returns_none(prefix in 0usize..6usize, data: Vec<u8>) {
+            // A truncated valid frame (missing closing bracket) must return None
+            let mut frame = b"[AOTPIN;AW1;AK123;".to_vec();
+            frame.extend_from_slice(&data[..data.len().min(prefix)]);
+            // As long as there is no ']' the frame is incomplete
+            if !frame.contains(&b']') {
+                assert!(FuturexExcrypt.parse(&frame).is_none());
+            }
+        }
+
+        #[test]
+        fn valid_frame_parse_frame_len_matches_consumed(payload in "[A-Z0-9]{0,20}") {
+            let msg = format!("[AOTPIN;AW1;AK{};]", payload);
+            let bytes = msg.as_bytes();
+            if let Some(cmd) = FuturexExcrypt.parse(bytes) {
+                // frame_len must exactly equal the bytes consumed so the outer loop drains correctly
+                proptest::prop_assert_eq!(cmd.frame_len, bytes.len());
+            }
+        }
+
+        #[test]
+        fn is_response_complete_iff_ends_with_bracket(data: Vec<u8>) {
+            let complete = FuturexExcrypt.is_response_complete(&data);
+            proptest::prop_assert_eq!(complete, data.last() == Some(&b']'));
+        }
+    }
 }

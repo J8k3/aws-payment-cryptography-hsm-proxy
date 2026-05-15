@@ -76,6 +76,7 @@ impl Registry {
         register(&mut map, Arc::new(thales::heartbeat::HeartbeatHandler));
 
         // Futurex Excrypt handlers
+        register(&mut map, Arc::new(futurex::echo::EchoHandler));
         register(&mut map, Arc::new(futurex::tpin::TpinHandler));
 
         // Vendor-agnostic stubs
