@@ -287,7 +287,7 @@ where
                                 Ok(resp) => resp,
                                 Err(e) => {
                                     warn!(err = %e, "discovery forward failed, returning error");
-                                    protocol.frame_error(header, &command_code, b"40")
+                                    protocol.frame_error(header, &command_code, b"41")
                                 }
                             }
                         } else {
