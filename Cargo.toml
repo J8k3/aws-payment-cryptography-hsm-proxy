@@ -3,6 +3,7 @@ name = "apc-proxy"
 version = "0.1.0"
 edition = "2021"
 description = "Thales payShield 10K and Futurex Excrypt → AWS Payment Cryptography protocol proxy"
+license = "MIT"
 
 [[bin]]
 name = "apc-proxy"
