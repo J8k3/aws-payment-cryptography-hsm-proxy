@@ -37,4 +37,8 @@ pub trait Protocol: Send + Sync {
 
     /// Frame an error response (empty payload).
     fn frame_error(&self, header: [u8; 2], command_code: &[u8], error_code: &[u8]) -> Vec<u8>;
+
+    /// Returns true when `data` contains a complete framed response from the real HSM.
+    /// Used by the discovery passthrough to know when to stop reading.
+    fn is_response_complete(&self, data: &[u8]) -> bool;
 }

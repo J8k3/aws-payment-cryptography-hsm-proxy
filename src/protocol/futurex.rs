@@ -81,6 +81,10 @@ impl Protocol for FuturexExcrypt {
         let rc = self.response_code(command_code);
         self.frame_response(header, &rc, error_code, &[])
     }
+
+    fn is_response_complete(&self, data: &[u8]) -> bool {
+        data.last() == Some(&b']')
+    }
 }
 
 /// Parse a Futurex parameter string into a map of 2-char code → value.

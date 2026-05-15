@@ -132,7 +132,7 @@ The Futurex `parse_params()` helper (`src/protocol/futurex.rs`) splits Excrypt p
 
 ## Known Risks
 
-**TLS cipher compatibility** — The proxy requires TLS 1.2 minimum (rustls 0.23). Older HSM client SDKs built against old OpenSSL may only offer TLS 1.0/1.1 or unsupported cipher suites. If the TLS handshake fails, omit the `tls:` block first to rule this out, then investigate the client's TLS version and cipher support.
+**TLS cipher compatibility** — The proxy requires TLS 1.2 minimum (rustls 0.23). Older HSM client SDKs built against old OpenSSL may only offer TLS 1.0/1.1 or unsupported cipher suites. If the TLS handshake fails, omit the `tls:` block first to rule this out, then investigate the client's TLS version and cipher support. Certificate key type also matters: some HSM configurations restrict cipher suites in ways that require an ECDSA cert rather than RSA, or vice versa — this is a function of the HSM's TLS policy and varies by device configuration. If the handshake fails after ruling out TLS version, verify that the cert/key pair in `proxy.yaml` matches the key type the connecting client expects.
 
 **APC latency** — Hardware HSMs respond in under a millisecond. APC API calls are network round-trips — typically 20–100ms. Applications with tight socket timeouts will time out. Check the application's HSM connection timeout before assuming the proxy is broken.
 

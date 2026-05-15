@@ -283,7 +283,7 @@ where
                     if let Some(ref dcfg) = discover {
                         if dcfg.enabled {
                             log_discovery_command(&command_code, &payload, discovery_log.as_deref());
-                            match forward_to_hsm(&buf[..frame_len], dcfg).await {
+                            match forward_to_hsm(&buf[..frame_len], dcfg, &*protocol).await {
                                 Ok(resp) => resp,
                                 Err(e) => {
                                     warn!(err = %e, "discovery forward failed, returning error");
@@ -337,17 +337,37 @@ fn log_discovery_command(command_code: &[u8], payload: &[u8], log: Option<&Disco
 ///
 /// Opens a fresh TCP connection per call. In production, consider a connection
 /// pool to the real HSM to avoid connection setup overhead on every forwarded command.
-async fn forward_to_hsm(frame: &[u8], cfg: &DiscoverConfig) -> Result<Vec<u8>> {
+async fn forward_to_hsm(frame: &[u8], cfg: &DiscoverConfig, protocol: &dyn Protocol) -> Result<Vec<u8>> {
     use tokio::net::TcpStream;
+    use tokio::time::{timeout, Duration};
 
-    let mut stream = TcpStream::connect((&*cfg.hsm_host, cfg.hsm_port)).await
-        .map_err(|e| anyhow::anyhow!("connecting to real HSM {}:{}: {e}", cfg.hsm_host, cfg.hsm_port))?;
+    let mut stream = timeout(
+        Duration::from_secs(10),
+        TcpStream::connect((&*cfg.hsm_host, cfg.hsm_port)),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("timeout connecting to real HSM {}:{}", cfg.hsm_host, cfg.hsm_port))?
+    .map_err(|e| anyhow::anyhow!("connecting to real HSM {}:{}: {e}", cfg.hsm_host, cfg.hsm_port))?;
 
-    stream.write_all(frame).await?;
+    timeout(Duration::from_secs(10), stream.write_all(frame))
+        .await
+        .map_err(|_| anyhow::anyhow!("timeout sending to real HSM"))?
+        .map_err(|e| anyhow::anyhow!("sending to real HSM: {e}"))?;
 
-    // Read one response chunk. For production use, parse the full framed response.
-    let mut resp = vec![0u8; 4096];
-    let n = stream.read(&mut resp).await?;
-    resp.truncate(n);
+    let mut resp = Vec::with_capacity(4096);
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = timeout(Duration::from_secs(30), stream.read(&mut buf))
+            .await
+            .map_err(|_| anyhow::anyhow!("timeout reading from real HSM"))?
+            .map_err(|e| anyhow::anyhow!("reading from real HSM: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        resp.extend_from_slice(&buf[..n]);
+        if protocol.is_response_complete(&resp) {
+            break;
+        }
+    }
     Ok(resp)
 }

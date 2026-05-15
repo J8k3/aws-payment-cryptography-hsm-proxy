@@ -62,6 +62,14 @@ impl Protocol for ThalesPayShield {
         let rc = self.response_code(command_code);
         self.frame_response(header, &rc, error_code, &[])
     }
+
+    fn is_response_complete(&self, data: &[u8]) -> bool {
+        if data.len() < 2 {
+            return false;
+        }
+        let expected = u16::from_be_bytes([data[0], data[1]]) as usize;
+        data.len() >= expected + 2
+    }
 }
 
 #[cfg(test)]
