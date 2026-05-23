@@ -145,6 +145,10 @@ impl Handler for MacHandler {
             {
                 Ok(_) => HandlerResult::success(vec![]),
                 Err(e) => {
+                    if e.as_service_error().map(|s| s.is_verification_failed_exception()).unwrap_or(false) {
+                        warn!("verify_mac: MAC mismatch");
+                        return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
+                    }
                     warn!(?e, "verify_mac failed");
                     HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
                 }
