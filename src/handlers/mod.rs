@@ -71,6 +71,7 @@ impl Registry {
 
         // Thales payShield handlers
         register(&mut map, Arc::new(thales::pin::PinHandler));
+        register(&mut map, Arc::new(thales::dukpt_pin_verify::DukptPinVerifyHandler));
         register(&mut map, Arc::new(thales::mac::MacHandler));
         register(&mut map, Arc::new(thales::legacy_mac::LegacyTakMacHandler));
         register(&mut map, Arc::new(thales::cvv::CvvHandler));

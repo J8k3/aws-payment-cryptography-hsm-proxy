@@ -9,6 +9,8 @@ mod handlers;
 mod key_map;
 mod protocol;
 mod server;
+#[cfg(test)]
+mod tests;
 
 #[derive(Parser)]
 #[command(
