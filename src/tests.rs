@@ -124,6 +124,22 @@ fn default_routes() -> HashMap<String, (u16, String)> {
             r#"{"KeyArn":"arn:mock","KeyCheckValue":"AAA"}"#.into(),
         ),
     );
+    // HE/HG: paths include the URL-encoded key ARN.
+    // Tests use "mock-dek" (no colons) so the path is /keys/mock-dek/encrypt|decrypt.
+    m.insert(
+        "/keys/mock-dek/encrypt".into(),
+        (
+            200,
+            r#"{"KeyArn":"mock-dek","KeyCheckValue":"AAA","CipherText":"CCDDEEFF11223344"}"#.into(),
+        ),
+    );
+    m.insert(
+        "/keys/mock-dek/decrypt".into(),
+        (
+            200,
+            r#"{"KeyArn":"mock-dek","KeyCheckValue":"AAA","PlainText":"AABBCCDDEE112233"}"#.into(),
+        ),
+    );
     m
 }
 
@@ -518,6 +534,92 @@ async fn thales_cm_verify_pin_success() {
 
     let result = handler.handle(b"CM", &payload, &state).await;
     assert_eq!(&result.error_code, b"00");
+}
+
+// ── Encrypt/Decrypt Data Block (HE/HG) ───────────────────────────────────────
+
+#[tokio::test]
+async fn thales_he_encrypt_block_success() {
+    let mock = MockApc::start().await;
+    // "mock-dek" has no colons so the path is /keys/mock-dek/encrypt
+    let mut keys = HashMap::new();
+    keys.insert("1234567890ABCDEF".to_string(), "mock-dek".to_string());
+    let state = mock_state(&mock.url, keys).await;
+
+    let registry = Registry::build();
+    let handler = registry.get(b"HE").expect("HE registered");
+
+    // HE payload: TAK(16H) + Data(16H)
+    let mut payload = b"1234567890ABCDEF".to_vec(); // TAK single 16H
+    payload.extend_from_slice(b"AABBCCDDEE112233"); // plaintext 16H
+
+    let result = handler.handle(b"HE", &payload, &state).await;
+    assert_eq!(&result.error_code, b"00", "HE should succeed");
+    assert_eq!(result.payload.as_slice(), b"CCDDEEFF11223344", "HE returns ciphertext from APC");
+}
+
+#[tokio::test]
+async fn thales_he_double_key_success() {
+    let mock = MockApc::start().await;
+    let mut keys = HashMap::new();
+    // parse_legacy_key returns the identifier with the 'U' prefix included
+    keys.insert("U1234567890ABCDEF1234567890ABCDEF".to_string(), "mock-dek".to_string());
+    let state = mock_state(&mock.url, keys).await;
+
+    let registry = Registry::build();
+    let handler = registry.get(b"HE").expect("HE registered");
+
+    let mut payload = b"U1234567890ABCDEF1234567890ABCDEF".to_vec();
+    payload.extend_from_slice(b"AABBCCDDEE112233");
+
+    let result = handler.handle(b"HE", &payload, &state).await;
+    assert_eq!(&result.error_code, b"00");
+}
+
+#[tokio::test]
+async fn thales_he_key_not_found_returns_10() {
+    let state = mock_state("http://127.0.0.1:1", HashMap::new()).await;
+    let registry = Registry::build();
+    let handler = registry.get(b"HE").expect("HE registered");
+
+    let mut payload = b"1234567890ABCDEF".to_vec();
+    payload.extend_from_slice(b"AABBCCDDEE112233");
+
+    let result = handler.handle(b"HE", &payload, &state).await;
+    assert_eq!(&result.error_code, b"10");
+}
+
+#[tokio::test]
+async fn thales_he_payload_too_short_returns_15() {
+    let state = mock_state("http://127.0.0.1:1", HashMap::new()).await;
+    let registry = Registry::build();
+    let handler = registry.get(b"HE").expect("HE registered");
+
+    // TAK present but data only 8H (needs 16H)
+    let mut payload = b"1234567890ABCDEF".to_vec();
+    payload.extend_from_slice(b"AABBCCDD");
+
+    let result = handler.handle(b"HE", &payload, &state).await;
+    assert_eq!(&result.error_code, b"15");
+}
+
+#[tokio::test]
+async fn thales_hg_decrypt_block_success() {
+    let mock = MockApc::start().await;
+    let mut keys = HashMap::new();
+    keys.insert("1234567890ABCDEF".to_string(), "mock-dek".to_string());
+    let state = mock_state(&mock.url, keys).await;
+
+    let registry = Registry::build();
+    let handler = registry.get(b"HG").expect("HG registered");
+
+    // HG payload: TAK(16H) + Ciphertext(16H)
+    let mut payload = b"1234567890ABCDEF".to_vec();
+    payload.extend_from_slice(b"CCDDEEFF11223344"); // ciphertext 16H
+
+    let result = handler.handle(b"HG", &payload, &state).await;
+    assert_eq!(&result.error_code, b"00", "HG should succeed");
+    assert_eq!(result.payload.as_slice(), b"AABBCCDDEE112233", "HG returns plaintext from APC");
 }
 
 // ── Unsupported commands ──────────────────────────────────────────────────────
