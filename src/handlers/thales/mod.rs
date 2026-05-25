@@ -3,6 +3,7 @@ pub mod cvv;
 pub mod dukpt_pin_verify;
 pub mod encrypt_decrypt;
 pub mod heartbeat;
+pub mod international_encrypt;
 pub mod legacy_mac;
 pub mod mac;
 pub mod pin;

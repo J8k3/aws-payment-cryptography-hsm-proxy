@@ -124,7 +124,7 @@ fn default_routes() -> HashMap<String, (u16, String)> {
             r#"{"KeyArn":"arn:mock","KeyCheckValue":"AAA"}"#.into(),
         ),
     );
-    // HE/HG: paths include the URL-encoded key ARN.
+    // HE/HG and M0/M2: paths include the URL-encoded key ARN.
     // Tests use "mock-dek" (no colons) so the path is /keys/mock-dek/encrypt|decrypt.
     m.insert(
         "/keys/mock-dek/encrypt".into(),
@@ -138,6 +138,15 @@ fn default_routes() -> HashMap<String, (u16, String)> {
         (
             200,
             r#"{"KeyArn":"mock-dek","KeyCheckValue":"AAA","PlainText":"AABBCCDDEE112233"}"#.into(),
+        ),
+    );
+    // M4: re_encrypt_data path is /keys/{IncomingKeyIdentifier}/reencrypt.
+    // Tests use "mock-src" as incoming key.
+    m.insert(
+        "/keys/mock-src/reencrypt".into(),
+        (
+            200,
+            r#"{"IncomingKeyArn":"mock-src","OutgoingKeyArn":"mock-dst","KeyCheckValue":"AAA","CipherText":"EEFF11223344AABB"}"#.into(),
         ),
     );
     m
@@ -620,6 +629,212 @@ async fn thales_hg_decrypt_block_success() {
     let result = handler.handle(b"HG", &payload, &state).await;
     assert_eq!(&result.error_code, b"00", "HG should succeed");
     assert_eq!(result.payload.as_slice(), b"AABBCCDDEE112233", "HG returns plaintext from APC");
+}
+
+// ── International Encrypt/Decrypt (M0/M2/M4) ─────────────────────────────────
+
+/// Build an M0/M2 payload: mode(2) + in_fmt(1) + out_fmt(1) + key_type(3) + key + len(4) + data.
+fn m0_payload(key: &[u8], data_hex: &[u8]) -> Vec<u8> {
+    let mut v = b"00".to_vec(); // ECB
+    v.push(b'1'); // input hex
+    v.push(b'1'); // output hex
+    v.extend_from_slice(b"00B"); // key type (DEK)
+    v.extend_from_slice(key);
+    let byte_count = data_hex.len() / 2;
+    v.extend_from_slice(format!("{:04X}", byte_count).as_bytes());
+    v.extend_from_slice(data_hex);
+    v
+}
+
+#[tokio::test]
+async fn thales_m0_encrypt_success() {
+    let mock = MockApc::start().await;
+    let mut keys = HashMap::new();
+    keys.insert("1234567890ABCDEF".to_string(), "mock-dek".to_string());
+    let state = mock_state(&mock.url, keys).await;
+
+    let registry = Registry::build();
+    let handler = registry.get(b"M0").expect("M0 registered");
+
+    let payload = m0_payload(b"1234567890ABCDEF", b"AABBCCDDEE112233");
+    let result = handler.handle(b"M0", &payload, &state).await;
+
+    assert_eq!(&result.error_code, b"00");
+    // Mock returns CipherText "CCDDEEFF11223344" (8 bytes) → prefix "0008"
+    assert_eq!(result.payload.as_slice(), b"0008CCDDEEFF11223344");
+}
+
+#[tokio::test]
+async fn thales_m0_cbc_mode_returns_15() {
+    let mock = MockApc::start().await;
+    let mut keys = HashMap::new();
+    keys.insert("1234567890ABCDEF".to_string(), "mock-dek".to_string());
+    let state = mock_state(&mock.url, keys).await;
+
+    let registry = Registry::build();
+    let handler = registry.get(b"M0").expect("M0 registered");
+
+    // Mode '01' = CBC — not supported
+    let mut payload = b"01".to_vec();
+    payload.push(b'1');
+    payload.push(b'1');
+    payload.extend_from_slice(b"00B1234567890ABCDEF00080000000000000000");
+
+    let result = handler.handle(b"M0", &payload, &state).await;
+    assert_eq!(&result.error_code, b"15");
+}
+
+#[tokio::test]
+async fn thales_m0_key_not_found_returns_10() {
+    let state = mock_state("http://127.0.0.1:1", HashMap::new()).await;
+    let registry = Registry::build();
+    let handler = registry.get(b"M0").expect("M0 registered");
+
+    let payload = m0_payload(b"1234567890ABCDEF", b"AABBCCDDEE112233");
+    let result = handler.handle(b"M0", &payload, &state).await;
+    assert_eq!(&result.error_code, b"10");
+}
+
+#[tokio::test]
+async fn thales_m2_decrypt_success() {
+    let mock = MockApc::start().await;
+    let mut keys = HashMap::new();
+    keys.insert("1234567890ABCDEF".to_string(), "mock-dek".to_string());
+    let state = mock_state(&mock.url, keys).await;
+
+    let registry = Registry::build();
+    let handler = registry.get(b"M2").expect("M2 registered");
+
+    let payload = m0_payload(b"1234567890ABCDEF", b"CCDDEEFF11223344");
+    let result = handler.handle(b"M2", &payload, &state).await;
+
+    assert_eq!(&result.error_code, b"00");
+    // Mock returns PlainText "AABBCCDDEE112233" (8 bytes) → prefix "0008"
+    assert_eq!(result.payload.as_slice(), b"0008AABBCCDDEE112233");
+}
+
+#[tokio::test]
+async fn thales_m4_reencrypt_success() {
+    let mock = MockApc::start().await;
+    let mut keys = HashMap::new();
+    keys.insert("1234567890ABCDEF".to_string(), "mock-src".to_string());
+    keys.insert("FEDCBA0987654321".to_string(), "mock-dst".to_string());
+    let state = mock_state(&mock.url, keys).await;
+
+    let registry = Registry::build();
+    let handler = registry.get(b"M4").expect("M4 registered");
+
+    // M4: src_mode(2) + dst_mode(2) + in_fmt(1) + out_fmt(1) +
+    //     src_key_type(3) + src_key(16) + dst_key_type(3) + dst_key(16) + len(4) + data
+    let mut payload = b"00".to_vec(); // src ECB
+    payload.extend_from_slice(b"00"); // dst ECB
+    payload.push(b'1'); // input hex
+    payload.push(b'1'); // output hex
+    payload.extend_from_slice(b"00B"); // src key type
+    payload.extend_from_slice(b"1234567890ABCDEF"); // src key 16H
+    payload.extend_from_slice(b"00B"); // dst key type
+    payload.extend_from_slice(b"FEDCBA0987654321"); // dst key 16H
+    payload.extend_from_slice(b"0008"); // 8 bytes
+    payload.extend_from_slice(b"CCDDEEFF11223344"); // ciphertext 16H
+
+    let result = handler.handle(b"M4", &payload, &state).await;
+
+    assert_eq!(&result.error_code, b"00");
+    // Mock returns CipherText "EEFF11223344AABB" (8 bytes) → prefix "0008"
+    assert_eq!(result.payload.as_slice(), b"0008EEFF11223344AABB");
+}
+
+// ── International MAK MAC (M6/M8, C2/C4) ────────────────────────────────────
+//
+// MacHandler field layout: mode(1) + key(32H fixed) + msg_len(4H) + message_hex
+// M8/C4 append MAC(8H) after the message.
+// M6 modes: '1'=Algo1, '3'=Algo3, '6'=CMAC. C2 modes: '0'=Algo1, '1'=Algo3.
+
+const MAK_KEY_32H: &[u8] = b"12345678901234561234567890123456";
+
+/// Build a C2/M6 payload: mode(1) + key(32H) + msg_len(4H) + data_hex.
+fn mac_handler_payload(mode: u8, data_hex: &[u8]) -> Vec<u8> {
+    let mut v = vec![mode];
+    v.extend_from_slice(MAK_KEY_32H);
+    let byte_count = data_hex.len() / 2;
+    v.extend_from_slice(format!("{:04X}", byte_count).as_bytes());
+    v.extend_from_slice(data_hex);
+    v
+}
+
+#[tokio::test]
+async fn thales_m6_generate_mac_success() {
+    let mock = MockApc::start().await;
+    // Key map uses the literal 32H key string
+    let state = mock_state(&mock.url, one_key(std::str::from_utf8(MAK_KEY_32H).unwrap())).await;
+
+    let registry = Registry::build();
+    let handler = registry.get(b"M6").expect("M6 registered");
+
+    // M6 mode '3' = ISO9797_ALGORITHM3
+    let payload = mac_handler_payload(b'3', b"AABBCCDDEE112233");
+    let result = handler.handle(b"M6", &payload, &state).await;
+
+    assert_eq!(&result.error_code, b"00");
+    // Mock returns Mac = "AABBCCDDEE112233"
+    assert_eq!(result.payload.as_slice(), b"AABBCCDDEE112233");
+}
+
+#[tokio::test]
+async fn thales_m6_unsupported_mode_returns_15() {
+    let state = mock_state("http://127.0.0.1:1", HashMap::new()).await;
+    let registry = Registry::build();
+    let handler = registry.get(b"M6").expect("M6 registered");
+
+    // Mode '0' is not a valid M6 mode → UnsupportedMacMode → error 15
+    let payload = mac_handler_payload(b'0', b"AABBCCDDEE112233");
+    let result = handler.handle(b"M6", &payload, &state).await;
+    assert_eq!(&result.error_code, b"15", "invalid mode → error 15");
+}
+
+#[tokio::test]
+async fn thales_m6_key_not_found_returns_10() {
+    let state = mock_state("http://127.0.0.1:1", HashMap::new()).await;
+    let registry = Registry::build();
+    let handler = registry.get(b"M6").expect("M6 registered");
+
+    // Valid mode '3' but empty key map
+    let payload = mac_handler_payload(b'3', b"AABBCCDDEE112233");
+    let result = handler.handle(b"M6", &payload, &state).await;
+    assert_eq!(&result.error_code, b"10");
+}
+
+#[tokio::test]
+async fn thales_m8_verify_mac_success() {
+    let mock = MockApc::start().await;
+    let state = mock_state(&mock.url, one_key(std::str::from_utf8(MAK_KEY_32H).unwrap())).await;
+
+    let registry = Registry::build();
+    let handler = registry.get(b"M8").expect("M8 registered");
+
+    // M8: mode(1) + key(32H) + msg_len(4H) + message + MAC(8H)
+    let mut payload = mac_handler_payload(b'3', b"AABBCCDDEE112233");
+    payload.extend_from_slice(b"AABBCCDD"); // MAC 8H (4-byte truncated MAC)
+
+    let result = handler.handle(b"M8", &payload, &state).await;
+    assert_eq!(&result.error_code, b"00");
+    assert!(result.payload.is_empty(), "M8 success payload is empty");
+}
+
+#[tokio::test]
+async fn thales_m8_mac_mismatch_returns_01() {
+    let mock = MockApc::start().await;
+    mock.set_verification_failure("/mac/verify").await;
+    let state = mock_state(&mock.url, one_key(std::str::from_utf8(MAK_KEY_32H).unwrap())).await;
+
+    let registry = Registry::build();
+    let handler = registry.get(b"M8").expect("M8 registered");
+
+    let mut payload = mac_handler_payload(b'3', b"AABBCCDDEE112233");
+    payload.extend_from_slice(b"AABBCCDD");
+
+    let result = handler.handle(b"M8", &payload, &state).await;
+    assert_eq!(&result.error_code, b"01", "MAC mismatch → error 01");
 }
 
 // ── Unsupported commands ──────────────────────────────────────────────────────
