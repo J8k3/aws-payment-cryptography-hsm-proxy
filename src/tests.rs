@@ -149,6 +149,15 @@ fn default_routes() -> HashMap<String, (u16, String)> {
             r#"{"IncomingKeyArn":"mock-src","OutgoingKeyArn":"mock-dst","KeyCheckValue":"AAA","CipherText":"EEFF11223344AABB"}"#.into(),
         ),
     );
+    // KQ: verify_auth_request_cryptogram path.
+    // Success includes an ARPC; no-ARPC variant omits AuthResponseValue.
+    m.insert(
+        "/cryptogram/verify".into(),
+        (
+            200,
+            r#"{"KeyArn":"arn:mock","KeyCheckValue":"AAA","AuthResponseValue":"AABBCCDDEEFF0011"}"#.into(),
+        ),
+    );
     m
 }
 
@@ -835,6 +844,111 @@ async fn thales_m8_mac_mismatch_returns_01() {
 
     let result = handler.handle(b"M8", &payload, &state).await;
     assert_eq!(&result.error_code, b"01", "MAC mismatch → error 01");
+}
+
+// ── ARQC verify / ARPC generate (KQ) ────────────────────────────────────────
+//
+// KqArqcHandler field layout:
+//   cryptogram_type(1) + key_type(3H) + IMK(variable) + arpc_method(1) +
+//   deriv_mode(1) + PAN(12N) + PAN_seq(2N) + ATC(4H) +
+//   txn_len(4H) + txn_data(variable) + ARQC(16H) + [method-specific ARPC params]
+
+/// Build a KQ payload through ARQC. Caller appends ARPC params if needed.
+fn kq_payload_prefix(key: &[u8], arpc_method: u8) -> Vec<u8> {
+    let mut v = vec![b'0'];              // ARQC type
+    v.extend_from_slice(b"00E");         // key type (IMK-AC)
+    v.extend_from_slice(key);
+    v.push(arpc_method);
+    v.push(b'A');                        // EMV_OPTION_A (Visa/Amex)
+    v.extend_from_slice(b"123456789012"); // PAN 12N
+    v.extend_from_slice(b"01");          // PAN seq
+    v.extend_from_slice(b"0001");        // ATC 4H
+    v.extend_from_slice(b"0004");        // txn data: 4 bytes
+    v.extend_from_slice(b"AABBCCDD");    // txn data 8H (4 bytes)
+    v.extend_from_slice(b"AABBCCDDEEFF0011"); // ARQC 16H
+    v
+}
+
+#[tokio::test]
+async fn thales_kq_method1_arpc_success() {
+    let mock = MockApc::start().await;
+    let state = mock_state(&mock.url, one_key("1234567890ABCDEF")).await;
+
+    let registry = Registry::build();
+    let handler = registry.get(b"KQ").expect("KQ registered");
+
+    let mut payload = kq_payload_prefix(b"1234567890ABCDEF", b'0');
+    payload.extend_from_slice(b"0010"); // Auth Response Code 4H
+
+    let result = handler.handle(b"KQ", &payload, &state).await;
+    assert_eq!(&result.error_code, b"00");
+    // Mock returns AuthResponseValue "AABBCCDDEEFF0011"
+    assert_eq!(result.payload.as_slice(), b"AABBCCDDEEFF0011");
+}
+
+#[tokio::test]
+async fn thales_kq_no_arpc_returns_empty_payload() {
+    let mock = MockApc::start().await;
+    // Override mock to return no AuthResponseValue (method '9' = verify only)
+    mock.set(
+        "/cryptogram/verify",
+        200,
+        r#"{"KeyArn":"arn:mock","KeyCheckValue":"AAA"}"#,
+    )
+    .await;
+    let state = mock_state(&mock.url, one_key("1234567890ABCDEF")).await;
+
+    let registry = Registry::build();
+    let handler = registry.get(b"KQ").expect("KQ registered");
+
+    let payload = kq_payload_prefix(b"1234567890ABCDEF", b'9');
+
+    let result = handler.handle(b"KQ", &payload, &state).await;
+    assert_eq!(&result.error_code, b"00");
+    assert!(result.payload.is_empty(), "no ARPC → empty payload");
+}
+
+#[tokio::test]
+async fn thales_kq_arqc_mismatch_returns_01() {
+    let mock = MockApc::start().await;
+    mock.set_verification_failure("/cryptogram/verify").await;
+    let state = mock_state(&mock.url, one_key("1234567890ABCDEF")).await;
+
+    let registry = Registry::build();
+    let handler = registry.get(b"KQ").expect("KQ registered");
+
+    let mut payload = kq_payload_prefix(b"1234567890ABCDEF", b'0');
+    payload.extend_from_slice(b"0010");
+
+    let result = handler.handle(b"KQ", &payload, &state).await;
+    assert_eq!(&result.error_code, b"01", "ARQC mismatch → error 01");
+}
+
+#[tokio::test]
+async fn thales_kq_key_not_found_returns_10() {
+    let state = mock_state("http://127.0.0.1:1", HashMap::new()).await;
+    let registry = Registry::build();
+    let handler = registry.get(b"KQ").expect("KQ registered");
+
+    let mut payload = kq_payload_prefix(b"1234567890ABCDEF", b'0');
+    payload.extend_from_slice(b"0010");
+
+    let result = handler.handle(b"KQ", &payload, &state).await;
+    assert_eq!(&result.error_code, b"10", "unknown key → error 10");
+}
+
+#[tokio::test]
+async fn thales_kq_tc_type_returns_15() {
+    let state = mock_state("http://127.0.0.1:1", HashMap::new()).await;
+    let registry = Registry::build();
+    let handler = registry.get(b"KQ").expect("KQ registered");
+
+    // Cryptogram type '1' = TC — not supported
+    let mut payload = vec![b'1'];
+    payload.extend_from_slice(b"00E1234567890ABCDEF9A12345678901201000100010000AABBCCDDEEFF0011");
+
+    let result = handler.handle(b"KQ", &payload, &state).await;
+    assert_eq!(&result.error_code, b"15", "TC type → error 15");
 }
 
 // ── Unsupported commands ──────────────────────────────────────────────────────

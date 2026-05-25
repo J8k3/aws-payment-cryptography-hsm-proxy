@@ -74,6 +74,7 @@ impl Registry {
         register(&mut map, Arc::new(thales::dukpt_pin_verify::DukptPinVerifyHandler));
         register(&mut map, Arc::new(thales::encrypt_decrypt::EncryptDecryptHandler));
         register(&mut map, Arc::new(thales::international_encrypt::InternationalEncryptHandler));
+        register(&mut map, Arc::new(thales::kq_arqc::KqArqcHandler));
         register(&mut map, Arc::new(thales::mac::MacHandler));
         register(&mut map, Arc::new(thales::legacy_mac::LegacyTakMacHandler));
         register(&mut map, Arc::new(thales::cvv::CvvHandler));
