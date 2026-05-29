@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 pub struct ProxyConfig {
+    #[serde(default)]
     pub listen: ListenConfig,
     /// Protocol variant: "thales_payshield" or "futurex_excrypt"
     pub vendor: String,
@@ -74,6 +75,16 @@ fn default_host() -> String {
 }
 fn default_port() -> u16 {
     1500
+}
+
+impl Default for ListenConfig {
+    fn default() -> Self {
+        Self {
+            host: default_host(),
+            port: default_port(),
+            tls: None,
+        }
+    }
 }
 
 impl ProxyConfig {

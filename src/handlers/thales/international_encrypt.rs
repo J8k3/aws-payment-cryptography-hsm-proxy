@@ -60,12 +60,17 @@ impl Handler for InternationalEncryptHandler {
         &["M0", "M2", "M4"]
     }
 
-    async fn handle(&self, command_code: &[u8], payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
+    async fn handle(
+        &self,
+        command_code: &[u8],
+        payload: &[u8],
+        state: &Arc<AppState>,
+    ) -> HandlerResult {
         match command_code {
             b"M0" => handle_m0(payload, state).await,
             b"M2" => handle_m2(payload, state).await,
             b"M4" => handle_m4(payload, state).await,
-            _ => HandlerResult::err(b"68"),
+            _ => HandlerResult::err(*b"68"),
         }
     }
 }
@@ -77,7 +82,9 @@ fn parse_m0_fields(payload: &[u8]) -> Result<(String, Zeroizing<String>), ProxyE
 
     // Mode Flag (2N)
     if payload.len() < pos + MODE_FLAG_LEN {
-        return Err(ProxyError::MalformedPayload("M0/M2: mode flag missing".into()));
+        return Err(ProxyError::MalformedPayload(
+            "M0/M2: mode flag missing".into(),
+        ));
     }
     let mode = &payload[pos..pos + MODE_FLAG_LEN];
     pos += MODE_FLAG_LEN;
@@ -90,7 +97,9 @@ fn parse_m0_fields(payload: &[u8]) -> Result<(String, Zeroizing<String>), ProxyE
 
     // Input Format Flag (1N)
     if payload.len() < pos + FORMAT_FLAG_LEN {
-        return Err(ProxyError::MalformedPayload("M0/M2: input format flag missing".into()));
+        return Err(ProxyError::MalformedPayload(
+            "M0/M2: input format flag missing".into(),
+        ));
     }
     if payload[pos] != b'1' {
         return Err(ProxyError::MalformedPayload(format!(
@@ -102,13 +111,17 @@ fn parse_m0_fields(payload: &[u8]) -> Result<(String, Zeroizing<String>), ProxyE
 
     // Output Format Flag (1N) — accepted but unused (we always return hex)
     if payload.len() < pos + FORMAT_FLAG_LEN {
-        return Err(ProxyError::MalformedPayload("M0/M2: output format flag missing".into()));
+        return Err(ProxyError::MalformedPayload(
+            "M0/M2: output format flag missing".into(),
+        ));
     }
     pos += FORMAT_FLAG_LEN;
 
     // Key Type (3H) — consumed, key_map resolves the actual key
     if payload.len() < pos + KEY_TYPE_LEN {
-        return Err(ProxyError::MalformedPayload("M0/M2: key type field missing".into()));
+        return Err(ProxyError::MalformedPayload(
+            "M0/M2: key type field missing".into(),
+        ));
     }
     pos += KEY_TYPE_LEN;
 
@@ -118,12 +131,15 @@ fn parse_m0_fields(payload: &[u8]) -> Result<(String, Zeroizing<String>), ProxyE
 
     // Message Length (4H hex chars = hex-encoded byte count)
     if payload.len() < pos + MSG_LEN_FIELD {
-        return Err(ProxyError::MalformedPayload("M0/M2: message length field missing".into()));
+        return Err(ProxyError::MalformedPayload(
+            "M0/M2: message length field missing".into(),
+        ));
     }
     let len_hex = std::str::from_utf8(&payload[pos..pos + MSG_LEN_FIELD])
         .map_err(|_| ProxyError::MalformedPayload("M0/M2: message length not ASCII".into()))?;
-    let byte_count = usize::from_str_radix(len_hex, 16)
-        .map_err(|_| ProxyError::MalformedPayload(format!("M0/M2: invalid message length '{len_hex}'")))?;
+    let byte_count = usize::from_str_radix(len_hex, 16).map_err(|_| {
+        ProxyError::MalformedPayload(format!("M0/M2: invalid message length '{len_hex}'"))
+    })?;
     pos += MSG_LEN_FIELD;
 
     // Message (2× byte_count hex chars)
@@ -135,9 +151,8 @@ fn parse_m0_fields(payload: &[u8]) -> Result<(String, Zeroizing<String>), ProxyE
             payload.len().saturating_sub(pos)
         )));
     }
-    let msg = Zeroizing::new(
-        String::from_utf8_lossy(&payload[pos..pos + msg_hex_chars]).to_string(),
-    );
+    let msg =
+        Zeroizing::new(String::from_utf8_lossy(&payload[pos..pos + msg_hex_chars]).to_string());
 
     Ok((key_id, msg))
 }
@@ -178,7 +193,7 @@ async fn handle_m0(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
             // Response: 4H message length + ciphertext
             let cipher = resp.cipher_text();
             let byte_len = cipher.len() / 2;
-            let mut out = format!("{:04X}", byte_len).into_bytes();
+            let mut out = format!("{byte_len:04X}").into_bytes();
             out.extend_from_slice(cipher.as_bytes());
             HandlerResult::success(out)
         }
@@ -224,7 +239,7 @@ async fn handle_m2(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(resp) => {
             let plain = resp.plain_text();
             let byte_len = plain.len() / 2;
-            let mut out = format!("{:04X}", byte_len).into_bytes();
+            let mut out = format!("{byte_len:04X}").into_bytes();
             out.extend_from_slice(plain.as_bytes());
             HandlerResult {
                 error_code: *b"00",
@@ -324,21 +339,15 @@ async fn handle_m4(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
             "M4: message length field missing".into(),
         ));
     }
-    let len_hex = match std::str::from_utf8(&payload[pos..pos + MSG_LEN_FIELD]) {
-        Ok(s) => s,
-        Err(_) => {
-            return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(
-                "M4: message length not ASCII".into(),
-            ))
-        }
+    let Ok(len_hex) = std::str::from_utf8(&payload[pos..pos + MSG_LEN_FIELD]) else {
+        return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(
+            "M4: message length not ASCII".into(),
+        ));
     };
-    let byte_count = match usize::from_str_radix(len_hex, 16) {
-        Ok(n) => n,
-        Err(_) => {
-            return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(format!(
-                "M4: invalid message length '{len_hex}'"
-            )))
-        }
+    let Ok(byte_count) = usize::from_str_radix(len_hex, 16) else {
+        return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(format!(
+            "M4: invalid message length '{len_hex}'"
+        )));
     };
     pos += MSG_LEN_FIELD;
 
@@ -349,9 +358,8 @@ async fn handle_m4(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
             "M4: message too short: need {msg_hex_chars} hex chars"
         )));
     }
-    let cipher_text = Zeroizing::new(
-        String::from_utf8_lossy(&payload[pos..pos + msg_hex_chars]).to_string(),
-    );
+    let cipher_text =
+        Zeroizing::new(String::from_utf8_lossy(&payload[pos..pos + msg_hex_chars]).to_string());
 
     let src_arn = match state.key_map.resolve(&src_key_id) {
         Ok(a) => a.to_string(),
@@ -389,7 +397,7 @@ async fn handle_m4(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(resp) => {
             let new_cipher = resp.cipher_text();
             let byte_len = new_cipher.len() / 2;
-            let mut out = format!("{:04X}", byte_len).into_bytes();
+            let mut out = format!("{byte_len:04X}").into_bytes();
             out.extend_from_slice(new_cipher.as_bytes());
             HandlerResult::success(out)
         }

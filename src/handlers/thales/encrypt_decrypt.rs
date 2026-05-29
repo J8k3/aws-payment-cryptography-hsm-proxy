@@ -38,16 +38,24 @@ impl Handler for EncryptDecryptHandler {
         &["HE", "HG"]
     }
 
-    async fn handle(&self, command_code: &[u8], payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
+    async fn handle(
+        &self,
+        command_code: &[u8],
+        payload: &[u8],
+        state: &Arc<AppState>,
+    ) -> HandlerResult {
         match command_code {
             b"HE" => handle_he(payload, state).await,
             b"HG" => handle_hg(payload, state).await,
-            _ => HandlerResult::err(b"68"),
+            _ => HandlerResult::err(*b"68"),
         }
     }
 }
 
-fn parse_key_and_data(payload: &[u8], cmd: &str) -> Result<(String, Zeroizing<String>), ProxyError> {
+fn parse_key_and_data(
+    payload: &[u8],
+    cmd: &str,
+) -> Result<(String, Zeroizing<String>), ProxyError> {
     let (key_id, key_len) = parse_legacy_key(payload, 0)?;
     let data_start = key_len;
     let min_len = data_start + DATA_HEX_LEN;

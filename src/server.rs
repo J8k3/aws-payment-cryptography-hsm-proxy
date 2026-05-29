@@ -26,7 +26,7 @@ impl DiscoveryLog {
             .create(true)
             .append(true)
             .open(path)
-            .map_err(|e| anyhow::anyhow!("opening discovery log {:?}: {e}", path))?;
+            .map_err(|e| anyhow::anyhow!("opening discovery log {}: {e}", path.display()))?;
         Ok(Self {
             writer: Mutex::new(BufWriter::new(file)),
             seen: Mutex::new(HashSet::new()),
@@ -34,9 +34,18 @@ impl DiscoveryLog {
         })
     }
 
-    fn record_futurex(&self, command_code: &[u8], params: &std::collections::HashMap<[u8; 2], Vec<u8>>) {
+    fn record_futurex(
+        &self,
+        command_code: &[u8],
+        params: &std::collections::HashMap<[u8; 2], Vec<u8>>,
+    ) {
         let cmd = String::from_utf8_lossy(command_code).to_string();
-        if !self.seen.lock().unwrap().insert(cmd.clone()) {
+        if !self
+            .seen
+            .lock()
+            .expect("mutex poisoned")
+            .insert(cmd.clone())
+        {
             return; // already logged this command code
         }
         let ts = std::time::SystemTime::now()
@@ -51,14 +60,19 @@ impl DiscoveryLog {
             "params": param_map,
         });
         if let Ok(mut w) = self.writer.lock() {
-            let _ = writeln!(w, "{}", record);
+            let _ = writeln!(w, "{record}");
             let _ = w.flush();
         }
     }
 
     fn record_thales(&self, command_code: &[u8], payload_len: usize) {
         let cmd = String::from_utf8_lossy(command_code).to_string();
-        if !self.seen.lock().unwrap().insert(cmd.clone()) {
+        if !self
+            .seen
+            .lock()
+            .expect("mutex poisoned")
+            .insert(cmd.clone())
+        {
             return;
         }
         let ts = std::time::SystemTime::now()
@@ -73,7 +87,7 @@ impl DiscoveryLog {
             "note": "Thales fields are positional and command-specific; payload not parsed in discovery mode",
         });
         if let Ok(mut w) = self.writer.lock() {
-            let _ = writeln!(w, "{}", record);
+            let _ = writeln!(w, "{record}");
             let _ = w.flush();
         }
     }
@@ -133,7 +147,7 @@ pub async fn run(cfg: ProxyConfig) -> Result<()> {
         Some(_) => "TLS",
         None => "plaintext",
     };
-    let disc_mode = if discover.as_ref().map(|d| d.enabled).unwrap_or(false) {
+    let disc_mode = if discover.as_ref().is_some_and(|d| d.enabled) {
         "discovery+passthrough"
     } else {
         "proxy"
@@ -154,7 +168,17 @@ pub async fn run(cfg: ProxyConfig) -> Result<()> {
         tokio::spawn(async move {
             let result = if let Some(acceptor) = tls_acceptor {
                 match acceptor.accept(socket).await {
-                    Ok(stream) => handle_connection(stream, state, registry, protocol, discover, discovery_log).await,
+                    Ok(stream) => {
+                        handle_connection(
+                            stream,
+                            state,
+                            registry,
+                            protocol,
+                            discover,
+                            discovery_log,
+                        )
+                        .await
+                    }
                     Err(e) => {
                         error!(%peer, err = %e, "TLS handshake failed");
                         return;
@@ -189,24 +213,24 @@ fn build_tls_config(tls: &TlsConfig) -> Result<rustls::ServerConfig> {
 
     let provider = default_crypto_provider();
 
-    let cert_chain: Vec<CertificateDer<'static>> =
-        certs(&mut BufReader::new(File::open(&tls.cert_file).map_err(|e| {
-            anyhow::anyhow!("opening cert_file {:?}: {e}", tls.cert_file)
-        })?))
-        .collect::<Result<_, _>>()
-        .map_err(|e| anyhow::anyhow!("parsing cert_file: {e}"))?;
+    let cert_chain: Vec<CertificateDer<'static>> = certs(&mut BufReader::new(
+        File::open(&tls.cert_file)
+            .map_err(|e| anyhow::anyhow!("opening cert_file {}: {e}", tls.cert_file.display()))?,
+    ))
+    .collect::<Result<_, _>>()
+    .map_err(|e| anyhow::anyhow!("parsing cert_file: {e}"))?;
 
-    let key_der: PrivateKeyDer<'static> =
-        private_key(&mut BufReader::new(File::open(&tls.key_file).map_err(|e| {
-            anyhow::anyhow!("opening key_file {:?}: {e}", tls.key_file)
-        })?))
-        .map_err(|e| anyhow::anyhow!("parsing key_file: {e}"))?
-        .ok_or_else(|| anyhow::anyhow!("no private key found in {:?}", tls.key_file))?;
+    let key_der: PrivateKeyDer<'static> = private_key(&mut BufReader::new(
+        File::open(&tls.key_file)
+            .map_err(|e| anyhow::anyhow!("opening key_file {}: {e}", tls.key_file.display()))?,
+    ))
+    .map_err(|e| anyhow::anyhow!("parsing key_file: {e}"))?
+    .ok_or_else(|| anyhow::anyhow!("no private key found in {}", tls.key_file.display()))?;
 
     if let Some(ca_path) = &tls.ca_file {
         let mut root_store = rustls::RootCertStore::empty();
         for cert in certs(&mut BufReader::new(File::open(ca_path).map_err(|e| {
-            anyhow::anyhow!("opening ca_file {:?}: {e}", ca_path)
+            anyhow::anyhow!("opening ca_file {}: {e}", ca_path.display())
         })?)) {
             root_store
                 .add(cert.map_err(|e| anyhow::anyhow!("reading CA cert: {e}"))?)
@@ -257,9 +281,8 @@ where
         buf.extend_from_slice(&read_buf[..n]);
 
         loop {
-            let cmd = match protocol.parse(&buf) {
-                Some(c) => c,
-                None => break,
+            let Some(cmd) = protocol.parse(&buf) else {
+                break;
             };
             let frame_len = cmd.frame_len;
             let header = cmd.header;
@@ -282,7 +305,11 @@ where
                     // No handler registered for this command.
                     if let Some(ref dcfg) = discover {
                         if dcfg.enabled {
-                            log_discovery_command(&command_code, &payload, discovery_log.as_deref());
+                            log_discovery_command(
+                                &command_code,
+                                &payload,
+                                discovery_log.as_deref(),
+                            );
                             match forward_to_hsm(&buf[..frame_len], dcfg, &*protocol).await {
                                 Ok(resp) => resp,
                                 Err(e) => {
@@ -337,7 +364,11 @@ fn log_discovery_command(command_code: &[u8], payload: &[u8], log: Option<&Disco
 ///
 /// Opens a fresh TCP connection per call. In production, consider a connection
 /// pool to the real HSM to avoid connection setup overhead on every forwarded command.
-async fn forward_to_hsm(frame: &[u8], cfg: &DiscoverConfig, protocol: &dyn Protocol) -> Result<Vec<u8>> {
+async fn forward_to_hsm(
+    frame: &[u8],
+    cfg: &DiscoverConfig,
+    protocol: &dyn Protocol,
+) -> Result<Vec<u8>> {
     use tokio::net::TcpStream;
     use tokio::time::{timeout, Duration};
 
@@ -346,8 +377,20 @@ async fn forward_to_hsm(frame: &[u8], cfg: &DiscoverConfig, protocol: &dyn Proto
         TcpStream::connect((&*cfg.hsm_host, cfg.hsm_port)),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("timeout connecting to real HSM {}:{}", cfg.hsm_host, cfg.hsm_port))?
-    .map_err(|e| anyhow::anyhow!("connecting to real HSM {}:{}: {e}", cfg.hsm_host, cfg.hsm_port))?;
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "timeout connecting to real HSM {}:{}",
+            cfg.hsm_host,
+            cfg.hsm_port
+        )
+    })?
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "connecting to real HSM {}:{}: {e}",
+            cfg.hsm_host,
+            cfg.hsm_port
+        )
+    })?;
 
     timeout(Duration::from_secs(10), stream.write_all(frame))
         .await

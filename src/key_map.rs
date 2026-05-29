@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use crate::error::ProxyError;
+use std::collections::HashMap;
 
 /// Resolves legacy HSM key identifiers to APC key ARNs.
 ///
@@ -24,7 +24,7 @@ impl KeyMap {
         }
         self.0
             .get(key_id)
-            .map(|s| s.as_str())
+            .map(std::string::String::as_str)
             .ok_or_else(|| ProxyError::KeyNotFound(key_id.to_string()))
     }
 }

@@ -1,5 +1,5 @@
-use bytes::Bytes;
 use super::{ParsedCommand, Protocol};
+use bytes::Bytes;
 
 /// Thales payShield 10K host command framing.
 ///
@@ -133,7 +133,9 @@ mod tests {
         let payload = b"someresponsedata";
         let out = ThalesPayShield.frame_response(header, response_code, error_code, payload);
         // Parse it back
-        let parsed = ThalesPayShield.parse(&out).expect("framed output should be parseable");
+        let parsed = ThalesPayShield
+            .parse(&out)
+            .expect("framed output should be parseable");
         assert_eq!(parsed.header, header);
         // response code + error code + payload is the parsed payload
         assert!(out.len() > 2);
@@ -142,7 +144,9 @@ mod tests {
     #[test]
     fn frame_error_produces_no_payload() {
         let out = ThalesPayShield.frame_error([0x00, 0x00], b"CA", b"68");
-        let parsed = ThalesPayShield.parse(&out).expect("error frame should parse");
+        let parsed = ThalesPayShield
+            .parse(&out)
+            .expect("error frame should parse");
         // payload should be just error code (2 bytes) since frame_error passes empty payload
         // header(2) + response_code(2) + error_code(2) = 6 bytes body
         assert_eq!(&*parsed.payload, b"68");

@@ -13,7 +13,12 @@ impl Handler for HeartbeatHandler {
         &["B2"]
     }
 
-    async fn handle(&self, _command_code: &[u8], _payload: &[u8], _state: &Arc<AppState>) -> HandlerResult {
+    async fn handle(
+        &self,
+        _command_code: &[u8],
+        _payload: &[u8],
+        _state: &Arc<AppState>,
+    ) -> HandlerResult {
         debug!("B2 heartbeat");
         HandlerResult::success(vec![])
     }

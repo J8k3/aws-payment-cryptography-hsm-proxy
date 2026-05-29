@@ -61,15 +61,20 @@ impl Handler for DukptPinVerifyHandler {
         &["CK", "CM", "CO", "CQ"]
     }
 
-    async fn handle(&self, command_code: &[u8], payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
+    async fn handle(
+        &self,
+        command_code: &[u8],
+        payload: &[u8],
+        state: &Arc<AppState>,
+    ) -> HandlerResult {
         match command_code {
             b"CK" => handle_ck(payload, state).await,
             b"CM" => handle_cm(payload, state).await,
             b"CO" | b"CQ" => {
                 warn!(cmd = %String::from_utf8_lossy(command_code), "no APC equivalent; returning 68");
-                HandlerResult::err(b"68")
+                HandlerResult::err(*b"68")
             }
-            _ => HandlerResult::err(b"68"),
+            _ => HandlerResult::err(*b"68"),
         }
     }
 }
@@ -101,7 +106,7 @@ async fn handle_cm(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     // Token mode (';' between PAN and PVKI) is not supported.
     if payload.get(pvki_start) == Some(&b';') {
         warn!("CM: Token mode (';' delimiter) not supported");
-        return HandlerResult::err(b"15");
+        return HandlerResult::err(*b"15");
     }
 
     let ksn = String::from_utf8_lossy(&payload[ksn_start..ksn_start + KSN_HEX_LEN]).to_string();
@@ -109,7 +114,7 @@ async fn handle_cm(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         String::from_utf8_lossy(&payload[pin_start..pin_start + PIN_BLOCK_LEN]).to_string(),
     );
     let pan = String::from_utf8_lossy(&payload[pan_start..pan_start + ACCOUNT_LEN]).to_string();
-    let pvki_str = String::from_utf8_lossy(&payload[pvki_start..pvki_start + PVKI_LEN]).to_string();
+    let pvki_str = String::from_utf8_lossy(&payload[pvki_start..=pvki_start]).to_string();
     let pvv = String::from_utf8_lossy(&payload[pvv_start..pvv_start + PVV_LEN]).to_string();
 
     let bdk_arn = match state.key_map.resolve(&bdk_id) {
@@ -122,8 +127,8 @@ async fn handle_cm(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     };
 
     use aws_sdk_paymentcryptographydata::types::{
-        DukptAttributes, DukptDerivationType, PinBlockFormatForPinData,
-        PinVerificationAttributes, VisaPinVerification,
+        DukptAttributes, DukptDerivationType, PinBlockFormatForPinData, PinVerificationAttributes,
+        VisaPinVerification,
     };
 
     // DukptAttributes carries only KSN + derivation type; BDK ARN goes in
@@ -158,6 +163,8 @@ async fn handle_cm(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         .encryption_key_identifier(&bdk_arn)
         .encrypted_pin_block(pin_block.as_str())
         .primary_account_number(&pan)
+        // KNOWN GAP: the 2N PIN block format field is consumed rather than forwarded. APC supports
+        // IsoFormat0/1/3/4. To fix: read the field, map payShield's 2N value to the APC enum, pass it here.
         .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
         .verification_attributes(PinVerificationAttributes::VisaPin(visa_attrs))
         .dukpt_attributes(dukpt_attrs)
@@ -167,8 +174,7 @@ async fn handle_cm(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(_) => HandlerResult::success(vec![]),
         Err(e) => {
             if e.as_service_error()
-                .map(|s| s.is_verification_failed_exception())
-                .unwrap_or(false)
+                .is_some_and(aws_sdk_paymentcryptographydata::operation::verify_pin_data::VerifyPinDataError::is_verification_failed_exception)
             {
                 warn!("CM: PIN mismatch");
                 return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
@@ -196,12 +202,9 @@ async fn handle_ck(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
 
     // 'K' and 'L' prefix decimalization table formats reference HSM user storage or AES
     // key blocks — neither has an APC equivalent.
-    match payload.get(decim_start) {
-        Some(&b'K') | Some(&b'L') => {
-            warn!("CK: user-storage/AES-encrypted decimalization table not supported");
-            return HandlerResult::err(b"15");
-        }
-        _ => {}
+    if let Some(&b'K' | &b'L') = payload.get(decim_start) {
+        warn!("CK: user-storage/AES-encrypted decimalization table not supported");
+        return HandlerResult::err(*b"15");
     }
 
     let pin_val_start = decim_start + DECIM_TABLE_LEN;
@@ -209,7 +212,7 @@ async fn handle_ck(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     // 'P' prefix PIN validation data is a 16H hex form; we only support the 12A form.
     if payload.get(pin_val_start) == Some(&b'P') {
         warn!("CK: 'P'-prefix PIN validation data (16H) not supported");
-        return HandlerResult::err(b"15");
+        return HandlerResult::err(*b"15");
     }
 
     let offset_start = pin_val_start + PIN_VAL_DATA_LEN;
@@ -227,11 +230,13 @@ async fn handle_ck(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     let pin_block = Zeroizing::new(
         String::from_utf8_lossy(&payload[pin_start..pin_start + PIN_BLOCK_LEN]).to_string(),
     );
-    let account = String::from_utf8_lossy(&payload[account_start..account_start + ACCOUNT_LEN]).to_string();
+    let account =
+        String::from_utf8_lossy(&payload[account_start..account_start + ACCOUNT_LEN]).to_string();
     let decim_table =
         String::from_utf8_lossy(&payload[decim_start..decim_start + DECIM_TABLE_LEN]).to_string();
     let pin_val_data =
-        String::from_utf8_lossy(&payload[pin_val_start..pin_val_start + PIN_VAL_DATA_LEN]).to_string();
+        String::from_utf8_lossy(&payload[pin_val_start..pin_val_start + PIN_VAL_DATA_LEN])
+            .to_string();
     let offset =
         String::from_utf8_lossy(&payload[offset_start..offset_start + IBM_OFFSET_LEN]).to_string();
 
@@ -245,8 +250,8 @@ async fn handle_ck(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     };
 
     use aws_sdk_paymentcryptographydata::types::{
-        DukptAttributes, DukptDerivationType, Ibm3624PinVerification,
-        PinBlockFormatForPinData, PinVerificationAttributes,
+        DukptAttributes, DukptDerivationType, Ibm3624PinVerification, PinBlockFormatForPinData,
+        PinVerificationAttributes,
     };
 
     // DukptAttributes carries only KSN + derivation type; BDK ARN goes in
@@ -282,6 +287,8 @@ async fn handle_ck(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         .encryption_key_identifier(&bdk_arn)
         .encrypted_pin_block(pin_block.as_str())
         .primary_account_number(&account)
+        // KNOWN GAP: the 2N PIN block format field is consumed rather than forwarded. APC supports
+        // IsoFormat0/1/3/4. To fix: read the field, map payShield's 2N value to the APC enum, pass it here.
         .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
         .verification_attributes(PinVerificationAttributes::Ibm3624Pin(ibm_attrs))
         .dukpt_attributes(dukpt_attrs)
@@ -291,8 +298,7 @@ async fn handle_ck(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(_) => HandlerResult::success(vec![]),
         Err(e) => {
             if e.as_service_error()
-                .map(|s| s.is_verification_failed_exception())
-                .unwrap_or(false)
+                .is_some_and(aws_sdk_paymentcryptographydata::operation::verify_pin_data::VerifyPinDataError::is_verification_failed_exception)
             {
                 warn!("CK: PIN mismatch");
                 return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
@@ -369,7 +375,7 @@ mod tests {
         payload.extend_from_slice(b"04"); // check length
         payload.extend_from_slice(b"123456789012"); // account
         payload.push(b'K'); // K-prefix decim table
-        // doesn't matter what follows — handler rejects on prefix
+                            // doesn't matter what follows — handler rejects on prefix
 
         let (_, bdk_len) = parse_bdk(&payload, 0).unwrap();
         let (_, pvk_len) = parse_legacy_key(&payload, bdk_len).unwrap();

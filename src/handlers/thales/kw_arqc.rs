@@ -7,37 +7,39 @@ use crate::error::ProxyError;
 use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, parse_legacy_key};
 use crate::handlers::{AppState, Handler, HandlerResult};
 
-/// payShield KQ — Verify ARQC and optionally generate ARPC.
+/// payShield KW — Verify ARQC and optionally generate ARPC (EMV & Cloud-Based SKD).
 ///
-/// Wire format per PUGD0537-004 p.468 (binary, not ASCII hex):
+/// Wire format per PUGD0537-004 p.471 — identical to KQ with one extra field:
 ///
-///   Mode Flag   1N ASCII  '0'=verify only
-///                         '1'=verify + ARPC Method 1 (ARC)
-///                         '2'=verify + ARPC Method 2 (CSU)
-///                         '3'/'4'=skip-verify ARPC (not supported by APC)
-///   Scheme ID   1N ASCII  '0'=Visa/Amex → EmvOptionA
-///                         '1'=Mastercard → EmvOptionB
-///   Key Type    3H ASCII  e.g. '00E' for IMK-AC (consumed)
-///   Key         var       16H | 'U'+32H | 'T'+48H  (parse_legacy_key)
-///   PAN+Seq     8B binary BCD — 12 PAN digits + 2 seq digits, right-padded 0xFF
-///   ATC         2B binary Application Transaction Counter
-///   UN          4B binary Unpredictable Number
-///   TxnLen      2B binary big-endian byte count of transaction data
-///   TxnData     nB binary EMV terminal transaction data
-///   0x3B        1B        delimiter
-///   ARQC        8B binary Authorization Request Cryptogram
-///   Mode 1 only:
-///     ARC       2B binary Auth Response Code
-///   Mode 2 only:
-///     CSU       4B binary Card Status Update
-///     PAD_len   1B binary byte count of proprietary auth data
-///     PAD       nB binary proprietary auth data
+///   Mode Flag        1N ASCII  '0'=verify only
+///                              '1'=verify + ARPC Method 1 (ARC)
+///                              '2'=verify + ARPC Method 2 (CSU)
+///                              '3'/'4'=skip-verify ARPC (not supported by APC)
+///   Scheme ID        1N ASCII  '0'=Visa/Amex → EmvOptionA
+///                              '1'=Mastercard → EmvOptionB
+///   Derivation Method 1A ASCII 'A'=EMV_OPTION_A, 'B'=EMV_OPTION_B (used for session key)
+///   Key Type         3H ASCII  consumed
+///   Key              var       16H | 'U'+32H | 'T'+48H
+///   PAN+Seq          8B binary BCD — 12 PAN digits + 2 seq digits, right-padded 0xFF
+///   ATC              2B binary Application Transaction Counter
+///   UN               4B binary Unpredictable Number
+///   TxnLen           2B binary big-endian byte count of transaction data
+///   TxnData          nB binary
+///   0x3B             1B        delimiter
+///   ARQC             8B binary
+///   Mode 1:  ARC     2B binary Auth Response Code
+///   Mode 2:  CSU     4B binary Card Status Update
+///            PAD_len 1B binary byte count of proprietary auth data
+///            PAD     nB binary
 ///
-/// ARQC mismatch → error 01.  Modes 3/4 → error 15 (unsupported).
-pub struct KqArqcHandler;
+/// KW extends KQ with Visa CVN14/CVN18/CVN22 and Mastercard M/Chip SKD variants.
+/// The Derivation Method byte ('A'/'B') selects the session key derivation algorithm;
+/// it maps to the same MajorKeyDerivationMode as Scheme ID in KQ, so the proxy
+/// uses Scheme ID for the APC parameter and consumes Derivation Method.
+pub struct KwArqcHandler;
 
 #[derive(Debug)]
-enum KqMode {
+enum KwMode {
     VerifyOnly,
     VerifyArpcMethod1,
     VerifyArpcMethod2,
@@ -53,9 +55,9 @@ enum ArpcParams {
     },
 }
 
-struct KqFields {
+struct KwFields {
     key_id: String,
-    mode: KqMode,
+    mode: KwMode,
     deriv_mode_a: bool,
     pan: String,
     pan_seq: String,
@@ -65,50 +67,64 @@ struct KqFields {
     arpc_params: Option<ArpcParams>,
 }
 
-fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
+fn parse_kw(payload: &[u8]) -> Result<KwFields, ProxyError> {
     let mut pos = 0;
 
     // Mode Flag (1N ASCII)
     if payload.len() < pos + 1 {
-        return Err(ProxyError::MalformedPayload("KQ: mode flag missing".into()));
+        return Err(ProxyError::MalformedPayload("KW: mode flag missing".into()));
     }
     let mode = match payload[pos] {
-        b'0' => KqMode::VerifyOnly,
-        b'1' => KqMode::VerifyArpcMethod1,
-        b'2' => KqMode::VerifyArpcMethod2,
+        b'0' => KwMode::VerifyOnly,
+        b'1' => KwMode::VerifyArpcMethod1,
+        b'2' => KwMode::VerifyArpcMethod2,
         b'3' | b'4' => {
             return Err(ProxyError::MalformedPayload(
-                "KQ: modes 3/4 (skip-verify) not supported by APC".into(),
+                "KW: modes 3/4 (skip-verify) not supported by APC".into(),
             ))
         }
         other => {
             return Err(ProxyError::MalformedPayload(format!(
-                "KQ: invalid mode flag '{}'",
+                "KW: invalid mode flag '{}'",
                 other as char
             )))
         }
     };
     pos += 1;
 
-    // Scheme ID (1N ASCII)
+    // Scheme ID (1N ASCII) → MajorKeyDerivationMode
     if payload.len() < pos + 1 {
-        return Err(ProxyError::MalformedPayload("KQ: scheme ID missing".into()));
+        return Err(ProxyError::MalformedPayload("KW: scheme ID missing".into()));
     }
     let deriv_mode_a = match payload[pos] {
         b'0' => true,  // Visa/Amex → EmvOptionA
         b'1' => false, // Mastercard → EmvOptionB
         other => {
             return Err(ProxyError::MalformedPayload(format!(
-                "KQ: invalid scheme ID '{}' (0=Visa/Amex, 1=MC)",
+                "KW: invalid scheme ID '{}' (0=Visa/Amex, 1=MC)",
                 other as char
             )))
         }
     };
     pos += 1;
 
+    // Derivation Method (1A ASCII) — consumed; redundant with Scheme ID for APC
+    if payload.len() < pos + 1 {
+        return Err(ProxyError::MalformedPayload(
+            "KW: derivation method missing".into(),
+        ));
+    }
+    if !matches!(payload[pos], b'A' | b'B') {
+        return Err(ProxyError::MalformedPayload(format!(
+            "KW: invalid derivation method '{}' ('A' or 'B')",
+            payload[pos] as char
+        )));
+    }
+    pos += 1;
+
     // Key Type (3H ASCII) — consumed
     if payload.len() < pos + 3 {
-        return Err(ProxyError::MalformedPayload("KQ: key type missing".into()));
+        return Err(ProxyError::MalformedPayload("KW: key type missing".into()));
     }
     pos += 3;
 
@@ -119,7 +135,7 @@ fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
     // PAN+Seq (8B binary BCD)
     if payload.len() < pos + 8 {
         return Err(ProxyError::MalformedPayload(
-            "KQ: PAN+seq field missing".into(),
+            "KW: PAN+seq field missing".into(),
         ));
     }
     let pan_seq_bytes: [u8; 8] = payload[pos..pos + 8]
@@ -130,30 +146,30 @@ fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
 
     // ATC (2B binary)
     if payload.len() < pos + 2 {
-        return Err(ProxyError::MalformedPayload("KQ: ATC missing".into()));
+        return Err(ProxyError::MalformedPayload("KW: ATC missing".into()));
     }
     let atc = bytes_to_hex(&payload[pos..pos + 2]);
     pos += 2;
 
     // UN (4B binary)
     if payload.len() < pos + 4 {
-        return Err(ProxyError::MalformedPayload("KQ: UN missing".into()));
+        return Err(ProxyError::MalformedPayload("KW: UN missing".into()));
     }
     pos += 4; // UN: parsed for position only; not forwarded (see KNOWN GAP in EmvCommon comment)
 
     // TxnLen (2B binary big-endian)
     if payload.len() < pos + 2 {
         return Err(ProxyError::MalformedPayload(
-            "KQ: transaction data length missing".into(),
+            "KW: transaction data length missing".into(),
         ));
     }
     let txn_byte_len = u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize;
     pos += 2;
 
-    // TxnData (txn_byte_len binary bytes)
+    // TxnData
     if payload.len() < pos + txn_byte_len {
         return Err(ProxyError::MalformedPayload(format!(
-            "KQ: transaction data too short: need {txn_byte_len} bytes"
+            "KW: transaction data too short: need {txn_byte_len} bytes"
         )));
     }
     let txn_data = Zeroizing::new(bytes_to_hex(&payload[pos..pos + txn_byte_len]));
@@ -162,25 +178,24 @@ fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
     // Delimiter 0x3B
     if payload.len() < pos + 1 || payload[pos] != 0x3B {
         return Err(ProxyError::MalformedPayload(
-            "KQ: missing 0x3B delimiter".into(),
+            "KW: missing 0x3B delimiter".into(),
         ));
     }
     pos += 1;
 
     // ARQC (8B binary)
     if payload.len() < pos + 8 {
-        return Err(ProxyError::MalformedPayload("KQ: ARQC missing".into()));
+        return Err(ProxyError::MalformedPayload("KW: ARQC missing".into()));
     }
     let arqc = bytes_to_hex(&payload[pos..pos + 8]);
     pos += 8;
 
-    // ARPC params (mode-dependent, binary)
+    // ARPC params
     let arpc_params = match mode {
-        KqMode::VerifyArpcMethod1 => {
-            // ARC (2B binary)
+        KwMode::VerifyArpcMethod1 => {
             if payload.len() < pos + 2 {
                 return Err(ProxyError::MalformedPayload(
-                    "KQ Method1: ARC missing".into(),
+                    "KW Method1: ARC missing".into(),
                 ));
             }
             let arc = bytes_to_hex(&payload[pos..pos + 2]);
@@ -188,26 +203,24 @@ fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
                 auth_response_code: arc,
             })
         }
-        KqMode::VerifyArpcMethod2 => {
-            // CSU (4B binary)
+        KwMode::VerifyArpcMethod2 => {
             if payload.len() < pos + 4 {
                 return Err(ProxyError::MalformedPayload(
-                    "KQ Method2: CSU missing".into(),
+                    "KW Method2: CSU missing".into(),
                 ));
             }
             let csu = bytes_to_hex(&payload[pos..pos + 4]);
             pos += 4;
-            // PAD_len (1B binary)
             if payload.len() < pos + 1 {
                 return Err(ProxyError::MalformedPayload(
-                    "KQ Method2: PAD length missing".into(),
+                    "KW Method2: PAD length missing".into(),
                 ));
             }
             let pad_len = payload[pos] as usize;
             pos += 1;
             if payload.len() < pos + pad_len {
                 return Err(ProxyError::MalformedPayload(
-                    "KQ Method2: PAD data truncated".into(),
+                    "KW Method2: PAD data truncated".into(),
                 ));
             }
             let pad = bytes_to_hex(&payload[pos..pos + pad_len]);
@@ -216,10 +229,10 @@ fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
                 proprietary_auth_data: pad,
             })
         }
-        KqMode::VerifyOnly => None,
+        KwMode::VerifyOnly => None,
     };
 
-    Ok(KqFields {
+    Ok(KwFields {
         key_id,
         mode,
         deriv_mode_a,
@@ -233,9 +246,9 @@ fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
 }
 
 #[async_trait]
-impl Handler for KqArqcHandler {
+impl Handler for KwArqcHandler {
     fn command_codes(&self) -> &'static [&'static str] {
-        &["KQ"]
+        &["KW"]
     }
 
     async fn handle(
@@ -244,12 +257,12 @@ impl Handler for KqArqcHandler {
         payload: &[u8],
         state: &Arc<AppState>,
     ) -> HandlerResult {
-        handle_kq(payload, state).await
+        handle_kw(payload, state).await
     }
 }
 
-async fn handle_kq(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
-    let fields = match parse_kq(payload) {
+async fn handle_kw(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
+    let fields = match parse_kw(payload) {
         Ok(f) => f,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -283,12 +296,10 @@ async fn handle_kq(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    // KNOWN GAP: EmvCommon (PAN+PanSeq+ATC) covers standard EMV and Visa CVN10/CVN14.
-    // APC also offers SessionKeyDerivation::Visa (PAN+PanSeq only — for CVN17/18/22, which
-    // do not include ATC in UDK derivation) and ::Mastercard (adds UN for M/Chip derivation).
-    // The KQ wire format does not expose the card's CVN, so the derivation variant cannot be
-    // auto-selected. Deployments using Visa CVN17/18/22 or Mastercard M/Chip may need a
-    // config-driven selector here.
+    // KNOWN GAP: same EmvCommon limitation as KQ — see kq_arqc.rs for details.
+    // KW adds CVN14/CVN18/CVN22 and M/Chip SKD variants (via the Derivation Method byte),
+    // but the command does not carry enough information to auto-select the correct APC
+    // SessionKeyDerivation variant (Visa, Mastercard, or EmvCommon).
     let session_key_attrs = SessionKeyDerivation::EmvCommon(emv_common);
 
     let auth_response_attrs: Option<CryptogramAuthResponse> = match fields.arpc_params {
@@ -330,7 +341,7 @@ async fn handle_kq(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         key = %key_arn,
         mode = ?fields.mode,
         deriv = if fields.deriv_mode_a { "EmvOptionA" } else { "EmvOptionB" },
-        "KQ: verify_auth_request_cryptogram"
+        "KW: verify_auth_request_cryptogram"
     );
 
     let mut req = state
@@ -355,10 +366,10 @@ async fn handle_kq(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
             if e.as_service_error()
                 .is_some_and(aws_sdk_paymentcryptographydata::operation::verify_auth_request_cryptogram::VerifyAuthRequestCryptogramError::is_verification_failed_exception)
             {
-                warn!("KQ: ARQC mismatch");
+                warn!("KW: ARQC mismatch");
                 return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
             }
-            warn!(?e, "KQ: verify_auth_request_cryptogram failed");
+            warn!(?e, "KW: verify_auth_request_cryptogram failed");
             HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
         }
     }
@@ -368,52 +379,49 @@ async fn handle_kq(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
 mod tests {
     use super::*;
 
-    /// Build a complete KQ binary payload up through ARQC.
-    fn kq_prefix(mode: u8, scheme: u8, key: &[u8], pan_seq_bcd: &[u8; 8], txn: &[u8]) -> Vec<u8> {
-        let mut v = vec![mode, scheme];
-        v.extend_from_slice(b"00E"); // key type 3H
-        v.extend_from_slice(key);
-        v.extend_from_slice(pan_seq_bcd); // 8B BCD
-        v.extend_from_slice(&[0x00, 0x01]); // ATC 2B
-        v.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // UN 4B
-        let len = txn.len() as u16;
-        v.extend_from_slice(&len.to_be_bytes()); // TxnLen 2B BE
-        v.extend_from_slice(txn); // TxnData
-        v.push(0x3B); // delimiter
-        v.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11]); // ARQC 8B
-        v
-    }
-
     fn single_key() -> Vec<u8> {
         b"1234567890ABCDEF".to_vec() // 16H single-length
     }
 
-    // PAN: 123456789012, Seq: 01 → BCD nibbles: 1 2 3 4 5 6 7 8 9 0 1 2 | 0 1 F F
+    // PAN: 123456789012, Seq: 01 → BCD: 12 34 56 78 90 12 | 01 FF
     fn pan_bcd() -> [u8; 8] {
         [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01, 0xFF]
     }
 
+    fn kw_prefix(mode: u8, scheme: u8, deriv: u8, key: &[u8], txn: &[u8]) -> Vec<u8> {
+        let mut v = vec![mode, scheme, deriv];
+        v.extend_from_slice(b"00E");
+        v.extend_from_slice(key);
+        v.extend_from_slice(&pan_bcd());
+        v.extend_from_slice(&[0x00, 0x01]); // ATC
+        v.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // UN
+        let len = txn.len() as u16;
+        v.extend_from_slice(&len.to_be_bytes());
+        v.extend_from_slice(txn);
+        v.push(0x3B);
+        v.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11]);
+        v
+    }
+
     #[test]
-    fn kq_parse_verify_only() {
-        let payload = kq_prefix(b'0', b'0', &single_key(), &pan_bcd(), &[0xDE, 0xAD]);
-        let f = parse_kq(&payload).unwrap();
-        assert!(matches!(f.mode, KqMode::VerifyOnly));
+    fn kw_parse_verify_only() {
+        let payload = kw_prefix(b'0', b'0', b'A', &single_key(), &[0xDE, 0xAD]);
+        let f = parse_kw(&payload).unwrap();
+        assert!(matches!(f.mode, KwMode::VerifyOnly));
         assert!(f.deriv_mode_a);
-        assert_eq!(f.key_id, "1234567890ABCDEF");
         assert_eq!(f.pan, "123456789012");
         assert_eq!(f.pan_seq, "01");
         assert_eq!(f.atc, "0001");
-        assert_eq!(f.txn_data.as_str(), "DEAD");
         assert_eq!(f.arqc, "AABBCCDDEEFF0011");
         assert!(f.arpc_params.is_none());
     }
 
     #[test]
-    fn kq_parse_method1_arpc() {
-        let mut payload = kq_prefix(b'1', b'0', &single_key(), &pan_bcd(), &[0xDE, 0xAD]);
-        payload.extend_from_slice(&[0x00, 0x10]); // ARC 2B binary
-        let f = parse_kq(&payload).unwrap();
-        assert!(matches!(f.mode, KqMode::VerifyArpcMethod1));
+    fn kw_parse_method1_arpc() {
+        let mut payload = kw_prefix(b'1', b'0', b'A', &single_key(), &[0xDE]);
+        payload.extend_from_slice(&[0x00, 0x10]);
+        let f = parse_kw(&payload).unwrap();
+        assert!(matches!(f.mode, KwMode::VerifyArpcMethod1));
         assert!(matches!(
             f.arpc_params,
             Some(ArpcParams::Method1 { ref auth_response_code }) if auth_response_code == "0010"
@@ -421,70 +429,26 @@ mod tests {
     }
 
     #[test]
-    fn kq_parse_method2_arpc_no_pad() {
-        let mut payload = kq_prefix(b'2', b'1', &single_key(), &pan_bcd(), &[0xDE, 0xAD]);
-        payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CSU 4B
-        payload.push(0x00); // PAD len 0
-        let f = parse_kq(&payload).unwrap();
-        assert!(!f.deriv_mode_a); // Mastercard
-        assert!(matches!(f.mode, KqMode::VerifyArpcMethod2));
-        assert!(matches!(
-            f.arpc_params,
-            Some(ArpcParams::Method2 { ref card_status_update, ref proprietary_auth_data })
-                if card_status_update == "00000000" && proprietary_auth_data.is_empty()
-        ));
+    fn kw_parse_mastercard_scheme() {
+        let payload = kw_prefix(b'0', b'1', b'B', &single_key(), &[]);
+        let f = parse_kw(&payload).unwrap();
+        assert!(!f.deriv_mode_a);
     }
 
     #[test]
-    fn kq_parse_method2_arpc_with_pad() {
-        let mut payload = kq_prefix(b'2', b'1', &single_key(), &pan_bcd(), &[0xDE, 0xAD]);
-        payload.extend_from_slice(&[0xAB, 0xCD, 0xEF, 0x12]); // CSU 4B
-        payload.push(0x02); // PAD len 2
-        payload.extend_from_slice(&[0xCA, 0xFE]); // PAD 2B
-        let f = parse_kq(&payload).unwrap();
+    fn kw_rejects_mode_3() {
+        let payload = kw_prefix(b'3', b'0', b'A', &single_key(), &[]);
         assert!(matches!(
-            f.arpc_params,
-            Some(ArpcParams::Method2 { ref proprietary_auth_data, .. })
-                if proprietary_auth_data == "CAFE"
-        ));
-    }
-
-    #[test]
-    fn kq_rejects_mode_3() {
-        let payload = kq_prefix(b'3', b'0', &single_key(), &pan_bcd(), &[]);
-        assert!(matches!(
-            parse_kq(&payload),
+            parse_kw(&payload),
             Err(ProxyError::MalformedPayload(_))
         ));
     }
 
     #[test]
-    fn kq_rejects_invalid_scheme() {
-        let payload = kq_prefix(b'0', b'2', &single_key(), &pan_bcd(), &[]);
+    fn kw_rejects_invalid_deriv_method() {
+        let payload = kw_prefix(b'0', b'0', b'C', &single_key(), &[]);
         assert!(matches!(
-            parse_kq(&payload),
-            Err(ProxyError::MalformedPayload(_))
-        ));
-    }
-
-    #[test]
-    fn kq_parse_double_length_key() {
-        let mut key = vec![b'U'];
-        key.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
-        let payload = kq_prefix(b'0', b'0', &key, &pan_bcd(), &[0xAB]);
-        let f = parse_kq(&payload).unwrap();
-        assert_eq!(f.key_id, "U1234567890ABCDEF1234567890ABCDEF");
-    }
-
-    #[test]
-    fn kq_rejects_missing_delimiter() {
-        // Build a payload but replace the 0x3B with 0x00
-        let mut payload = kq_prefix(b'0', b'0', &single_key(), &pan_bcd(), &[0xDE]);
-        // The 0x3B delimiter is at the end before ARQC — find and corrupt it
-        let delim_pos = payload.len() - 9; // 1B delim + 8B ARQC
-        payload[delim_pos] = 0x00;
-        assert!(matches!(
-            parse_kq(&payload),
+            parse_kw(&payload),
             Err(ProxyError::MalformedPayload(_))
         ));
     }

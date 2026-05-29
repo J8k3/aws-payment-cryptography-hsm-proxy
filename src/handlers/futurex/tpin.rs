@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
-use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::error::ProxyError;
+use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::protocol::futurex::parse_params;
 
 /// Futurex Excrypt TPIN — Translate PIN between two zone keys.
@@ -36,10 +36,18 @@ impl Handler for TpinHandler {
         &["TPIN"]
     }
 
-    async fn handle(&self, _command_code: &[u8], payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
+    async fn handle(
+        &self,
+        _command_code: &[u8],
+        payload: &[u8],
+        state: &Arc<AppState>,
+    ) -> HandlerResult {
         let params = parse_params(payload);
 
-        let aw = params.get(b"AW").and_then(|v| v.first().copied()).unwrap_or(b'0');
+        let aw = params
+            .get(b"AW")
+            .and_then(|v| v.first().copied())
+            .unwrap_or(b'0');
         let format = match format_code_to_apc(aw) {
             Ok(f) => f,
             Err(e) => return HandlerResult::from_proxy_error(&e),
@@ -47,27 +55,35 @@ impl Handler for TpinHandler {
 
         let incoming_key_raw = match params.get(b"AX") {
             Some(v) => String::from_utf8_lossy(v).to_string(),
-            None => return HandlerResult::from_proxy_error(
-                &ProxyError::MalformedPayload("TPIN missing AX (inbound key)".to_string())
-            ),
+            None => {
+                return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(
+                    "TPIN missing AX (inbound key)".to_string(),
+                ))
+            }
         };
         let outgoing_key_raw = match params.get(b"BT") {
             Some(v) => String::from_utf8_lossy(v).to_string(),
-            None => return HandlerResult::from_proxy_error(
-                &ProxyError::MalformedPayload("TPIN missing BT (outbound key)".to_string())
-            ),
+            None => {
+                return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(
+                    "TPIN missing BT (outbound key)".to_string(),
+                ))
+            }
         };
         let pin_block = match params.get(b"AL") {
             Some(v) => Zeroizing::new(String::from_utf8_lossy(v).to_string()),
-            None => return HandlerResult::from_proxy_error(
-                &ProxyError::MalformedPayload("TPIN missing AL (PIN block)".to_string())
-            ),
+            None => {
+                return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(
+                    "TPIN missing AL (PIN block)".to_string(),
+                ))
+            }
         };
         let account_number = match params.get(b"AK") {
             Some(v) => String::from_utf8_lossy(v).to_string(),
-            None => return HandlerResult::from_proxy_error(
-                &ProxyError::MalformedPayload("TPIN missing AK (account number)".to_string())
-            ),
+            None => {
+                return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(
+                    "TPIN missing AK (account number)".to_string(),
+                ))
+            }
         };
 
         let incoming_arn = match state.key_map.resolve(&incoming_key_raw) {
@@ -135,9 +151,10 @@ fn format_code_to_apc(aw: u8) -> Result<String, ProxyError> {
         b'1' => Ok("IsoFormat1".to_string()),
         b'3' => Ok("IsoFormat3".to_string()),
         b'4' => Ok("IsoFormat4".to_string()),
-        other => Err(ProxyError::UnsupportedPinFormat(
-            format!("TPIN AW={}", other as char)
-        )),
+        other => Err(ProxyError::UnsupportedPinFormat(format!(
+            "TPIN AW={}",
+            other as char
+        ))),
     }
 }
 

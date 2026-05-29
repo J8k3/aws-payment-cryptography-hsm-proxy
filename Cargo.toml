@@ -37,3 +37,27 @@ serde_json = "1"
 [dev-dependencies]
 proptest = "1"
 aws-credential-types = "1"
+
+[lints.rust]
+dead_code = "deny"
+unused_imports = "deny"
+
+[lints.clippy]
+# Hard errors — never acceptable
+unwrap_used = "deny"
+
+# Pedantic group at priority -1 so individual overrides below take precedence
+pedantic = { level = "warn", priority = -1 }
+
+# Suppress: intentional patterns in this codebase
+items_after_statements = "allow"  # SDK `use` inside handlers is deliberate scoping
+similar_names = "allow"           # arc/arqc, pan_start/pin_start are domain vocabulary
+doc_markdown = "allow"            # protocol field names (TxnLen, PAD_len) are not Rust identifiers
+doc_link_with_quotes = "allow"    # quotes in protocol wire-format docs are intentional
+struct_field_names = "allow"      # TlsConfig cert_file/key_file/ca_file suffix is intentional
+too_many_lines = "allow"          # protocol handlers are inherently verbose
+module_name_repetitions = "allow" # e.g. DukptMacHandler in dukpt_mac — explicit is fine
+large_futures = "allow"           # noted; async state machine restructuring deferred
+large_stack_arrays = "allow"      # protocol frame buffers are large by nature
+range_plus_one = "allow"          # slice[start..start + LEN] is clearer than ..=start+LEN-1
+cast_possible_truncation = "allow" # all casts are from fields with bounded widths

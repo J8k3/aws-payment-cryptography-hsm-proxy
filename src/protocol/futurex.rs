@@ -1,5 +1,5 @@
-use bytes::Bytes;
 use super::{ParsedCommand, Protocol};
+use bytes::Bytes;
 
 /// Futurex Excrypt protocol framing.
 ///
@@ -37,7 +37,11 @@ impl Protocol for FuturexExcrypt {
         let command_code = cmd_field[2..6].to_vec(); // 4-char code, e.g. b"TPIN"
 
         // Payload: everything after "AOCCCC;" up to the closing bracket
-        let params_start = if first_semi < inner.len() { first_semi + 1 } else { inner.len() };
+        let params_start = if first_semi < inner.len() {
+            first_semi + 1
+        } else {
+            inner.len()
+        };
         let payload = Bytes::copy_from_slice(&inner[params_start..]);
 
         Some(ParsedCommand {
@@ -69,7 +73,11 @@ impl Protocol for FuturexExcrypt {
             out.extend_from_slice(payload); // handlers produce "PARAM<value>;" already
         }
         // BB status parameter: map internal "00" (success) to Futurex "Y"
-        let status: &[u8] = if error_code == b"00" { b"Y" } else { error_code };
+        let status: &[u8] = if error_code == b"00" {
+            b"Y"
+        } else {
+            error_code
+        };
         out.extend_from_slice(b"BB");
         out.extend_from_slice(status);
         out.push(b';');
@@ -134,7 +142,7 @@ pub fn redact_for_log(params: &std::collections::HashMap<[u8; 2], Vec<u8>>) -> S
         .map(|(code, val)| {
             let code_str = String::from_utf8_lossy(code);
             if SENSITIVE.contains(code) {
-                format!("{}=[REDACTED]", code_str)
+                format!("{code_str}=[REDACTED]")
             } else {
                 format!("{}={}", code_str, String::from_utf8_lossy(val))
             }

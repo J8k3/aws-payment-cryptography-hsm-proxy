@@ -17,7 +17,12 @@ impl Handler for EchoHandler {
         &["ECHO"]
     }
 
-    async fn handle(&self, _command_code: &[u8], _payload: &[u8], _state: &Arc<AppState>) -> HandlerResult {
+    async fn handle(
+        &self,
+        _command_code: &[u8],
+        _payload: &[u8],
+        _state: &Arc<AppState>,
+    ) -> HandlerResult {
         debug!("ECHO heartbeat");
         HandlerResult::success(vec![])
     }

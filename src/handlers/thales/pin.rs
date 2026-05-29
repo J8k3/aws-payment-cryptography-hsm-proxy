@@ -3,13 +3,14 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
-use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::error::ProxyError;
+use crate::handlers::{AppState, Handler, HandlerResult};
 
-/// payShield PIN translation commands: CA, CC (static PEK) and CI, G0 (DUKPT).
+/// payShield PIN translation commands: CA, CC, BQ (static PEK) and CI, G0 (DUKPT).
 ///
-/// All four map to APC TranslatePinData. CI/G0 additionally supply a KSN
-/// for DUKPT key derivation.
+/// All five map to APC TranslatePinData. CI/G0 additionally supply a KSN
+/// for DUKPT key derivation. BQ is PIN block format conversion (same wire layout
+/// as CA/CC; source and destination keys may be the same or different).
 ///
 /// Field layout:
 ///   [0]       source key type   1 byte  ('0'=TDES, '1'=AES)
@@ -82,7 +83,9 @@ fn format_code_to_apc(code: &[u8]) -> Result<String, ProxyError> {
         b"01" => Ok("IsoFormat1".to_string()),
         // ISO Format 2 uses random padding and is not a network PIN block format;
         // APC does not support it for translation.
-        b"02" => Err(ProxyError::UnsupportedPinFormat("02 (ISO Format 2 not supported by APC)".to_string())),
+        b"02" => Err(ProxyError::UnsupportedPinFormat(
+            "02 (ISO Format 2 not supported by APC)".to_string(),
+        )),
         b"03" => Ok("IsoFormat3".to_string()),
         b"04" => Ok("IsoFormat4".to_string()),
         other => Err(ProxyError::UnsupportedPinFormat(
@@ -94,21 +97,32 @@ fn format_code_to_apc(code: &[u8]) -> Result<String, ProxyError> {
 #[async_trait]
 impl Handler for PinHandler {
     fn command_codes(&self) -> &'static [&'static str] {
-        &["CA", "CC", "CI", "G0"]
+        &["CA", "CC", "BQ", "CI", "G0"]
     }
 
-    async fn handle(&self, command_code: &[u8], payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
+    async fn handle(
+        &self,
+        command_code: &[u8],
+        payload: &[u8],
+        state: &Arc<AppState>,
+    ) -> HandlerResult {
         let is_dukpt = matches!(command_code, b"CI" | b"G0");
 
         let fields = if is_dukpt {
             match parse_ci_g0(payload) {
                 Ok(f) => f,
-                Err(e) => { warn!(?e, "CI/G0 parse error"); return HandlerResult::from_proxy_error(&e); }
+                Err(e) => {
+                    warn!(?e, "CI/G0 parse error");
+                    return HandlerResult::from_proxy_error(&e);
+                }
             }
         } else {
             match parse_ca_cc(payload) {
                 Ok(f) => f,
-                Err(e) => { warn!(?e, "CA/CC parse error"); return HandlerResult::from_proxy_error(&e); }
+                Err(e) => {
+                    warn!(?e, "CA/CC parse error");
+                    return HandlerResult::from_proxy_error(&e);
+                }
             }
         };
 
