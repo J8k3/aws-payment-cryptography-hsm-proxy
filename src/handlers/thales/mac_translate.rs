@@ -374,6 +374,9 @@ mod tests {
             b"CCDDCCDD",
         );
         p[0] = b'1'; // set mode byte to continuation
-        assert!(matches!(parse_my(&p), Err(ProxyError::UnsupportedMacMode(_))));
+        assert!(matches!(
+            parse_my(&p),
+            Err(ProxyError::UnsupportedMacMode(_))
+        ));
     }
 }

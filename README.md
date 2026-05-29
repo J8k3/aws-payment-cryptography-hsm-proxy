@@ -38,6 +38,8 @@ Run the proxy in passthrough mode between your application and the real HSM. The
 **Configure `proxy.yaml`:**
 ```yaml
 vendor: futurex_excrypt    # or thales_payshield
+aws:
+  region: us-east-1
 discover:
   enabled: true
   hsm_host: 192.168.1.10  # your real HSM
@@ -82,15 +84,62 @@ Commands with registered handlers are translated to APC. Commands without a hand
 
 ---
 
-## Supported Protocols
+## Supported Commands
 
-**Thales payShield 10K** (`thales_payshield`) — 2-byte length prefix + 2-byte command code framing. Implemented handlers: CA/CC/CI/G0 (PIN translate), C2/C4/M6/M8 (MAC generate/verify), CW/CY (CVV generate/verify), B2 (echo/heartbeat).
+### Thales payShield 10K (`thales_payshield`)
 
-**Futurex Excrypt Enterprise SSP v.2** (`futurex_excrypt`) — `[AOCCCC;param;param;]` bracket-delimited framing. Implemented handlers: ECHO (connectivity heartbeat), TPIN (PIN translate).
+Wire framing: `[2B length][2B header][2B command code][payload]` — length counts every byte that follows it (header + command + payload).
 
-**Atalla/NCR Payments** — Not currently supported. The companion [AWS Payment Cryptography MCP](https://github.com/J8k3/aws-payment-cryptography-mcp) includes Atalla command mappings at directory quality (command names and APC equivalents; no parameter detail), but no protocol framing or handlers exist in this proxy. If you have access to Atalla hardware and documentation and want to contribute, the handler registry is the extension point.
+| Commands | Function | APC Operation |
+|----------|----------|---------------|
+| CA CC BQ CI G0 | PIN translate (ZPK/TPK/PEK, DUKPT) | `TranslatePinData` |
+| DA DC EA EC | PIN verify — non-DUKPT (IBM 3624 and Visa PVV) | `VerifyPinData` |
+| CK CM | PIN verify — DUKPT 3DES single-length (IBM 3624 and Visa PVV) | `VerifyPinData` |
+| GO GQ | PIN verify — DUKPT 3DES/AES (IBM 3624 and Visa PVV) | `VerifyPinData` |
+| CU DU | PIN change — verify current + generate new verification datum (Visa PVV / IBM offset) | `VerifyPinData` + `GeneratePinData` |
+| GA CE | PIN generate / offset — Diebold method | `GeneratePinData` |
+| JA | Random PIN generate — IBM 3624 | `GeneratePinData` |
+| CW CY | CVV generate / verify (CVV1, CVV2, iCVV) | `GenerateCardValidationData` / `VerifyCardValidationData` |
+| NY | Static CVC3 and IVCVC3 generate (Mastercard contactless) | `GenerateCardValidationData` |
+| RY | CVV2 / CVC2 calculate or verify | `GenerateCardValidationData` / `VerifyCardValidationData` |
+| QY PM | Dynamic CVV (dCVV) generate / verify | `GenerateCardValidationData` / `VerifyCardValidationData` |
+| M6 M8 | MAC generate / verify | `GenerateMac` / `VerifyMac` |
+| C2 C4 | AS2805 MAC generate / verify | `GenerateMac` / `VerifyMac` |
+| MY | MAC verify and translate (re-key) | `VerifyMac` → `GenerateMac` |
+| MA MC ME | Legacy TAK MAC generate / verify / translate (ANSI X9.9) | `GenerateMac` / `VerifyMac` |
+| MK MM MO | Legacy binary MAC generate / verify / translate (ISO9797 Alg1) | `GenerateMac` / `VerifyMac` |
+| MU MW | Legacy binary MAC generate / verify with mode (ISO9797 Alg1) | `GenerateMac` / `VerifyMac` |
+| MQ | Legacy binary MAC generate — ZAK key (ISO9797 Alg1) | `GenerateMac` |
+| MS | Legacy binary MAC generate — ANSI X9.19 / Retail MAC | `GenerateMac` |
+| LQ LS | HMAC generate / verify (SHA-1/256/384/512) | `GenerateMac` / `VerifyMac` |
+| JU KU KY | EMV issuer script MAC — integrity only, mode 0 | `GenerateMac` |
+| GW | DUKPT MAC generate / verify (3DES & AES) | `GenerateMac` / `VerifyMac` |
+| M0 M2 M4 | Data encrypt / decrypt / translate | `EncryptData` / `DecryptData` / `ReEncryptData` |
+| HE HG | Legacy TAK encrypt / decrypt | `EncryptData` / `DecryptData` |
+| K0 | EMV counter / application data decrypt | `DecryptData` |
+| KQ | ARQC verify + ARPC generate (Visa/Amex + Mastercard, standard EMV) | `VerifyAuthRequestCryptogram` |
+| K2 | ARQC verify — Mastercard CAP / Dynamic CAP | `VerifyAuthRequestCryptogram` |
+| KS | ARQC verify — EMV2000 dynamic data authentication | `VerifyAuthRequestCryptogram` |
+| KW | ARQC verify + ARPC generate (Visa CVN14/CVN18/CVN22 + Mastercard M/Chip SKD) | `VerifyAuthRequestCryptogram` |
+| JS | ARQC verify + ARPC generate (UnionPay / CUP) | `VerifyAuthRequestCryptogram` |
+| B2 | Heartbeat / diagnostics | Echo response |
 
-Coverage is otherwise intentionally narrow. Each handler maps one HSM command to one APC data plane call. The handler registry is the extension point — add a file under `src/handlers/<vendor>/`, register it in `src/handlers/mod.rs`, and the proxy routes that command to it.
+### Futurex Excrypt Enterprise SSP v.2 (`futurex_excrypt`)
+
+Wire framing: `[AOCCCC;param;param;]` bracket-delimited with 2-byte parameter codes.
+
+| Commands | Function | APC Operation |
+|----------|----------|---------------|
+| ECHO | Connectivity heartbeat | Echo response |
+| TPIN | PIN translate | `TranslatePinData` |
+
+### Atalla / NCR Payments
+
+Not currently supported. The companion [AWS Payment Cryptography MCP](https://github.com/J8k3/aws-payment-cryptography-mcp) includes Atalla command mappings at directory quality (names and APC equivalents; no parameter detail), but no protocol framing or handlers exist in this proxy. If you have access to Atalla hardware and documentation and want to contribute, the handler registry is the extension point.
+
+---
+
+Each handler maps one HSM command to one APC data plane call. The handler registry is the extension point — add a file under `src/handlers/<vendor>/`, register it in `src/handlers/mod.rs`, and the proxy routes that command to it.
 
 ---
 
@@ -108,7 +157,7 @@ listen:
     ca_file:   /etc/apc-proxy/client-ca.crt   # present = require client cert (mTLS)
 ```
 
-Omit `tls:` for plaintext. Acceptable for local development; not for production. For FIPS-compliant TLS, swap the `ring` feature for `aws-lc-rs` in `Cargo.toml` and recompile — no other code changes needed. The crypto provider is selected at compile time via the feature flag.
+Omit `tls:` for plaintext. Acceptable for local development; not for production. To use a FIPS-capable TLS backend, swap the `ring` feature for `aws-lc-rs` in `Cargo.toml` and recompile — no other code changes needed. The crypto provider is selected at compile time via the feature flag. Note: `aws-lc-rs` provides a FIPS-capable backend but FIPS mode must be enabled at build time (`AWS_LC_SYS_FIPS=1`); a full FIPS validation requires review beyond this flag.
 
 ---
 
@@ -128,8 +177,13 @@ AWS credentials via the standard chain: IAM role, environment variables, `~/.aws
 1. Create `src/handlers/<vendor>/<command>.rs`. Implement the `Handler` trait — `handle()` receives the command code and payload bytes, returns `HandlerResult`.
 2. Add the module to `src/handlers/<vendor>/mod.rs`.
 3. Register an instance in `Registry::build()` in `src/handlers/mod.rs`.
+4. Add the command to the Supported Commands table above.
 
-The Futurex `parse_params()` helper (`src/protocol/futurex.rs`) splits Excrypt payloads into a `HashMap<[u8; 2], Vec<u8>>` keyed by 2-char parameter code. Wrap sensitive fields (key blocks, PIN blocks) in `Zeroizing<Vec<u8>>` so they are wiped from memory on drop. Look at `src/handlers/futurex/tpin.rs` as the reference implementation.
+**Thales reference:** `src/handlers/thales/cvv.rs` — handles CW/CY (CVV generate/verify), NY (static CVC3 generate), and RY (CVV2 calculate or verify) and shows the standard parse → key-map resolve → APC call → `HandlerResult` pattern. Most Thales handlers follow this structure.
+
+**Futurex reference:** `src/handlers/futurex/tpin.rs` — uses `parse_params()` from `src/protocol/futurex.rs` to split the Excrypt `[AOCCCC;param;param;]` payload into a `HashMap<[u8; 2], Vec<u8>>` keyed by 2-char parameter code.
+
+Wrap sensitive fields (key blocks, PIN blocks) in `Zeroizing<String>` or `Zeroizing<Vec<u8>>` so they are wiped from memory on drop. After implementing, run `cargo clippy -- -D warnings` and `cargo test` — both must pass before committing.
 
 ---
 
@@ -141,13 +195,15 @@ The Futurex `parse_params()` helper (`src/protocol/futurex.rs`) splits Excrypt p
 
 **Thales length field variant** — The proxy implements the standard payShield 10K framing where the 2-byte big-endian length prefix counts every byte that follows it — header (2 bytes) + command code (2 bytes) + payload. Some older payShield host API versions count only the payload, excluding the header. If commands parse incorrectly or responses are misframed, that is the first place to look: compare the value in `src/protocol/thales.rs` against the length field definition in your payShield Host Programmer's Guide.
 
-**Discovery passthrough is single-chunk** — In discovery mode, the proxy opens a fresh TCP connection per forwarded command and reads exactly one response chunk. Stateful protocols, multi-read responses, and commands that require connection continuity will not work correctly in discovery mode. For complex command sequences, capture them with a network sniffer instead.
+**Discovery passthrough is stateless** — In discovery mode, the proxy opens a fresh TCP connection per forwarded command, sends the frame, and reads until the response is complete (per the protocol's length/framing check). There is no connection state between commands. Stateful protocols and commands that require persistent connection state across multiple exchanges will not work correctly in discovery mode. For complex command sequences, capture them with a network sniffer instead.
 
 **PAN representation in PIN translation** — Thales CA/CC commands supply 12 digits (the rightmost digits of the PAN excluding the check digit). Futurex TPIN supplies the same via the `AK` parameter. The proxy passes this 12-digit value as `primary_account_number` to APC `TranslatePinData`. This matches the field APC uses internally to reconstruct the ISO PIN block, but it has not been verified against a live APC endpoint with real traffic. If PIN translation returns an error related to the PAN value, check whether your APC configuration expects the full PAN instead.
 
 **Futurex error codes** — When the proxy returns an error on a Futurex connection (key not found, malformed payload, APC failure), the `BB` status field carries a payShield-style error code (10, 15, 23, 41) rather than a Futurex-native code. These values are not defined in the Futurex Excrypt protocol. Most applications treat any non-`Y` status as failure and log the raw value, so this usually does not cause incorrect behavior — but an application that pattern-matches on specific `BB` codes will not recognize them as expected Futurex error codes.
 
 **Session state** — The proxy is stateless per command. HSM integrations that rely on keyed sessions or sequence numbers across multiple commands will not work without extending the server to track connection state.
+
+**ARQC session key derivation variant** — KQ and KW use APC's `EmvCommon` session key derivation (PAN + PAN Sequence + ATC), which is correct for standard EMV and Visa CVN10/CVN14. Visa CVN17/CVN18/CVN22 use a different derivation formula (PAN + PAN Sequence only, no ATC) that requires APC's `Visa` session key derivation variant; Mastercard M/Chip SKD uses a separate derivation that requires the `Mastercard` variant with the Unpredictable Number. If your deployment uses these card types and ARQC verification returns error 01 (mismatch) for valid transactions, the session key derivation variant is the first place to investigate.
 
 **Key map completeness** — Every key reference the application sends must appear in `key_mappings`. Discovery mode against a real HSM is the reliable way to enumerate them — look for parameter codes that carry key material (`AX`, `BT` in Futurex; the key field in Thales commands) and make sure each value has a mapping.
 

@@ -30,12 +30,13 @@ use std::time::Duration;
 fn proxy_addr() -> String {
     let host = std::env::var("PROXY_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("PROXY_PORT").unwrap_or_else(|_| "1500".to_string());
-    format!("{}:{}", host, port)
+    format!("{host}:{port}")
 }
 
 fn send_recv(frame: &[u8]) -> Vec<u8> {
     let mut conn = TcpStream::connect(proxy_addr()).expect("connect to proxy");
-    conn.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    conn.set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("set_read_timeout on TcpStream should not fail");
     conn.write_all(frame).expect("send frame");
     let mut resp = vec![0u8; 4096];
     let n = conn.read(&mut resp).expect("read response");
@@ -115,5 +116,8 @@ fn thales_ca_pin_translate_returns_translated_block() {
     let frame = make_thales_frame([0x00, 0x00], b"CA", payload);
     let resp = send_recv(&frame);
     let (error_code, _payload) = parse_thales_response(&resp);
-    assert_eq!(&error_code, b"00", "expected error code 00 (success), check key mappings and APC key existence");
+    assert_eq!(
+        &error_code, b"00",
+        "expected error code 00 (success), check key mappings and APC key existence"
+    );
 }

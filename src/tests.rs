@@ -1065,25 +1065,33 @@ async fn unsupported_command_returns_68() {
 
     // CO is explicitly unsupported (no APC equivalent for Diebold method);
     // registered via dukpt_pin_verify but handle() returns error 68
-    let handler = registry.get(b"CO").expect("CO registered in dukpt_pin_verify");
+    let handler = registry
+        .get(b"CO")
+        .expect("CO registered in dukpt_pin_verify");
     let result = handler.handle(b"CO", b"", &state).await;
     assert_eq!(&result.error_code, b"68");
 
     // CQ is explicitly unsupported (Encrypted PIN method);
     // registered via dukpt_pin_verify but handle() returns error 68
-    let handler = registry.get(b"CQ").expect("CQ registered in dukpt_pin_verify");
+    let handler = registry
+        .get(b"CQ")
+        .expect("CQ registered in dukpt_pin_verify");
     let result = handler.handle(b"CQ", b"", &state).await;
     assert_eq!(&result.error_code, b"68");
 
     // GS is explicitly unsupported (AES DUKPT Diebold method — no APC equivalent);
     // registered via dukpt_pin_verify_aes but handle() returns error 68
-    let handler = registry.get(b"GS").expect("GS registered in dukpt_pin_verify_aes");
+    let handler = registry
+        .get(b"GS")
+        .expect("GS registered in dukpt_pin_verify_aes");
     let result = handler.handle(b"GS", b"", &state).await;
     assert_eq!(&result.error_code, b"68");
 
     // GU is explicitly unsupported (AES DUKPT Encrypted PIN method);
     // registered via dukpt_pin_verify_aes but handle() returns error 68
-    let handler = registry.get(b"GU").expect("GU registered in dukpt_pin_verify_aes");
+    let handler = registry
+        .get(b"GU")
+        .expect("GU registered in dukpt_pin_verify_aes");
     let result = handler.handle(b"GU", b"", &state).await;
     assert_eq!(&result.error_code, b"68");
 }
