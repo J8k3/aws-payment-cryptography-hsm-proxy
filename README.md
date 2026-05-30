@@ -21,7 +21,13 @@ This proxy is a third path. The application keeps sending the same commands to t
 
 ## Status
 
-**This has not been tested against a real HSM client application.** The protocol parsers are built from specification and reference documentation, not from live traffic. There are known areas of uncertainty covered in the [Known Risks](#known-risks) section below. If you use this against a real application and hit a protocol issue, open an issue or PR. The core architecture is sound; the gaps are in edge cases that only surface under real traffic.
+**APC integration tested live (2026-05-30, us-east-1).** The proxy was run against real AWS Payment Cryptography keys. MA→MC (MAC generate + verify, ISO 9797 Alg 1) and HE→HG (data encrypt + decrypt, TDES ECB) completed end-to-end at the wire-frame level — raw Thales frames in, APC round-trip, correct response framing out. See [Performance](#performance) for measured latency.
+
+**Not yet tested against a real HSM client application.** The protocol parsers are built from specification and reference documentation, not from live traffic. There are known areas of uncertainty covered in the [Known Risks](#known-risks) section below. If you use this against a real application and hit a protocol issue, open an issue or PR. The core architecture is sound; the gaps are in edge cases that only surface under real traffic.
+
+### Test procedure
+
+The live test procedure is documented in `AGENTS.md` (§ Live APC Testing) and is repeatable: it provisions the minimum key set, runs the proxy, executes the integration suite, captures latency, and deletes the keys. The two integration tests that exercise real APC are `thales_ma_mc_roundtrip_live` and `thales_he_hg_roundtrip_live` in `tests/integration.rs`.
 
 ---
 
@@ -187,11 +193,40 @@ Wrap sensitive fields (key blocks, PIN blocks) in `Zeroizing<String>` or `Zeroiz
 
 ---
 
+## Performance
+
+Measured on 2026-05-30, us-east-1, proxy co-located with the calling process (loopback), AWS credentials via default profile.
+
+| Command | Scenario | `latency_us` |
+|---------|----------|-------------|
+| B2 (heartbeat) | No APC call — proxy responds locally | 1,359 µs (~1 ms) |
+| HE (data encrypt) | First call — HTTPS connection establishment | 341,029 µs (~341 ms) |
+| HG (data decrypt) | Subsequent call — connection reused | 20,216 µs (~20 ms) |
+| MA (MAC generate) | First call — concurrent with HE above | 401,551 µs (~402 ms) |
+| MC (MAC verify) | Subsequent call — connection reused | 12,746 µs (~13 ms) |
+
+**Cold start:** The first APC call establishes an HTTPS connection to the APC endpoint. Expect 300–400 ms for the first call per proxy instance. Connection reuse applies to subsequent calls on the same underlying HTTP/2 transport.
+
+**Steady state:** 13–20 ms per APC operation at same-region loopback latency. Cross-region deployments or higher network latency will add the round-trip delta. Applications with socket timeouts under 500 ms should extend them to at least 2 seconds to absorb both cold start and APC latency variance.
+
+**No-APC commands** (B2 heartbeat, future passthrough in discovery mode): sub-millisecond — no network call involved.
+
+The `latency_us` field is logged for every handled command:
+
+```
+INFO apc_proxy::server: command handled cmd=MA error_code=00 latency_us=401551
+INFO apc_proxy::server: command handled cmd=MC error_code=00 latency_us=12746
+```
+
+This is wall-clock time from completed frame parse to response encoding — i.e., APC round-trip plus proxy encoding overhead.
+
+---
+
 ## Known Risks
 
 **TLS cipher compatibility** — The proxy requires TLS 1.2 minimum (rustls 0.23). Older HSM client SDKs built against old OpenSSL may only offer TLS 1.0/1.1 or unsupported cipher suites. If the TLS handshake fails, omit the `tls:` block first to rule this out, then investigate the client's TLS version and cipher support. Certificate key type also matters: some HSM configurations restrict cipher suites in ways that require an ECDSA cert rather than RSA, or vice versa — this is a function of the HSM's TLS policy and varies by device configuration. If the handshake fails after ruling out TLS version, verify that the cert/key pair in `proxy.yaml` matches the key type the connecting client expects.
 
-**APC latency** — Hardware HSMs respond in under a millisecond. APC API calls are network round-trips — typically 20–100ms. Applications with tight socket timeouts will time out. Check the application's HSM connection timeout before assuming the proxy is broken.
+**APC latency** — Hardware HSMs respond in under a millisecond. APC API calls are network round-trips — 13–20 ms at steady state, 300–400 ms on first call (HTTPS connection establishment). See [Performance](#performance) for measured values. Applications with tight socket timeouts will time out; extend HSM connection timeouts to at least 2 seconds before assuming the proxy is broken.
 
 **Thales length field variant** — The proxy implements the standard payShield 10K framing where the 2-byte big-endian length prefix counts every byte that follows it — header (2 bytes) + command code (2 bytes) + payload. Some older payShield host API versions count only the payload, excluding the header. If commands parse incorrectly or responses are misframed, that is the first place to look: compare the value in `src/protocol/thales.rs` against the length field definition in your payShield Host Programmer's Guide.
 

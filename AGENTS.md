@@ -152,6 +152,103 @@ KB `apc_operation` and `confidence` fields can be misleading at the **algorithm*
 |------------|--------------|-------|
 | RI RK RM RO RQ RS RU RW, HI HK HM HO HQ HS HU HW | mixed | AS2805/RTKS combined MAC+translate; deferred |
 
+## Live APC Testing
+
+This procedure provisions real APC keys, runs the proxy against them, captures latency, and tears down the keys. Run it before a public release or when validating a new handler family against real APC behaviour. It is **not** part of the routine `cargo test` cycle.
+
+### Prerequisites
+
+- AWS credentials resolving to an account with `payment-cryptography:*` permissions.
+- Region: `us-east-1` (default for this project; override with `AWS_DEFAULT_REGION`).
+- The proxy binary built: `cargo build --release`.
+
+### Step 1 — Provision test keys via MCP
+
+Use the `mcp__apc-agent__create_key` tool (available in Claude Code sessions) to create the minimum key set. Create one key per family; record the `KeyArn` returned by each call.
+
+| Key | Usage | Algorithm | Description |
+|-----|-------|-----------|-------------|
+| `test-mac-key` | `M1` | `TDES_2KEY` | MAC generate + verify for MA/MC/ME (ISO 9797 Alg 1 / CBC-MAC) |
+| `test-dek-key` | `E3` | `TDES_2KEY` | Encrypt + decrypt (HE/HG, M0/M2) |
+
+Example tool call for the MAC key:
+```json
+{ "KeyAttributes": { "KeyUsage": "TR31_M1_ISO_9797_1_MAC_KEY", "KeyClass": "SYMMETRIC_KEY", "KeyAlgorithm": "TDES_2KEY", "KeyModesOfUse": { "Generate": true, "Verify": true } }, "Exportable": false, "Enabled": true }
+```
+
+### Step 2 — Configure proxy.yaml
+
+Update the `key_mappings` section with the ARNs from Step 1. The left side is the legacy key label the test frames will send; the right side is the APC key ARN.
+
+```yaml
+aws:
+  region: us-east-1
+
+key_mappings:
+  # Replace with actual ARNs from Step 1
+  "1234567890ABCDEF": "arn:aws:payment-cryptography:us-east-1:ACCOUNT:key/MAC_KEY_ID"
+  "mock-dek":         "arn:aws:payment-cryptography:us-east-1:ACCOUNT:key/DEK_KEY_ID"
+```
+
+### Step 3 — Start the proxy
+
+```powershell
+$env:RUST_LOG = "apc_proxy=info"
+cargo run --release -- --config proxy.yaml
+```
+
+The proxy is ready when it logs `proxy listening`.
+
+### Step 4 — Run the integration tests
+
+In a second terminal (proxy stays running):
+
+```powershell
+$env:PROXY_HOST = "127.0.0.1"
+$env:PROXY_PORT = "1500"
+cargo test --test integration -- --ignored --nocapture
+```
+
+At minimum, `thales_b2_heartbeat_returns_success` must pass (no APC key required). MAC and encrypt tests require the keys from Step 1 to be reflected in `proxy.yaml`.
+
+### Step 5 — Capture latency
+
+Every handled command emits a structured log line in the proxy terminal:
+
+```
+INFO apc_proxy::server: command handled cmd=B2 error_code=00 latency_us=41
+INFO apc_proxy::server: command handled cmd=MA error_code=00 latency_us=8712
+INFO apc_proxy::server: command handled cmd=MC error_code=00 latency_us=7834
+```
+
+The `latency_us` field is wall-clock time from completed frame parse to APC response — i.e., APC round-trip plus proxy encoding overhead. Collect representative values across command families and record them in the README latency table (see README § Performance).
+
+### Step 6 — Delete test keys (critical — avoids ongoing charges)
+
+If you used the full integration test key set committed in `proxy.yaml`, run:
+
+```powershell
+python scripts/delete_test_keys.py
+```
+
+This reads all ARNs from `proxy.yaml key_mappings` and schedules each for deletion (7-day waiting period). Keys already in `DELETE_SCHEDULED` state are skipped cleanly. Re-run is idempotent.
+
+For ad-hoc keys created outside `proxy.yaml`, use `mcp__apc-agent__delete_key` per ARN, or add the ARNs to `proxy.yaml` first and then run the script.
+
+### Step 7 — Restore proxy.yaml
+
+**For the committed integration test key set:** `proxy.yaml` intentionally commits ARNs for the full integration test suite — these are documented non-production keys with known material (see the comment block above `key_mappings`). Leave them in place.
+
+**For ad-hoc keys added for a one-off test:** remove those entries from `proxy.yaml` before committing. Do not commit ARNs that are not part of the documented test key set.
+
+### What constitutes a passing live test
+
+- `thales_b2_heartbeat_returns_success`: error code `00` (proxy liveness, no APC call)
+- At least one MAC command (MA or M6): error code `00` from APC
+- At least one encrypt command (HE or M0): error code `00` from APC
+- All `latency_us` values under 100 ms (100,000 µs) for a same-region deployment
+- Zero keys remaining in the account after Step 6
+
 ## Critical Behavioral Rules
 
 - **Never intercept live traffic in test code.** Protocol parsers and handlers are tested against crafted byte buffers only. Do not write tests that open real sockets to production systems.
