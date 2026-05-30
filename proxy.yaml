@@ -42,18 +42,70 @@ aws:
 #   log_file: discovery.jsonl   # structured NDJSON — one record per unique command code
 #                               # feed directly to your AI coding client to generate handler stubs
 
-# Map legacy key identifiers to APC key ARNs.
+# ──────────────────────────────────────────────────────────────────────────────
+# Integration test key mappings
 #
-# The key is whatever your application sends in the key field of a command:
-#   - 32-char hex (LMK-encrypted key under Thales)
-#   - TR-31 key block value (Futurex AX/BT parameters)
-#   - A human-readable label
+# All test keys live in us-east-1 account 030716882260.
+# Keys marked "[known material]" were imported via KEY_CRYPTOGRAM (RSA-OAEP-SHA256)
+# with test material from scripts/import_test_keys.py — the same raw bytes can be
+# used in CyberChef for Level 2 cross-validation.
 #
-# The value is the APC key ARN or alias.
-# Values already starting with arn:aws:payment-cryptography: or alias/ pass through unchanged.
+# Key material reference (non-production use only):
+#   LTEST_P0SRC_0001  P0 ZPK src   0123456789ABCDEF0123456789ABCDEF  KCV D5D44F
+#   LTEST_P0DST_0001  P0 ZPK dst   FEDCBA9876543210FEDCBA9876543210  KCV A68CDC
+#   LTEST_V1PVK_0001  V1 IBM PVK   112233445566778811223344556677AA  KCV 85A8D3
+#   LTEST_V2PVK_*     V2 Visa PVK  AABBCCDDEEFF00011122334455667788  KCV 664CDA
+#   LTEST_B0BDK_*     B0 BDK       0123456789ABCDEFFEDCBA9876543210  KCV 08D7B4
+#   LTEST_E0IMK_0001  E0 AES-256   APC-generated (no known material) KCV 9AA39D
+#
+# Cleanup: run `python scripts/delete_test_keys.py` to schedule all listed keys
+# for deletion after testing.
+# ──────────────────────────────────────────────────────────────────────────────
 key_mappings:
-  # ZPK_INBOUND:  arn:aws:payment-cryptography:us-east-1:123456789012:key/abc123
-  # ZPK_OUTBOUND: arn:aws:payment-cryptography:us-east-1:123456789012:key/def456
-  # BDK_TERMINAL: arn:aws:payment-cryptography:us-east-1:123456789012:key/ghi789
-  # CVK_VISA:     arn:aws:payment-cryptography:us-east-1:123456789012:key/jkl012
-  # ZAK_MAC:      arn:aws:payment-cryptography:us-east-1:123456789012:key/mno345
+  # ── Futurex TPIN key labels (Excrypt AX/BT parameter values) ─────────────────
+  ZPK_INBOUND:  "arn:aws:payment-cryptography:us-east-1:030716882260:key/njodcvi5plbzmhkg"  # P0SRC [known]
+  ZPK_OUTBOUND: "arn:aws:payment-cryptography:us-east-1:030716882260:key/xaude4iot7jabf5m"  # P0DST [known]
+
+  # ── 16-char labels (parse_legacy_key plain / parse_legacy_key 16H) ──────────
+
+  # Existing live test keys (MA/MC and HE/HG integration tests)
+  LIVETEST_MAC_001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/igkljfe7u77hg37c"  # M1 TDES
+  LIVETEST_DEK_001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/hygvlh26clxy4jx3"  # D0 TDES
+
+  # MAC keys
+  LTEST_M1_MAC_001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/igkljfe7u77hg37c"  # M1 ISO9797-Alg1 TDES
+  LTEST_M3_MAC_001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/tcpuujxalggq75pc"  # M3 ISO9797-Alg3 TDES
+  LTEST_M6_MAC_001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/xoyhrt3k7yi2tjgm"  # M6 CMAC AES-128
+
+  # HMAC key
+  LTEST_HMAC_00001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/lyo3yae4a7j22jsx"  # M7 HMAC AES-128
+
+  # Card verification key
+  LTEST_CVK_000001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/i6fwfb5atwo4rcbe"  # C0 CVK TDES
+
+  # PIN keys [known material] — used in DA/DC/CA DA
+  LTEST_P0SRC_0001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/njodcvi5plbzmhkg"  # P0 ZPK src [known]
+  LTEST_P0DST_0001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/xaude4iot7jabf5m"  # P0 ZPK dst [known]
+  LTEST_V1PVK_0001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/fh7ebt6ieyiyw57e"  # V1 IBM PVK [known]
+
+  # EMV ARQC master key (APC-generated; no known material — Level 1 test only)
+  LTEST_E0IMK_0001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/iiv65vnfxrbvofbv"  # E0 AES-256
+
+  # ── 32-char labels (parse_key_32 / parse_bdk plain / CA 32H key field) ──────
+
+  # Visa PVV PVK [known material] — 32H for parse_key_32 (DC/EC command)
+  "LTEST_V2PVK_0001LTEST_V2PVK_0001": "arn:aws:payment-cryptography:us-east-1:030716882260:key/s5oan6j3kbvb735q"
+
+  # DUKPT BDK [known material] — 32H for parse_bdk (GW command)
+  "LTEST_B0BDK_0001LTEST_B0BDK_0001": "arn:aws:payment-cryptography:us-east-1:030716882260:key/nmn2jogdb57p4dbx"
+
+  # M1/M3 keys addressed as 32H (C2/C4 command — key is always 32H, no parse_legacy_key prefix)
+  "LTEST_M1_MAC_001LTEST_M1_MAC_001": "arn:aws:payment-cryptography:us-east-1:030716882260:key/igkljfe7u77hg37c"
+  "LTEST_M3_MAC_001LTEST_M3_MAC_001": "arn:aws:payment-cryptography:us-east-1:030716882260:key/tcpuujxalggq75pc"
+
+  # P0 ZPK keys as 32H — CA/CC/BQ use bytes 2-34 and 34-66 as key IDs (always 32H)
+  "LTEST_P0SRC_0001_LTEST_P0SRC_001": "arn:aws:payment-cryptography:us-east-1:030716882260:key/njodcvi5plbzmhkg"
+  "LTEST_P0DST_0001_LTEST_P0DST_001": "arn:aws:payment-cryptography:us-east-1:030716882260:key/xaude4iot7jabf5m"
+
+  # C0 CVK as 32H — CW/CY read CVK as fixed 32H (bytes 1-33), no parse_legacy_key
+  "LTEST_CVK_000001LTEST_CVK_000001": "arn:aws:payment-cryptography:us-east-1:030716882260:key/i6fwfb5atwo4rcbe"
