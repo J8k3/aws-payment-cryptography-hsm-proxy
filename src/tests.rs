@@ -316,8 +316,8 @@ async fn thales_ma_generate_mac_success() {
     let result = handler.handle(b"MA", &payload, &state).await;
 
     assert_eq!(&result.error_code, b"00", "expected success");
-    // Mock returns Mac = "AABBCCDDEE112233"
-    assert_eq!(result.payload.as_slice(), b"AABBCCDDEE112233");
+    // Mock returns Mac = "AABBCCDDEE112233"; handler truncates to first 8H (4 bytes)
+    assert_eq!(result.payload.as_slice(), b"AABBCCDD");
 }
 
 #[tokio::test]
@@ -423,8 +423,8 @@ async fn thales_me_verify_and_translate_success() {
     let result = handler.handle(b"ME", &payload, &state).await;
 
     assert_eq!(&result.error_code, b"00");
-    // ME returns the translated MAC from generate_mac
-    assert_eq!(result.payload.as_slice(), b"AABBCCDDEE112233");
+    // ME returns the translated MAC from generate_mac; handler truncates to first 8H (4 bytes)
+    assert_eq!(result.payload.as_slice(), b"AABBCCDD");
 }
 
 #[tokio::test]

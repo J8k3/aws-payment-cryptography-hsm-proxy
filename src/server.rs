@@ -101,6 +101,22 @@ pub async fn run(cfg: ProxyConfig) -> Result<()> {
     }
     let aws_cfg = aws_builder.load().await;
 
+    if let Some(provider) = aws_cfg.credentials_provider() {
+        use aws_credential_types::provider::ProvideCredentials;
+        match provider.provide_credentials().await {
+            Ok(creds) if creds.expiry().is_none() => {
+                warn!(
+                    "AWS credentials have no expiry — long-lived IAM user keys detected. \
+                     Use an IAM role (instance profile, ECS task role) in production."
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(err = %e, "could not pre-resolve AWS credentials at startup; calls will fail if credentials are unavailable");
+            }
+        }
+    }
+
     let state = Arc::new(AppState {
         key_map: KeyMap::new(cfg.key_mappings.clone()),
         data: aws_sdk_paymentcryptographydata::Client::new(&aws_cfg),
@@ -295,9 +311,16 @@ where
                 "command received"
             );
 
+            let t0 = std::time::Instant::now();
             let response_bytes = match registry.get(&command_code) {
                 Some(handler) => {
                     let result = handler.handle(&command_code, &payload, &state).await;
+                    info!(
+                        cmd = %String::from_utf8_lossy(&command_code),
+                        error_code = %String::from_utf8_lossy(&result.error_code),
+                        latency_us = t0.elapsed().as_micros(),
+                        "command handled"
+                    );
                     let rc = protocol.response_code(&command_code);
                     protocol.frame_response(header, &rc, &result.error_code, &result.payload)
                 }

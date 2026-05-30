@@ -384,7 +384,12 @@ async fn generate_alg1_mac(key_arn: &str, data_hex: &str, state: &Arc<AppState>)
         .send()
         .await
     {
-        Ok(resp) => HandlerResult::success(resp.mac().as_bytes().to_vec()),
+        Ok(resp) => {
+            // Thales legacy MAC commands return 4 bytes (8 hex chars); APC returns 8 bytes (16H).
+            // Truncate to match the wire protocol so a round-trip MA→MC works correctly.
+            let mac = resp.mac();
+            HandlerResult::success(mac.as_bytes()[..MAC_HEX_LEN.min(mac.len())].to_vec())
+        }
         Err(e) => {
             warn!(?e, "generate_mac failed");
             HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
@@ -403,7 +408,10 @@ async fn generate_alg3_mac(key_arn: &str, data_hex: &str, state: &Arc<AppState>)
         .send()
         .await
     {
-        Ok(resp) => HandlerResult::success(resp.mac().as_bytes().to_vec()),
+        Ok(resp) => {
+            let mac = resp.mac();
+            HandlerResult::success(mac.as_bytes()[..MAC_HEX_LEN.min(mac.len())].to_vec())
+        }
         Err(e) => {
             warn!(?e, "generate_mac failed");
             HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
@@ -483,7 +491,10 @@ async fn verify_then_generate_alg1(
         .send()
         .await
     {
-        Ok(resp) => HandlerResult::success(resp.mac().as_bytes().to_vec()),
+        Ok(resp) => {
+            let mac = resp.mac();
+            HandlerResult::success(mac.as_bytes()[..MAC_HEX_LEN.min(mac.len())].to_vec())
+        }
         Err(e) => {
             warn!(?e, "{cmd}: generate_mac failed after verify succeeded");
             HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))

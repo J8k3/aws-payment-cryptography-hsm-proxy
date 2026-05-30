@@ -190,11 +190,15 @@ async fn handle_ibm(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ibm3624PinVerification, PinBlockFormatForPinData, PinVerificationAttributes,
     };
 
+    // payShield left-justifies the offset and right-pads with 'F' to 12H.
+    // APC requires only the significant decimal digits (^[0-9]+$), no F padding.
+    let offset_trimmed = fields.offset.trim_end_matches('F').to_string();
+
     let ibm_attrs = match Ibm3624PinVerification::builder()
         .decimalization_table(&fields.decim_table)
         .pin_validation_data_pad_character("F")
         .pin_validation_data(&fields.pin_val_data)
-        .pin_offset(&fields.offset)
+        .pin_offset(&offset_trimmed)
         .build()
         .map_err(|e| ProxyError::ApcError(e.to_string()))
     {

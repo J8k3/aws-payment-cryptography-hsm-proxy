@@ -173,11 +173,13 @@ impl Handler for DukptMacHandler {
             DukptKeyVariant, MacAlgorithmDukpt, MacAttributes,
         };
 
-        // KNOWN GAP: Bidirectional covers both terminal (Request) and host (Response) MACs.
-        // Direction-restricted BDKs would require Request for verify or Response for generate.
+        // APC: DukptKeyVariant::Bidirectional is AES DUKPT (X9.24-3) only; 3DES DUKPT
+        // X9.24-1 requires Request or Response. Use Request (terminal MAC direction).
+        // KNOWN GAP: payShield GW does not expose direction — host-response MACs
+        // would need Response variant. A future enhancement could infer from key type.
         let mac_alg_dukpt = match MacAlgorithmDukpt::builder()
             .key_serial_number(&fields.ksn)
-            .dukpt_key_variant(DukptKeyVariant::Bidirectional)
+            .dukpt_key_variant(DukptKeyVariant::Request)
             .dukpt_derivation_type(fields.deriv_type)
             .build()
         {

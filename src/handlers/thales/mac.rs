@@ -243,24 +243,55 @@ impl Handler for MacHandler {
 
         if is_verify {
             let mac_val = fields.mac_to_verify.expect("is_verify guarantees Some");
-            match state
-                .data
-                .verify_mac()
-                .key_identifier(&key_arn)
-                .message_data(&fields.message_hex)
-                .mac(&mac_val)
-                .verification_attributes(mac_attrs)
-                .send()
-                .await
-            {
-                Ok(_) => HandlerResult::success(vec![]),
-                Err(e) => {
-                    if e.as_service_error().is_some_and(aws_sdk_paymentcryptographydata::operation::verify_mac::VerifyMacError::is_verification_failed_exception) {
-                        warn!("verify_mac: MAC mismatch");
-                        return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
+
+            if fields.algorithm == "CMAC" {
+                // APC verify_mac requires the full 32H (16-byte) AES-CMAC, but payShield M8
+                // sends only the truncated mac_size bytes that M6 returned (8H for mac_size=0).
+                // Workaround: regenerate the full CMAC and compare the leading mac_size bytes.
+                match state
+                    .data
+                    .generate_mac()
+                    .key_identifier(&key_arn)
+                    .message_data(&fields.message_hex)
+                    .generation_attributes(mac_attrs)
+                    .send()
+                    .await
+                {
+                    Ok(resp) => {
+                        let full_mac = resp.mac();
+                        let expected = &full_mac[..fields.mac_size_bytes * 2];
+                        if mac_val.eq_ignore_ascii_case(expected) {
+                            HandlerResult::success(vec![])
+                        } else {
+                            warn!("M8 CMAC: MAC prefix mismatch");
+                            HandlerResult::from_proxy_error(&ProxyError::VerificationFailed)
+                        }
                     }
-                    warn!(?e, "verify_mac failed");
-                    HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
+                    Err(e) => {
+                        warn!(?e, "M8 CMAC: generate_mac for verify failed");
+                        HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
+                    }
+                }
+            } else {
+                match state
+                    .data
+                    .verify_mac()
+                    .key_identifier(&key_arn)
+                    .message_data(&fields.message_hex)
+                    .mac(&mac_val)
+                    .verification_attributes(mac_attrs)
+                    .send()
+                    .await
+                {
+                    Ok(_) => HandlerResult::success(vec![]),
+                    Err(e) => {
+                        if e.as_service_error().is_some_and(aws_sdk_paymentcryptographydata::operation::verify_mac::VerifyMacError::is_verification_failed_exception) {
+                            warn!("verify_mac: MAC mismatch");
+                            return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
+                        }
+                        warn!(?e, "verify_mac failed");
+                        HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
+                    }
                 }
             }
         } else {
