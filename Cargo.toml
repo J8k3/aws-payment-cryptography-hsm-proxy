@@ -1,6 +1,6 @@
 [package]
 name = "apc-proxy"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Thales payShield 10K and Futurex Excrypt → AWS Payment Cryptography protocol proxy"
 license = "Apache-2.0"
