@@ -6,6 +6,7 @@ use zeroize::Zeroizing;
 use crate::error::ProxyError;
 use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, parse_key_32};
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
 /// payShield JS — ARQC Verification and/or ARPC Generation (UnionPay / CUP).
 ///
@@ -40,7 +41,7 @@ enum JsMode {
 }
 
 struct JsFields {
-    key_id: String,
+    key_id: KeyDescriptor,
     pan: String,
     pan_seq: String,
     atc: String,
@@ -187,7 +188,7 @@ async fn handle_js(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    let key_arn = match state.key_map.resolve(&fields.key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&fields.key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -292,7 +293,7 @@ mod tests {
     fn js_parse_verify_only() {
         let payload = build_payload(b'0', &double_key(), false);
         let f = parse_js(&payload).unwrap();
-        assert_eq!(f.key_id, "1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.key_id.raw, "1234567890ABCDEF1234567890ABCDEF");
         assert_eq!(f.pan, "123456789012");
         assert_eq!(f.pan_seq, "01");
         assert_eq!(f.atc, "0001");
@@ -314,7 +315,7 @@ mod tests {
         key.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
         let payload = build_payload(b'0', &key, false);
         let f = parse_js(&payload).unwrap();
-        assert_eq!(f.key_id, "U1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.key_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
     }
 
     #[test]

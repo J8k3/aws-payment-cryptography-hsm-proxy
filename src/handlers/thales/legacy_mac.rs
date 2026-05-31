@@ -116,7 +116,7 @@ async fn handle_ma(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
     let data_hex = bytes_to_hex(data_slice(payload, key_len));
-    let key_arn = match state.key_map.resolve(&key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -136,7 +136,7 @@ async fn handle_mc(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     }
     let mac_val = String::from_utf8_lossy(&payload[key_len..key_len + MAC_HEX_LEN]).to_string();
     let data_hex = bytes_to_hex(data_slice(payload, key_len + MAC_HEX_LEN));
-    let key_arn = match state.key_map.resolve(&key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -161,11 +161,11 @@ async fn handle_me(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     }
     let mac_val = String::from_utf8_lossy(&payload[mac_start..mac_start + MAC_HEX_LEN]).to_string();
     let data_hex = bytes_to_hex(data_slice(payload, mac_start + MAC_HEX_LEN));
-    let src_arn = match state.key_map.resolve(&src_key_id) {
+    let src_arn = match state.key_map.resolve_descriptor(&src_key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let dst_arn = match state.key_map.resolve(&dst_key_id) {
+    let dst_arn = match state.key_map.resolve_descriptor(&dst_key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -184,7 +184,7 @@ async fn handle_mk(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(v) => v,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let key_arn = match state.key_map.resolve(&key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -208,7 +208,7 @@ async fn handle_mm(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(v) => v,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let key_arn = match state.key_map.resolve(&key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -236,11 +236,11 @@ async fn handle_mo(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(v) => v,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let src_arn = match state.key_map.resolve(&src_key_id) {
+    let src_arn = match state.key_map.resolve_descriptor(&src_key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let dst_arn = match state.key_map.resolve(&dst_key_id) {
+    let dst_arn = match state.key_map.resolve_descriptor(&dst_key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -270,7 +270,7 @@ async fn handle_mu(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(v) => v,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let key_arn = match state.key_map.resolve(&key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -305,7 +305,7 @@ async fn handle_mw(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(v) => v,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let key_arn = match state.key_map.resolve(&key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -335,7 +335,7 @@ async fn handle_mq(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(v) => v,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let key_arn = match state.key_map.resolve(&key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -363,7 +363,7 @@ async fn handle_ms(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(v) => v,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let key_arn = match state.key_map.resolve(&key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -624,7 +624,7 @@ mod tests {
         let mut payload = single_key();
         payload.extend_from_slice(&len_binary(&[0xAA, 0xBB, 0xCC]));
         let (key_id, key_consumed) = parse_legacy_key(&payload, 0).unwrap();
-        assert_eq!(key_id, "1234567890ABCDEF");
+        assert_eq!(key_id.raw, "1234567890ABCDEF");
         let (hex, _) = parse_len_binary(&payload, key_consumed, "MK").unwrap();
         assert_eq!(hex, "AABBCC");
     }
@@ -710,7 +710,7 @@ mod tests {
         payload.extend_from_slice(&double_key());
         payload.extend_from_slice(&len_binary(b"RETAIL"));
         let (key_id, key_consumed) = parse_legacy_key(&payload, 1).unwrap();
-        assert!(key_id.starts_with('U'));
+        assert!(key_id.raw.starts_with('U'));
         let (hex, _) = parse_len_binary(&payload, 1 + key_consumed, "MS").unwrap();
         assert_eq!(hex, bytes_to_hex(b"RETAIL"));
     }

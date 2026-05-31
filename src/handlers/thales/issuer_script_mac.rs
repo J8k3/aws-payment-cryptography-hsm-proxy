@@ -5,6 +5,7 @@ use tracing::{debug, warn};
 use crate::error::ProxyError;
 use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, parse_legacy_key};
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
 /// payShield International Host Commands — EMV issuer script MAC generation.
 ///
@@ -55,7 +56,7 @@ const MAC_DATA_LEN_FIELD: usize = 4;
 const DELIMITER: u8 = b';';
 
 struct KuFields {
-    key_id: String,
+    key_id: KeyDescriptor,
     pan: String,
     atc: String,
     mac_data_hex: String,
@@ -192,7 +193,7 @@ async fn handle_ku(payload: &[u8], state: &Arc<AppState>, cmd: &str) -> HandlerR
         Ok(f) => f,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let key_arn = match state.key_map.resolve(&f.key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&f.key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -263,7 +264,7 @@ mod tests {
     fn parse_ku_mode0_single_key() {
         let payload = build_ku_payload(&single_key(), &pan_seq_bytes(), &[0x00, 0x12], b"SCRIPT");
         let f = parse_ku_fields(&payload, "KU").unwrap();
-        assert_eq!(f.key_id, "1234567890ABCDEF");
+        assert_eq!(f.key_id.raw, "1234567890ABCDEF");
         assert_eq!(f.atc, "0012");
         assert_eq!(f.mac_data_hex, bytes_to_hex(b"SCRIPT"));
     }
@@ -274,7 +275,7 @@ mod tests {
         key.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
         let payload = build_ku_payload(&key, &pan_seq_bytes(), &[0x00, 0x01], b"DATA");
         let f = parse_ku_fields(&payload, "KU").unwrap();
-        assert!(f.key_id.starts_with('U'));
+        assert!(f.key_id.raw.starts_with('U'));
         assert_eq!(f.atc, "0001");
     }
 

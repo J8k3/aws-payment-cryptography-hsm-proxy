@@ -5,6 +5,7 @@ use tracing::{debug, warn};
 use crate::error::ProxyError;
 use crate::handlers::thales::common::parse_legacy_key;
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
 /// payShield International Host Commands — HMAC generation and verification.
 ///
@@ -90,7 +91,7 @@ impl MacAlgorithmHmac {
 }
 
 struct LqFields {
-    key_id: String,
+    key_id: KeyDescriptor,
     algorithm: MacAlgorithmHmac,
     message_hex: String,
 }
@@ -159,7 +160,7 @@ async fn handle_lq(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(f) => f,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let key_arn = match state.key_map.resolve(&fields.key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&fields.key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -235,7 +236,7 @@ async fn handle_ls(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     let hmac_val =
         String::from_utf8_lossy(&payload[hmac_start..hmac_start + hmac_hex_len]).to_string();
 
-    let key_arn = match state.key_map.resolve(&key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -355,7 +356,7 @@ mod tests {
         // SHA variant '2' + 16H key + 4H len "0004" + 4 bytes = "AABBCCDD"
         let payload = build_lq_payload(b'2', &single_key(), b"AABBCCDD");
         let fields = parse_lq_fields(&payload, "LQ").unwrap();
-        assert_eq!(fields.key_id, "1234567890ABCDEF");
+        assert_eq!(fields.key_id.raw, "1234567890ABCDEF");
         assert!(matches!(fields.algorithm, MacAlgorithmHmac::Sha256));
         assert_eq!(fields.message_hex, "AABBCCDD");
     }
@@ -366,7 +367,7 @@ mod tests {
         key.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
         let payload = build_lq_payload(b'1', &key, b"DEADBEEF");
         let fields = parse_lq_fields(&payload, "LQ").unwrap();
-        assert!(fields.key_id.starts_with('U'));
+        assert!(fields.key_id.raw.starts_with('U'));
         assert!(matches!(fields.algorithm, MacAlgorithmHmac::Sha1));
         assert_eq!(fields.message_hex, "DEADBEEF");
     }

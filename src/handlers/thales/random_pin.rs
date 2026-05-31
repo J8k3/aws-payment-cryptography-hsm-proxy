@@ -5,6 +5,7 @@ use tracing::{debug, warn};
 use crate::error::ProxyError;
 use crate::handlers::thales::common::parse_legacy_key;
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
 /// payShield JA (→ JB) — Generate a Random PIN.
 ///
@@ -40,8 +41,8 @@ const PAD_CHAR_LEN: usize = 1;
 const IBM_OFFSET_LEN: usize = 12;
 
 struct JaFields {
-    zpk_id: String,
-    pvk_id: String,
+    zpk_id: KeyDescriptor,
+    pvk_id: KeyDescriptor,
     pin_length: i32,
     account: String,
     decim_table: String,
@@ -113,11 +114,11 @@ impl Handler for RandomPinHandler {
             }
         };
 
-        let zpk_arn = match state.key_map.resolve(&fields.zpk_id) {
+        let zpk_arn = match state.key_map.resolve_descriptor(&fields.zpk_id) {
             Ok(a) => a.to_string(),
             Err(e) => return HandlerResult::from_proxy_error(&e),
         };
-        let pvk_arn = match state.key_map.resolve(&fields.pvk_id) {
+        let pvk_arn = match state.key_map.resolve_descriptor(&fields.pvk_id) {
             Ok(a) => a.to_string(),
             Err(e) => return HandlerResult::from_proxy_error(&e),
         };
@@ -205,8 +206,8 @@ mod tests {
     fn ja_parse_single_keys() {
         let payload = build_ja_payload(&single_key(), &single_key(), b"06");
         let f = parse_ja(&payload).unwrap();
-        assert_eq!(f.zpk_id, "1234567890ABCDEF");
-        assert_eq!(f.pvk_id, "1234567890ABCDEF");
+        assert_eq!(f.zpk_id.raw, "1234567890ABCDEF");
+        assert_eq!(f.pvk_id.raw, "1234567890ABCDEF");
         assert_eq!(f.pin_length, 6);
         assert_eq!(f.account, "123456789012");
         assert_eq!(f.decim_table, "0123456789012345");
@@ -220,8 +221,8 @@ mod tests {
         zpk.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
         let payload = build_ja_payload(&zpk, &single_key(), b"04");
         let f = parse_ja(&payload).unwrap();
-        assert_eq!(f.zpk_id, "U1234567890ABCDEF1234567890ABCDEF");
-        assert_eq!(f.pvk_id, "1234567890ABCDEF");
+        assert_eq!(f.zpk_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.pvk_id.raw, "1234567890ABCDEF");
         assert_eq!(f.pin_length, 4);
     }
 

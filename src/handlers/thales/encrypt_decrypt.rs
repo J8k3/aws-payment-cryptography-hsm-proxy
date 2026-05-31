@@ -55,7 +55,7 @@ impl Handler for EncryptDecryptHandler {
 fn parse_key_and_data(
     payload: &[u8],
     cmd: &str,
-) -> Result<(String, Zeroizing<String>), ProxyError> {
+) -> Result<(crate::key_map::KeyDescriptor, Zeroizing<String>), ProxyError> {
     let (key_id, key_len) = parse_legacy_key(payload, 0)?;
     let data_start = key_len;
     let min_len = data_start + DATA_HEX_LEN;
@@ -77,7 +77,7 @@ async fn handle_he(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(v) => v,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let key_arn = match state.key_map.resolve(&key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -119,7 +119,7 @@ async fn handle_hg(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(v) => v,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let key_arn = match state.key_map.resolve(&key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -180,7 +180,7 @@ mod tests {
         let mut p = tak_single();
         p.extend_from_slice(data_block());
         let (key_id, data) = parse_key_and_data(&p, "HE").unwrap();
-        assert_eq!(key_id, "1234567890ABCDEF");
+        assert_eq!(key_id.raw, "1234567890ABCDEF");
         assert_eq!(data.as_str(), "AABBCCDDEE112233");
     }
 
@@ -191,7 +191,7 @@ mod tests {
         let (key_id, data) = parse_key_and_data(&p, "HE").unwrap();
         // parse_legacy_key returns the identifier including the 'U' prefix;
         // the key_map must be configured with the same form.
-        assert_eq!(key_id, "U1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(key_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
         assert_eq!(data.as_str(), "AABBCCDDEE112233");
     }
 

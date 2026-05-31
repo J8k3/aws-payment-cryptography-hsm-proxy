@@ -6,6 +6,7 @@ use zeroize::Zeroizing;
 use crate::error::ProxyError;
 use crate::handlers::thales::common::parse_legacy_key;
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
 /// payShield Diebold PIN generation commands.
 ///
@@ -63,8 +64,8 @@ const PIN_BLOCK_LEN: usize = 16;
 const PIN_FMT_LEN: usize = 2;
 
 struct GaFields {
-    zpk_id: String,
-    pdk_id: String,
+    zpk_id: KeyDescriptor,
+    pdk_id: KeyDescriptor,
     account: String,
     pin_length: i32,
     decim_table: String,
@@ -73,8 +74,8 @@ struct GaFields {
 }
 
 struct CeFields {
-    zpk_id: String,
-    pdk_id: String,
+    zpk_id: KeyDescriptor,
+    pdk_id: KeyDescriptor,
     account: String,
     cust_pin_block: Zeroizing<String>,
     decim_table: String,
@@ -191,11 +192,11 @@ async fn handle_ga(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         }
     };
 
-    let zpk_arn = match state.key_map.resolve(&fields.zpk_id) {
+    let zpk_arn = match state.key_map.resolve_descriptor(&fields.zpk_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let pdk_arn = match state.key_map.resolve(&fields.pdk_id) {
+    let pdk_arn = match state.key_map.resolve_descriptor(&fields.pdk_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -246,11 +247,11 @@ async fn handle_ce(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         }
     };
 
-    let zpk_arn = match state.key_map.resolve(&fields.zpk_id) {
+    let zpk_arn = match state.key_map.resolve_descriptor(&fields.zpk_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let pdk_arn = match state.key_map.resolve(&fields.pdk_id) {
+    let pdk_arn = match state.key_map.resolve_descriptor(&fields.pdk_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -340,8 +341,8 @@ mod tests {
     fn ga_parse_single_keys() {
         let payload = build_ga_payload(&single_key(), &single_key());
         let f = parse_ga(&payload).unwrap();
-        assert_eq!(f.zpk_id, "1234567890ABCDEF");
-        assert_eq!(f.pdk_id, "1234567890ABCDEF");
+        assert_eq!(f.zpk_id.raw, "1234567890ABCDEF");
+        assert_eq!(f.pdk_id.raw, "1234567890ABCDEF");
         assert_eq!(f.account, "123456789012");
         assert_eq!(f.pin_length, 4);
         assert_eq!(f.decim_table, "0123456789012345");
@@ -355,8 +356,8 @@ mod tests {
         zpk.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
         let payload = build_ga_payload(&zpk, &single_key());
         let f = parse_ga(&payload).unwrap();
-        assert_eq!(f.zpk_id, "U1234567890ABCDEF1234567890ABCDEF");
-        assert_eq!(f.pdk_id, "1234567890ABCDEF");
+        assert_eq!(f.zpk_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.pdk_id.raw, "1234567890ABCDEF");
     }
 
     #[test]
@@ -384,8 +385,8 @@ mod tests {
     fn ce_parse_single_keys() {
         let payload = build_ce_payload(&single_key(), &single_key());
         let f = parse_ce(&payload).unwrap();
-        assert_eq!(f.zpk_id, "1234567890ABCDEF");
-        assert_eq!(f.pdk_id, "1234567890ABCDEF");
+        assert_eq!(f.zpk_id.raw, "1234567890ABCDEF");
+        assert_eq!(f.pdk_id.raw, "1234567890ABCDEF");
         assert_eq!(f.account, "123456789012");
         assert_eq!(f.cust_pin_block.as_str(), "1234567890ABCDEF");
         assert_eq!(f.decim_table, "0123456789012345");
@@ -399,8 +400,8 @@ mod tests {
         pdk.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
         let payload = build_ce_payload(&single_key(), &pdk);
         let f = parse_ce(&payload).unwrap();
-        assert_eq!(f.zpk_id, "1234567890ABCDEF");
-        assert_eq!(f.pdk_id, "U1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.zpk_id.raw, "1234567890ABCDEF");
+        assert_eq!(f.pdk_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
         assert_eq!(f.cust_pin_block.as_str(), "1234567890ABCDEF");
     }
 

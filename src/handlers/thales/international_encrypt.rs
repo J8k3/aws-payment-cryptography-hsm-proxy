@@ -6,6 +6,7 @@ use zeroize::Zeroizing;
 use crate::error::ProxyError;
 use crate::handlers::thales::common::parse_legacy_key;
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
 /// payShield International block encrypt/decrypt/translate commands.
 ///
@@ -77,7 +78,7 @@ impl Handler for InternationalEncryptHandler {
 
 /// Parse M0/M2 common prefix and data block.
 /// Returns (key_id, msg_hex, cursor) or an error.
-fn parse_m0_fields(payload: &[u8]) -> Result<(String, Zeroizing<String>), ProxyError> {
+fn parse_m0_fields(payload: &[u8]) -> Result<(KeyDescriptor, Zeroizing<String>), ProxyError> {
     let mut pos = 0;
 
     // Mode Flag (2N)
@@ -162,7 +163,7 @@ async fn handle_m0(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(v) => v,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let key_arn = match state.key_map.resolve(&key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -209,7 +210,7 @@ async fn handle_m2(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(v) => v,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let key_arn = match state.key_map.resolve(&key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -361,11 +362,11 @@ async fn handle_m4(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     let cipher_text =
         Zeroizing::new(String::from_utf8_lossy(&payload[pos..pos + msg_hex_chars]).to_string());
 
-    let src_arn = match state.key_map.resolve(&src_key_id) {
+    let src_arn = match state.key_map.resolve_descriptor(&src_key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let dst_arn = match state.key_map.resolve(&dst_key_id) {
+    let dst_arn = match state.key_map.resolve_descriptor(&dst_key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -431,7 +432,7 @@ mod tests {
         let result = parse_m0_fields(&payload);
         assert!(result.is_ok(), "{result:?}");
         let (key_id, msg) = result.unwrap();
-        assert_eq!(key_id, "1234567890ABCDEF");
+        assert_eq!(key_id.raw, "1234567890ABCDEF");
         assert_eq!(msg.as_str(), "AABBCCDDEE112233");
     }
 
@@ -463,6 +464,6 @@ mod tests {
         key.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
         let payload = ecb_hex_payload(b"00B", &key, b"AABBCCDDEE112233");
         let (key_id, _) = parse_m0_fields(&payload).unwrap();
-        assert_eq!(key_id, "U1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(key_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
     }
 }

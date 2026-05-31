@@ -6,6 +6,7 @@ use zeroize::Zeroizing;
 use crate::error::ProxyError;
 use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, parse_legacy_key};
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
 /// payShield KW — Verify ARQC and optionally generate ARPC (EMV & Cloud-Based SKD).
 ///
@@ -56,7 +57,7 @@ enum ArpcParams {
 }
 
 struct KwFields {
-    key_id: String,
+    key_id: KeyDescriptor,
     mode: KwMode,
     deriv_mode_a: bool,
     pan: String,
@@ -267,7 +268,7 @@ async fn handle_kw(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    let key_arn = match state.key_map.resolve(&fields.key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&fields.key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };

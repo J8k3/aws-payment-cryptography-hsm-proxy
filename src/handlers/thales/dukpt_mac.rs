@@ -5,6 +5,7 @@ use tracing::{debug, warn};
 use crate::error::ProxyError;
 use crate::handlers::thales::common::{parse_bdk, parse_ksn_with_descriptor};
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
 /// payShield GW — Generate or Verify MAC (3DES/AES DUKPT).
 ///
@@ -35,7 +36,7 @@ struct GwFields {
     is_verify: bool,
     mac_size_bytes: usize,
     algo: &'static str,
-    bdk_id: String,
+    bdk_id: KeyDescriptor,
     ksn: String,
     deriv_type: aws_sdk_paymentcryptographydata::types::DukptDerivationType,
     message_hex: String,
@@ -162,7 +163,7 @@ impl Handler for DukptMacHandler {
             }
         };
 
-        let bdk_arn = match state.key_map.resolve(&fields.bdk_id) {
+        let bdk_arn = match state.key_map.resolve_descriptor(&fields.bdk_id) {
             Ok(a) => a.to_string(),
             Err(e) => return HandlerResult::from_proxy_error(&e),
         };
@@ -303,7 +304,7 @@ mod tests {
         assert!(!f.is_verify);
         assert_eq!(f.mac_size_bytes, 4);
         assert_eq!(f.algo, "ISO9797_ALG1");
-        assert_eq!(f.bdk_id, "1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.bdk_id.raw, "1234567890ABCDEF1234567890ABCDEF");
         assert_eq!(f.ksn, "12345678901234567890");
         assert_eq!(f.message_hex, "DEADBEEF");
         assert!(f.mac_to_verify.is_none());
@@ -346,7 +347,7 @@ mod tests {
             None,
         );
         let f = parse_gw(&p).unwrap();
-        assert_eq!(f.bdk_id, "U1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.bdk_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
     }
 
     #[test]

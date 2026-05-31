@@ -117,11 +117,11 @@ async fn handle_cm(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     let pvki_str = String::from_utf8_lossy(&payload[pvki_start..=pvki_start]).to_string();
     let pvv = String::from_utf8_lossy(&payload[pvv_start..pvv_start + PVV_LEN]).to_string();
 
-    let bdk_arn = match state.key_map.resolve(&bdk_id) {
+    let bdk_arn = match state.key_map.resolve_descriptor(&bdk_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let pvk_arn = match state.key_map.resolve(&pvk_id) {
+    let pvk_arn = match state.key_map.resolve_descriptor(&pvk_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -240,11 +240,11 @@ async fn handle_ck(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     let offset =
         String::from_utf8_lossy(&payload[offset_start..offset_start + IBM_OFFSET_LEN]).to_string();
 
-    let bdk_arn = match state.key_map.resolve(&bdk_id) {
+    let bdk_arn = match state.key_map.resolve_descriptor(&bdk_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let pvk_arn = match state.key_map.resolve(&pvk_id) {
+    let pvk_arn = match state.key_map.resolve_descriptor(&pvk_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };

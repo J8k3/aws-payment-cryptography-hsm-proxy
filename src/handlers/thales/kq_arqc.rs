@@ -6,6 +6,7 @@ use zeroize::Zeroizing;
 use crate::error::ProxyError;
 use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, parse_legacy_key};
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
 /// payShield KQ — Verify ARQC and optionally generate ARPC.
 ///
@@ -54,7 +55,7 @@ enum ArpcParams {
 }
 
 struct KqFields {
-    key_id: String,
+    key_id: KeyDescriptor,
     mode: KqMode,
     deriv_mode_a: bool,
     pan: String,
@@ -254,7 +255,7 @@ async fn handle_kq(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    let key_arn = match state.key_map.resolve(&fields.key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&fields.key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -399,7 +400,7 @@ mod tests {
         let f = parse_kq(&payload).unwrap();
         assert!(matches!(f.mode, KqMode::VerifyOnly));
         assert!(f.deriv_mode_a);
-        assert_eq!(f.key_id, "1234567890ABCDEF");
+        assert_eq!(f.key_id.raw, "1234567890ABCDEF");
         assert_eq!(f.pan, "123456789012");
         assert_eq!(f.pan_seq, "01");
         assert_eq!(f.atc, "0001");
@@ -473,7 +474,7 @@ mod tests {
         key.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
         let payload = kq_prefix(b'0', b'0', &key, &pan_bcd(), &[0xAB]);
         let f = parse_kq(&payload).unwrap();
-        assert_eq!(f.key_id, "U1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.key_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
     }
 
     #[test]

@@ -117,8 +117,14 @@ pub async fn run(cfg: ProxyConfig) -> Result<()> {
         }
     }
 
+    let mut key_map = KeyMap::new(cfg.key_mappings.clone());
+    let control_client = aws_sdk_paymentcryptography::Client::new(&aws_cfg);
+    if let Err(e) = key_map.scan_apc(&control_client).await {
+        warn!(err = %e, "APC key inventory scan failed; wrapped key block resolution unavailable");
+    }
+
     let state = Arc::new(AppState {
-        key_map: KeyMap::new(cfg.key_mappings.clone()),
+        key_map,
         data: aws_sdk_paymentcryptographydata::Client::new(&aws_cfg),
     });
 

@@ -8,6 +8,7 @@ use crate::handlers::thales::common::{
     parse_bdk, parse_key_32, parse_ksn_with_descriptor, parse_legacy_key,
 };
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
 /// payShield 3DES & AES DUKPT PIN verification (PUGD0537-004 p.349/352/355/358).
 ///
@@ -50,8 +51,8 @@ const PVKI_LEN: usize = 1;
 const PVV_LEN: usize = 4;
 
 struct GoFields {
-    bdk_id: String,
-    pvk_id: String,
+    bdk_id: KeyDescriptor,
+    pvk_id: KeyDescriptor,
     deriv_type: aws_sdk_paymentcryptographydata::types::DukptDerivationType,
     ksn: String,
     pin_block: Zeroizing<String>,
@@ -62,8 +63,8 @@ struct GoFields {
 }
 
 struct GqFields {
-    bdk_id: String,
-    pvk_id: String,
+    bdk_id: KeyDescriptor,
+    pvk_id: KeyDescriptor,
     deriv_type: aws_sdk_paymentcryptographydata::types::DukptDerivationType,
     ksn: String,
     pin_block: Zeroizing<String>,
@@ -213,11 +214,11 @@ async fn handle_go(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         }
     };
 
-    let bdk_arn = match state.key_map.resolve(&fields.bdk_id) {
+    let bdk_arn = match state.key_map.resolve_descriptor(&fields.bdk_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let pvk_arn = match state.key_map.resolve(&fields.pvk_id) {
+    let pvk_arn = match state.key_map.resolve_descriptor(&fields.pvk_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -289,11 +290,11 @@ async fn handle_gq(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         }
     };
 
-    let bdk_arn = match state.key_map.resolve(&fields.bdk_id) {
+    let bdk_arn = match state.key_map.resolve_descriptor(&fields.bdk_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let pvk_arn = match state.key_map.resolve(&fields.pvk_id) {
+    let pvk_arn = match state.key_map.resolve_descriptor(&fields.pvk_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };

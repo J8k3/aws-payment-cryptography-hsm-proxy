@@ -6,6 +6,7 @@ use zeroize::Zeroizing;
 use crate::error::ProxyError;
 use crate::handlers::thales::common::{parse_key_32, parse_legacy_key};
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
 /// payShield non-DUKPT PIN verification: DA/DC (TPK) and EA/EC (ZPK).
 ///
@@ -53,8 +54,8 @@ const PVKI_LEN: usize = 1;
 const PVV_LEN: usize = 4;
 
 struct IbmFields {
-    enc_key_id: String,
-    pvk_id: String,
+    enc_key_id: KeyDescriptor,
+    pvk_id: KeyDescriptor,
     pin_block: Zeroizing<String>,
     account: String,
     decim_table: String,
@@ -63,8 +64,8 @@ struct IbmFields {
 }
 
 struct VisaFields {
-    enc_key_id: String,
-    pvk_id: String,
+    enc_key_id: KeyDescriptor,
+    pvk_id: KeyDescriptor,
     pin_block: Zeroizing<String>,
     account: String,
     pvki: i32,
@@ -177,11 +178,11 @@ async fn handle_ibm(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         }
     };
 
-    let enc_arn = match state.key_map.resolve(&fields.enc_key_id) {
+    let enc_arn = match state.key_map.resolve_descriptor(&fields.enc_key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let pvk_arn = match state.key_map.resolve(&fields.pvk_id) {
+    let pvk_arn = match state.key_map.resolve_descriptor(&fields.pvk_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -245,11 +246,11 @@ async fn handle_visa(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         }
     };
 
-    let enc_arn = match state.key_map.resolve(&fields.enc_key_id) {
+    let enc_arn = match state.key_map.resolve_descriptor(&fields.enc_key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-    let pvk_arn = match state.key_map.resolve(&fields.pvk_id) {
+    let pvk_arn = match state.key_map.resolve_descriptor(&fields.pvk_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -341,8 +342,8 @@ mod tests {
     fn da_parse_single_keys() {
         let payload = build_ibm_payload(&single_key(), &single_key());
         let f = parse_ibm(&payload).unwrap();
-        assert_eq!(f.enc_key_id, "1234567890ABCDEF");
-        assert_eq!(f.pvk_id, "1234567890ABCDEF");
+        assert_eq!(f.enc_key_id.raw, "1234567890ABCDEF");
+        assert_eq!(f.pvk_id.raw, "1234567890ABCDEF");
         assert_eq!(f.account, "123456789012");
         assert_eq!(f.decim_table, "1234567890123456");
         assert_eq!(f.pin_val_data, "NNNNNNNNNNNN");
@@ -356,16 +357,16 @@ mod tests {
         key.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
         let payload = build_ibm_payload(&key, &single_key());
         let f = parse_ibm(&payload).unwrap();
-        assert_eq!(f.enc_key_id, "U1234567890ABCDEF1234567890ABCDEF");
-        assert_eq!(f.pvk_id, "1234567890ABCDEF");
+        assert_eq!(f.enc_key_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.pvk_id.raw, "1234567890ABCDEF");
     }
 
     #[test]
     fn dc_parse_single_enc_double_pvk() {
         let payload = build_visa_payload(&single_key(), &double_key());
         let f = parse_visa(&payload).unwrap();
-        assert_eq!(f.enc_key_id, "1234567890ABCDEF");
-        assert_eq!(f.pvk_id, "1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.enc_key_id.raw, "1234567890ABCDEF");
+        assert_eq!(f.pvk_id.raw, "1234567890ABCDEF1234567890ABCDEF");
         assert_eq!(f.account, "123456789012");
         assert_eq!(f.pvki, 1);
         assert_eq!(f.pvv, "1234");
@@ -377,7 +378,7 @@ mod tests {
         pvk.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
         let payload = build_visa_payload(&single_key(), &pvk);
         let f = parse_visa(&payload).unwrap();
-        assert_eq!(f.pvk_id, "U1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.pvk_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
     }
 
     #[test]

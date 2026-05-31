@@ -5,6 +5,7 @@ use tracing::{debug, warn};
 use crate::error::ProxyError;
 use crate::handlers::thales::common::parse_legacy_key;
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
 /// payShield MY — Verify and Translate MAC (PUGD0537-004 p.371).
 ///
@@ -41,10 +42,10 @@ const MSG_LEN_FIELD: usize = 4;
 
 struct MacTranslateFields {
     in_algo: String,
-    in_key_id: String,
+    in_key_id: KeyDescriptor,
     out_algo: String,
     out_mac_size: usize,
-    out_key_id: String,
+    out_key_id: KeyDescriptor,
     message_hex: String,
     inbound_mac: String,
 }
@@ -178,11 +179,11 @@ impl Handler for MacTranslateHandler {
             }
         };
 
-        let in_arn = match state.key_map.resolve(&fields.in_key_id) {
+        let in_arn = match state.key_map.resolve_descriptor(&fields.in_key_id) {
             Ok(a) => a.to_string(),
             Err(e) => return HandlerResult::from_proxy_error(&e),
         };
-        let out_arn = match state.key_map.resolve(&fields.out_key_id) {
+        let out_arn = match state.key_map.resolve_descriptor(&fields.out_key_id) {
             Ok(a) => a.to_string(),
             Err(e) => return HandlerResult::from_proxy_error(&e),
         };
@@ -306,7 +307,7 @@ mod tests {
         );
         let f = parse_my(&p).unwrap();
         assert_eq!(f.in_algo, "ISO9797_ALGORITHM3");
-        assert_eq!(f.in_key_id, "1234567890ABCDEF");
+        assert_eq!(f.in_key_id.raw, "1234567890ABCDEF");
         assert_eq!(f.inbound_mac.len(), 8, "full MAC = 4 bytes = 8 hex chars");
         assert_eq!(f.out_algo, "CMAC");
         assert_eq!(f.out_mac_size, 4);
@@ -339,8 +340,8 @@ mod tests {
         key.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
         let p = build_my_payload(b'0', b'1', &key, b'0', b'1', &key, b"AABB", b"CCDDCCDD");
         let f = parse_my(&p).unwrap();
-        assert_eq!(f.in_key_id, "U1234567890ABCDEF1234567890ABCDEF");
-        assert_eq!(f.out_key_id, "U1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.in_key_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.out_key_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
     }
 
     #[test]

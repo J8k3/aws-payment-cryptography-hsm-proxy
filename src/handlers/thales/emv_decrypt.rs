@@ -6,6 +6,7 @@ use zeroize::Zeroizing;
 use crate::error::ProxyError;
 use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, parse_legacy_key};
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
 /// payShield K0 — Decrypt EMV-encrypted counters / application data.
 ///
@@ -32,7 +33,7 @@ use crate::handlers::{AppState, Handler, HandlerResult};
 pub struct EmvDecryptHandler;
 
 struct K0Fields {
-    key_id: String,
+    key_id: KeyDescriptor,
     pan: String,
     pan_seq: String,
     atc: String,
@@ -119,7 +120,7 @@ async fn handle_k0(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    let key_arn = match state.key_map.resolve(&fields.key_id) {
+    let key_arn = match state.key_map.resolve_descriptor(&fields.key_id) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
@@ -196,7 +197,7 @@ mod tests {
         let data = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0x00, 0x01];
         let payload = k0_payload(&single_key(), &data);
         let f = parse_k0(&payload).unwrap();
-        assert_eq!(f.key_id, "1234567890ABCDEF");
+        assert_eq!(f.key_id.raw, "1234567890ABCDEF");
         assert_eq!(f.pan, "123456789012");
         assert_eq!(f.pan_seq, "01");
         assert_eq!(f.atc, "002A");
@@ -220,7 +221,7 @@ mod tests {
         key.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
         let payload = k0_payload(&key, &[0x01, 0x02]);
         let f = parse_k0(&payload).unwrap();
-        assert_eq!(f.key_id, "U1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.key_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
     }
 
     #[test]

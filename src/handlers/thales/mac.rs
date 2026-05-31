@@ -5,6 +5,7 @@ use tracing::{debug, warn};
 use crate::error::ProxyError;
 use crate::handlers::thales::common::parse_legacy_key;
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
 /// payShield MAC commands: C2/M6 (generate) and C4/M8 (verify).
 ///
@@ -45,7 +46,8 @@ fn parse_c2_payload(payload: &[u8], is_verify: bool) -> Result<MacFields, ProxyE
         )));
     }
     let algorithm = algorithm_from_mode_c2(payload[0])?;
-    let key_id = String::from_utf8_lossy(&payload[KEY_START..KEY_END]).to_string();
+    let key_id =
+        KeyDescriptor::label(String::from_utf8_lossy(&payload[KEY_START..KEY_END]).to_string());
     let msg_len_hex = String::from_utf8_lossy(&payload[LEN_START..LEN_END]);
     let msg_byte_len = usize::from_str_radix(msg_len_hex.trim(), 16)
         .map_err(|_| ProxyError::MalformedPayload("C2/C4: bad message length hex".into()))?;
@@ -185,7 +187,7 @@ fn parse_m6_payload(payload: &[u8], is_verify: bool) -> Result<MacFields, ProxyE
 
 struct MacFields {
     algorithm: String,
-    key_id: String,
+    key_id: KeyDescriptor,
     message_hex: String,
     mac_to_verify: Option<String>,
     mac_size_bytes: usize,
@@ -218,7 +220,7 @@ impl Handler for MacHandler {
             }
         };
 
-        let key_arn = match state.key_map.resolve(&fields.key_id) {
+        let key_arn = match state.key_map.resolve_descriptor(&fields.key_id) {
             Ok(a) => a.to_string(),
             Err(e) => return HandlerResult::from_proxy_error(&e),
         };
@@ -334,7 +336,7 @@ mod tests {
         p.extend_from_slice(b"DEADBEEF"); // 8 hex chars
         let f = parse_c2_payload(&p, false).unwrap();
         assert_eq!(f.algorithm, "ISO9797_ALGORITHM1");
-        assert_eq!(f.key_id, "1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.key_id.raw, "1234567890ABCDEF1234567890ABCDEF");
         assert_eq!(f.message_hex, "DEADBEEF");
         assert!(f.mac_to_verify.is_none());
         assert_eq!(f.mac_size_bytes, 4);
@@ -368,7 +370,7 @@ mod tests {
         let p = m6_payload(b'1', b'0', key, b"DEADBEEF");
         let f = parse_m6_payload(&p, false).unwrap();
         assert_eq!(f.algorithm, "ISO9797_ALGORITHM1");
-        assert_eq!(f.key_id, "1234567890ABCDEF");
+        assert_eq!(f.key_id.raw, "1234567890ABCDEF");
         assert_eq!(f.message_hex, "DEADBEEF");
         assert_eq!(f.mac_size_bytes, 4);
         assert!(f.mac_to_verify.is_none());
@@ -399,7 +401,7 @@ mod tests {
         key.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
         let p = m6_payload(b'1', b'0', &key, b"AABBCCDD");
         let f = parse_m6_payload(&p, false).unwrap();
-        assert_eq!(f.key_id, "U1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.key_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
     }
 
     #[test]
