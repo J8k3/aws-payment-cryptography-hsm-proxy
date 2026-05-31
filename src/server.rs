@@ -426,10 +426,11 @@ async fn forward_to_hsm(
         .map_err(|_| anyhow::anyhow!("timeout sending to real HSM"))?
         .map_err(|e| anyhow::anyhow!("sending to real HSM: {e}"))?;
 
+    let read_timeout = Duration::from_secs(cfg.hsm_read_timeout_secs.unwrap_or(30));
     let mut resp = Vec::with_capacity(4096);
     let mut buf = [0u8; 65536];
     loop {
-        let n = timeout(Duration::from_secs(30), stream.read(&mut buf))
+        let n = timeout(read_timeout, stream.read(&mut buf))
             .await
             .map_err(|_| anyhow::anyhow!("timeout reading from real HSM"))?
             .map_err(|e| anyhow::anyhow!("reading from real HSM: {e}"))?;

@@ -57,6 +57,7 @@ async fn thales_unhandled_command_is_forwarded_and_logged() {
         vendor: "thales_payshield",
         hsm_host: "127.0.0.1",
         hsm_port: mock.addr.port(),
+        hsm_read_timeout_secs: None,
     });
 
     let proxy_addr = proxy.addr;
@@ -109,6 +110,7 @@ async fn futurex_unhandled_command_is_forwarded_and_log_redacts_sensitive_params
         vendor: "futurex_excrypt",
         hsm_host: "127.0.0.1",
         hsm_port: mock.addr.port(),
+        hsm_read_timeout_secs: None,
     });
 
     let proxy_addr = proxy.addr;
@@ -169,6 +171,7 @@ async fn thales_unhandled_command_returns_error_when_hsm_unreachable() {
         vendor: "thales_payshield",
         hsm_host: "127.0.0.1",
         hsm_port: unreachable_port,
+        hsm_read_timeout_secs: None,
     });
 
     let client_frame = thales_frame(*b"XX", b"payload");
@@ -191,6 +194,44 @@ async fn thales_unhandled_command_returns_error_when_hsm_unreachable() {
         error_code,
         b"41",
         "expected error code 41 (forward failed); got {:?}",
+        std::str::from_utf8(error_code)
+    );
+}
+
+/// HSM accepts the connection then never replies. The proxy must give up
+/// after `hsm_read_timeout_secs` and return a framed error rather than
+/// holding the client connection open indefinitely.
+#[tokio::test(flavor = "multi_thread")]
+async fn thales_unhandled_command_returns_error_on_hsm_read_timeout() {
+    let mock = MockHsm::spawn(MockBehavior::AcceptThenHang, 1).await;
+
+    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+        vendor: "thales_payshield",
+        hsm_host: "127.0.0.1",
+        hsm_port: mock.addr.port(),
+        hsm_read_timeout_secs: Some(1),
+    });
+
+    let client_frame = thales_frame(*b"XX", b"payload");
+    let proxy_addr = proxy.addr;
+    let frame_for_send = client_frame.clone();
+
+    let start = std::time::Instant::now();
+    let response = tokio::task::spawn_blocking(move || send_recv(proxy_addr, &frame_for_send))
+        .await
+        .expect("send_recv");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "proxy should give up within ~1s of the configured timeout, took {elapsed:?}"
+    );
+    assert!(response.len() >= 8, "expected framed error response");
+    let error_code = &response[6..8];
+    assert_eq!(
+        error_code,
+        b"41",
+        "expected error code 41 (forward read timeout); got {:?}",
         std::str::from_utf8(error_code)
     );
 }

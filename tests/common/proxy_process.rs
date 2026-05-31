@@ -27,6 +27,10 @@ pub struct ProxyConfigInput<'a> {
     pub vendor: &'a str,
     pub hsm_host: &'a str,
     pub hsm_port: u16,
+    /// Override the proxy's forward read timeout in seconds. `None` = default
+    /// (30s). Tests that exercise the read-timeout path should set this low
+    /// so the test doesn't take 30 seconds.
+    pub hsm_read_timeout_secs: Option<u64>,
 }
 
 impl ProxyProcess {
@@ -43,12 +47,16 @@ impl ProxyProcess {
         let hsm_host = input.hsm_host;
         let hsm_port = input.hsm_port;
         let log_path = discovery_log_path.display();
+        let read_timeout_line = match input.hsm_read_timeout_secs {
+            Some(secs) => format!("  hsm_read_timeout_secs: {secs}\n"),
+            None => String::new(),
+        };
         let yaml = format!(
             "vendor: {vendor}\n\
              listen:\n  host: 127.0.0.1\n  port: {port}\n\
              aws:\n  region: us-east-1\n\
              key_mappings: {{}}\n\
-             discover:\n  enabled: true\n  hsm_host: {hsm_host}\n  hsm_port: {hsm_port}\n  log_file: {log_path}\n"
+             discover:\n  enabled: true\n  hsm_host: {hsm_host}\n  hsm_port: {hsm_port}\n  log_file: {log_path}\n{read_timeout_line}"
         );
 
         std::fs::write(&config_path, yaml).expect("write temp proxy.yaml");

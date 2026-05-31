@@ -68,6 +68,11 @@ pub struct DiscoverConfig {
     /// Path to write the structured discovery log (NDJSON). Each unique command
     /// code is written once. Safe to feed directly to Claude Code as source context.
     pub log_file: Option<PathBuf>,
+    /// Read timeout in seconds when waiting for the real HSM's response on a
+    /// forwarded command. Default 30. Lower to surface unresponsive HSMs faster;
+    /// raise if a legitimate operation can take longer.
+    #[serde(default)]
+    pub hsm_read_timeout_secs: Option<u64>,
 }
 
 fn default_host() -> String {
