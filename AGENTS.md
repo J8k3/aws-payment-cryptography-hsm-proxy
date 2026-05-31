@@ -45,6 +45,8 @@ src/
 6. Update the implementation table in `AGENTS.md`
    (Only modify `protocol/thales.rs` or `protocol/futurex.rs` if the command requires a framing change — rare.)
 
+**Key-field parsing decisions live in `docs/key-presentation.md`** — the wire-form matrix says which commands accept the `'S'` prefix (wrapped key blocks) and which are fixed-width per spec. Check it before assuming a new handler can use `parse_legacy_key` / `parse_bdk` / `parse_key_32`; if the command's wire spec defines a fixed-width key field, hardcode the slice and use `resolve` rather than `resolve_descriptor`.
+
 ## Session Start
 
 - At the start of a session, sync with `origin/master` before doing substantive work.

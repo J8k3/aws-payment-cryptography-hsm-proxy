@@ -88,6 +88,12 @@ key_mappings:
 
 Commands with registered handlers are translated to APC. Commands without a handler return error 68 (unsupported). The `key_mappings` table resolves whatever key identifiers your application sends — LMK-encrypted blobs, TR-31 key block values, labels — to the APC key ARN or alias before making the API call.
 
+### Wire-format key support
+
+The proxy resolves keys via two paths: operator-provided `key_mappings` for label / variant-LMK / fixed-width references, and an automatic startup APC scan keyed on `(KeyUsage, KeyAlgorithm, KCV)` for X9.143 / TR-31 wrapped key blocks that carry a `KC` optional block. Wrapped-block resolution requires the corresponding key to be already imported into APC. Several legacy Thales commands (CA / CC / BQ / CI / G0 / C2 / C4 / CW / CY / QY / PM) have fixed-width key fields per the wire spec and do not accept the `'S'` prefix — applications needing wrapped keys for MAC should target M6 / M8.
+
+Full matrix — which wire forms work, which don't, and why — is in [`docs/key-presentation.md`](docs/key-presentation.md). Operators choosing between the proxy and a refactor should read it before settling on a deployment plan.
+
 ---
 
 ## Supported Commands
