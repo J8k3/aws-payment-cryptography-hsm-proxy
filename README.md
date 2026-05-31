@@ -21,13 +21,53 @@ This proxy is a third path. The application keeps sending the same commands to t
 
 ## Status
 
-**APC integration tested live (2026-05-30, us-east-1).** The proxy was run against real AWS Payment Cryptography keys. MA→MC (MAC generate + verify, ISO 9797 Alg 1) and HE→HG (data encrypt + decrypt, TDES ECB) completed end-to-end at the wire-frame level — raw Thales frames in, APC round-trip, correct response framing out. See [Performance](#performance) for measured latency.
+**Validated against live APC** — 23 live integration tests exercise the implemented handlers against real AWS Payment Cryptography in `us-east-1`. Coverage: PIN translate, PIN verify (IBM 3624 + Visa PVV, DUKPT and static), MAC (ISO 9797 Alg 1/3, CMAC, HMAC, DUKPT MAC), CVV generate/verify, data encrypt/decrypt, ARQC verify, EMV issuer script MAC, plus the wrapped-key resolution path end-to-end. See [Performance](#performance) for measured latency.
 
-**Not yet tested against a real HSM client application.** The protocol parsers are built from specification and reference documentation, not from live traffic. There are known areas of uncertainty covered in the [Known Risks](#known-risks) section below. If you use this against a real application and hit a protocol issue, open an issue or PR. The core architecture is sound; the gaps are in edge cases that only surface under real traffic.
+**Validated end-to-end in-process** — 12 additional integration tests cover passthrough/discovery mode (forwarding to a mock HSM, redaction of the discovery log, HSM unreachable / read timeout), inbound TLS and mTLS (client cert validation, plaintext rejection, wrong-CA rejection), and outbound TLS / mTLS on the forward leg to the HSM.
+
+**Not yet validated against a real HSM-dependent client application.** Every test in this repo is either against APC or against an in-process mock HSM. The protocol parsers are built from specification and reference documentation, not from live wire captures. Real-application validation is the most valuable thing this project needs and the hardest gap to close from the author's side alone — see [Help test this](#help-test-this).
 
 ### Test procedure
 
-The live test procedure is documented in `AGENTS.md` (§ Live APC Testing) and is repeatable: it provisions the minimum key set, runs the proxy, executes the integration suite, captures latency, and deletes the keys. The two integration tests that exercise real APC are `thales_ma_mc_roundtrip_live` and `thales_he_hg_roundtrip_live` in `tests/integration.rs`.
+The full operator setup procedure is in [`docs/setup.md`](docs/setup.md). The live-test procedure for the integration suite is in `AGENTS.md` (§ Live APC Testing): it provisions the test key set, runs the proxy, executes the suite, captures latency, and tears the keys down.
+
+---
+
+## Quickstart
+
+The shortest path from `git clone` to a working B2 heartbeat. Five minutes, no HSM required.
+
+```sh
+git clone https://github.com/J8k3/aws-payment-cryptography-hsm-proxy.git
+cd aws-payment-cryptography-hsm-proxy
+cargo build --release
+```
+
+Minimal `proxy.yaml` (development only — no TLS, no APC keys configured):
+
+```yaml
+vendor: thales_payshield
+listen:
+  host: 127.0.0.1
+  port: 1500
+aws:
+  region: us-east-1
+key_mappings: {}
+```
+
+```sh
+./target/release/apc-proxy --config proxy.yaml
+```
+
+In another terminal, send a B2 heartbeat (no APC call — proxy responds locally):
+
+```sh
+# Frame: 0x0004 (length) 0x0000 (header) "B2"
+printf '\x00\x04\x00\x00B2' | nc 127.0.0.1 1500 | xxd
+# Expect: 00 06 00 00 BB 00 followed by an "00" success code
+```
+
+For anything beyond a heartbeat, follow [`docs/setup.md`](docs/setup.md) — APC keys, IAM, inbound/outbound TLS, discovery, validation via `--verify-only`, cutover.
 
 ---
 
@@ -157,7 +197,9 @@ Each handler maps one HSM command to one APC data plane call. The handler regist
 
 ## TLS
 
-HSM connections in production use TLS, often mTLS. Configure it under the `listen:` block:
+The proxy supports TLS on both legs — inbound (application → proxy) and outbound (proxy → real HSM during passthrough). Both support mTLS.
+
+**Inbound** — applications connecting to the proxy:
 
 ```yaml
 listen:
@@ -169,7 +211,21 @@ listen:
     ca_file:   /etc/apc-proxy/client-ca.crt   # present = require client cert (mTLS)
 ```
 
-Omit `tls:` for plaintext. Acceptable for local development; not for production. To use a FIPS-capable TLS backend, swap the `ring` feature for `aws-lc-rs` in `Cargo.toml` and recompile — no other code changes needed. The crypto provider is selected at compile time via the feature flag. Note: `aws-lc-rs` provides a FIPS-capable backend but FIPS mode must be enabled at build time (`AWS_LC_SYS_FIPS=1`); a full FIPS validation requires review beyond this flag.
+**Outbound** — proxy forwarding to a real HSM in discovery / passthrough mode:
+
+```yaml
+discover:
+  enabled: true
+  hsm_host: 192.168.1.10
+  hsm_port: 1500
+  tls:
+    ca_file: /etc/apc-proxy/hsm-ca.crt           # required — validates HSM's server cert
+    client_cert_file: /etc/apc-proxy/proxy.crt   # optional — mTLS to HSM (typical for payShield)
+    client_key_file:  /etc/apc-proxy/proxy.key
+    # server_name: hsm.example.local             # optional — override if HSM cert SAN doesn't match host
+```
+
+Omit `tls:` on either side for plaintext. Acceptable for local development; not for production. To use a FIPS-capable TLS backend, swap the `ring` feature for `aws-lc-rs` in `Cargo.toml` and recompile — no other code changes needed. The crypto provider is selected at compile time via the feature flag. Note: `aws-lc-rs` provides a FIPS-capable backend but FIPS mode must be enabled at build time (`AWS_LC_SYS_FIPS=1`); a full FIPS validation requires review beyond this flag.
 
 ---
 
@@ -181,6 +237,14 @@ cargo build --release
 ```
 
 AWS credentials via the standard chain: IAM role, environment variables, `~/.aws/credentials`. Set `aws.profile` in `proxy.yaml` to use a named profile.
+
+### Validate the config before serving
+
+```bash
+./target/release/apc-proxy --config proxy.yaml --verify-only
+```
+
+Loads the config, calls `get_key` against APC for every `key_mappings` entry, and prints a per-entry report (state, enabled, KCV, usage, algorithm). Exits 0 only if every mapping resolves to a `CREATE_COMPLETE`, enabled APC key. Also checks AWS credentials, the startup `list_keys` scan, and TLS file paths. Run this after every config edit and as part of any deployment pipeline.
 
 ---
 
@@ -258,6 +322,27 @@ The protocol parsers are derived from specification and reference documentation 
 
 ---
 
-## Contributing
+## Help test this
 
-If you have access to a Thales payShield 10K or Futurex Excrypt Enterprise SSP v.2 and can test this against a real application, that is the most valuable contribution possible. Protocol edge cases, TLS compatibility, latency behavior, and handler correctness against real hardware can't be validated without the equipment. Open an issue with what you found or a PR with the fix.
+The author does not have a Thales payShield 10K or Futurex Excrypt Enterprise SSP v.2 on hand. Everything in this repo is tested either against AWS Payment Cryptography directly or against an in-process mock HSM. **Real-application validation is the most valuable thing this project needs** and the only way to surface the protocol edge cases the spec inference left ambiguous.
+
+If you have access to either HSM and can try this against a real application — even a non-production one — please report what you find. Concrete asks, in priority order:
+
+1. **Run the discovery phase** ([setup guide](docs/setup.md#phase-1-discovery)) against a representative workload from a real application and post a sanitised `discovery.jsonl`. Even just confirming "every command code we hit is in the supported list" is signal.
+2. **Try a single end-to-end command** through the proxy (PIN translate or MAC generate are good first candidates) and compare the result against what the HSM returns directly. Same vector in, same answer out, or document the divergence.
+3. **TLS / mTLS handshake compatibility** — older HSM SDKs vary in TLS version and cipher suite support. If the handshake fails against `rustls 0.23` defaults, note the SDK version and what it offered.
+4. **Wrapped key block resolution** — if your application sends `'S'`-prefix TR-31 blocks with the `KC` optional block populated, confirm the proxy resolves them against APC correctly.
+5. **Latency under load** — the `latency_us` per-command log makes this easy. A small sustained-rate test would help calibrate the cold-start and steady-state numbers in [Performance](#performance).
+
+### Filing reports
+
+| What you found | Issue label | What to include |
+|---|---|---|
+| Worked end-to-end against real HSM | `needs-hsm-validation` | HSM model + firmware, application name (sanitised), commands exercised, anything surprising |
+| Protocol parse error or response misframing | `protocol-edge-case` | The wire frame bytes (sanitised), expected response, what the proxy returned, payShield/Excrypt firmware version |
+| TLS handshake fails | `tls-compat` | Client TLS version + cipher suites, cert key type, the rustls error from the proxy log |
+| Wrong APC behavior or unexpected error 41 | `apc-behavior` | The handler that ran, the wire frame, the APC error in the proxy log |
+
+If you take this through a formal compliance assessment, sharing what you found — gaps, confirmations, compensating controls — via a GitHub issue or PR helps others on the same path.
+
+Bug fixes, handler implementations for currently-unsupported commands (see [`src/handlers/noop.rs`](src/handlers/noop.rs) for the "deliberately not implemented" list and the [open issues](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/issues) for "wanted"), documentation improvements, and additional tests are all welcome via PR.

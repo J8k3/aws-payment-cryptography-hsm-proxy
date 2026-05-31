@@ -47,6 +47,8 @@ src/
 
 **Key-field parsing decisions live in `docs/key-presentation.md`** — the wire-form matrix says which commands accept the `'S'` prefix (wrapped key blocks) and which are fixed-width per spec. Check it before assuming a new handler can use `parse_legacy_key` / `parse_bdk` / `parse_key_32`; if the command's wire spec defines a fixed-width key field, hardcode the slice and use `resolve` rather than `resolve_descriptor`.
 
+**Operator-facing setup procedure** lives in `docs/setup.md` — the full prerequisites, discovery, key inventory, import, validation (`--verify-only`), cutover, and production hardening flow. When the user asks setup-shaped questions ("how do I deploy this", "how do I migrate my keys"), point them at that doc and the matching phase rather than reconstructing the procedure inline.
+
 ## Session Start
 
 - At the start of a session, sync with `origin/master` before doing substantive work.
