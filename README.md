@@ -43,7 +43,7 @@ cd aws-payment-cryptography-hsm-proxy
 cargo build --release
 ```
 
-Minimal `proxy.yaml` (development only — no TLS, no APC keys configured):
+Write a minimal `proxy.yaml` — no TLS, no APC keys, just the listener:
 
 ```yaml
 vendor: thales_payshield
@@ -55,9 +55,13 @@ aws:
 key_mappings: {}
 ```
 
+(The repo's existing `proxy.yaml` is the maintainer's test rig and references ARNs you don't own — don't use it as a starting template. For real deployments, copy from `proxy.example.yaml` and follow [`docs/setup.md`](docs/setup.md).)
+
 ```sh
 ./target/release/apc-proxy --config proxy.yaml
 ```
+
+The proxy will warn that AWS credentials are missing and that the `list_keys` scan failed — both expected without an APC account configured, and neither affects the B2 heartbeat below.
 
 In another terminal, send a B2 heartbeat (no APC call — proxy responds locally):
 
@@ -91,16 +95,23 @@ Run the proxy in passthrough mode between your application and the real HSM. The
 
 **Passthrough limitations:** The proxy opens a fresh TCP connection per forwarded command and reads a single response chunk. This is sufficient for stateless single-exchange commands but will not work correctly for multi-read responses or applications that rely on persistent connection state to the HSM. See [Known Risks](#known-risks) for details.
 
-**Configure `proxy.yaml`:**
+**Configure `proxy.yaml`** (start from `proxy.example.yaml` — the schema is fully commented there):
 ```yaml
 vendor: futurex_excrypt    # or thales_payshield
 aws:
   region: us-east-1
 discover:
   enabled: true
-  hsm_host: 192.168.1.10  # your real HSM
+  hsm_host: 192.168.1.10
   hsm_port: 1500
   log_file: discovery.jsonl
+  # Most production HSMs are on TLS-only host ports. Without the tls: block
+  # the forward connection is plaintext and the handshake will fail:
+  tls:
+    ca_file: /etc/apc-proxy/hsm-ca.crt
+    # mTLS — proxy presents a client cert to the HSM:
+    client_cert_file: /etc/apc-proxy/proxy.crt
+    client_key_file:  /etc/apc-proxy/proxy.key
 ```
 
 **Point your application at the proxy instead of the HSM.** Run it through a representative set of transactions — enough to exercise every command path you care about.

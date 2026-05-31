@@ -27,13 +27,25 @@ cargo test -- --nocapture   # with stdout
 
 ```
 src/
-├── main.rs         — entry point, CLI args, config load, server start
-├── server.rs       — TCP listener, connection dispatch, passthrough logic
-├── config.rs       — proxy.yaml schema (vendor, listen, aws, key_mappings, discover)
-├── key_map.rs      — maps local HSM key labels to APC key identifiers
+├── main.rs         — entry point, CLI args (--config, --verify-only), config load, dispatch
+├── server.rs       — TCP listener, connection dispatch, passthrough (incl. outbound TLS) logic
+├── verify.rs       — --verify-only mode: APC inventory + key_mappings sanity check
+├── config.rs       — proxy.yaml schema (vendor, listen{tls}, aws, key_mappings, discover{tls})
+├── key_map.rs      — two-path resolver: labels via config, wrapped keys via startup APC KCV scan
 ├── error.rs        — error types
 ├── protocol/       — wire-protocol parsers: thales.rs, futurex.rs
-└── handlers/       — per-command APC translators: thales/, futurex/
+└── handlers/       — per-command APC translators: thales/, futurex/, noop.rs
+```
+
+### Test suite layout
+
+```
+tests/
+├── integration.rs       — live APC tests (gated with #[ignore]; require running proxy)
+├── passthrough.rs       — discover/passthrough mode against an in-test mock HSM
+├── tls.rs               — inbound TLS + mTLS handshake / rejection
+├── forward_tls.rs       — outbound TLS/mTLS on the forward leg to the HSM
+└── common/              — shared fixtures: mock_hsm.rs, proxy_process.rs, tls_certs.rs
 ```
 
 **Adding a new command handler:**
@@ -166,44 +178,38 @@ This procedure provisions real APC keys, runs the proxy against them, captures l
 - Region: `us-east-1` (default for this project; override with `AWS_DEFAULT_REGION`).
 - The proxy binary built: `cargo build --release`.
 
-### Step 1 — Provision test keys via MCP
-
-Use the `mcp__apc-agent__create_key` tool (available in Claude Code sessions) to create the minimum key set. Create one key per family; record the `KeyArn` returned by each call.
-
-| Key | Usage | Algorithm | Description |
-|-----|-------|-----------|-------------|
-| `test-mac-key` | `M1` | `TDES_2KEY` | MAC generate + verify for MA/MC/ME (ISO 9797 Alg 1 / CBC-MAC) |
-| `test-dek-key` | `E3` | `TDES_2KEY` | Encrypt + decrypt (HE/HG, M0/M2) |
-
-Example tool call for the MAC key:
-```json
-{ "KeyAttributes": { "KeyUsage": "TR31_M1_ISO_9797_1_MAC_KEY", "KeyClass": "SYMMETRIC_KEY", "KeyAlgorithm": "TDES_2KEY", "KeyModesOfUse": { "Generate": true, "Verify": true } }, "Exportable": false, "Enabled": true }
-```
-
-### Step 2 — Configure proxy.yaml
-
-Update the `key_mappings` section with the ARNs from Step 1. The left side is the legacy key label the test frames will send; the right side is the APC key ARN.
-
-```yaml
-aws:
-  region: us-east-1
-
-key_mappings:
-  # Replace with actual ARNs from Step 1
-  "1234567890ABCDEF": "arn:aws:payment-cryptography:us-east-1:ACCOUNT:key/MAC_KEY_ID"
-  "mock-dek":         "arn:aws:payment-cryptography:us-east-1:ACCOUNT:key/DEK_KEY_ID"
-```
-
-### Step 3 — Start the proxy
+### Step 1 — Provision test keys
 
 ```powershell
-$env:RUST_LOG = "apc_proxy=info"
-cargo run --release -- --config proxy.yaml
+python scripts/import_test_keys.py
 ```
 
-The proxy is ready when it logs `proxy listening`.
+Imports six known-material keys via KEY_CRYPTOGRAM (P0 src/dst, V1, V2, B0 BDK, E0 IMK) and creates six APC-generated keys (M1, M3, M6 CMAC, M7 HMAC, C0 CVK, D0 DEK). Prints the full `key_mappings` block to paste into `proxy.yaml`. The script is idempotent — re-run after every cleanup; ARNs change on every re-import, labels are stable.
 
-### Step 4 — Run the integration tests
+### Step 2 — Update proxy.yaml
+
+Paste the `key_mappings` block printed by Step 1 over the existing block in `proxy.yaml`.
+
+### Step 3 — Validate the config before starting
+
+```powershell
+cargo run --release -- --config proxy.yaml --verify-only
+```
+
+Exits 0 only if every `key_mappings` entry resolves to a `CREATE_COMPLETE`, enabled APC key. Catches typos, DELETE_PENDING ARNs, disabled keys, missing cert files, half-configured mTLS. Always run this after editing `proxy.yaml` and before starting the listener.
+
+### Step 4 — Start the proxy
+
+```powershell
+# Copy first to free target/debug/apc-proxy.exe for the test build:
+Copy-Item .\target\debug\apc-proxy.exe .\target\debug\apc-proxy-live.exe
+$env:RUST_LOG = "apc_proxy=info"
+.\target\debug\apc-proxy-live.exe --config proxy.yaml
+```
+
+The proxy is ready when it logs `proxy listening`. The startup log shows `scanned=N indexed=N skipped_disabled=0` — confirms the APC inventory scan worked.
+
+### Step 5 — Run the integration tests
 
 In a second terminal (proxy stays running):
 
@@ -213,7 +219,9 @@ $env:PROXY_PORT = "1500"
 cargo test --test integration -- --ignored --nocapture
 ```
 
-At minimum, `thales_b2_heartbeat_returns_success` must pass (no APC key required). MAC and encrypt tests require the keys from Step 1 to be reflected in `proxy.yaml`.
+23 Thales tests must pass; the 2 Futurex tests are expected to fail when the proxy is in `thales_payshield` mode and skip when in `futurex_excrypt` mode. Re-run with `vendor: futurex_excrypt` in `proxy.yaml` to exercise those.
+
+The in-process suites (`cargo test --test passthrough --test tls --test forward_tls`) run without a separately-started proxy — they spawn `apc-proxy` as a subprocess per test and don't need AWS credentials to pass.
 
 ### Step 5 — Capture latency
 

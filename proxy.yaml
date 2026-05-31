@@ -1,3 +1,8 @@
+# THIS FILE IS THE PROJECT'S TEST-RIG CONFIG, not a template for new users.
+# It references ARNs in the maintainer's AWS account that you don't have
+# access to. To start from a clean template instead, copy proxy.example.yaml
+# to proxy.yaml and follow docs/setup.md.
+
 listen:
   host: 0.0.0.0
   port: 1500

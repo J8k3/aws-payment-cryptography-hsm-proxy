@@ -1,0 +1,65 @@
+# apc-proxy example configuration.
+#
+# Copy this to proxy.yaml and edit. The full setup procedure is in
+# docs/setup.md (prerequisites, key inventory, import, --verify-only,
+# cutover). The schema below shows every option; uncomment what you need.
+
+# Vendor — pick one based on what your application speaks.
+vendor: thales_payshield   # or: futurex_excrypt
+
+listen:
+  host: 0.0.0.0
+  port: 1500
+
+  # Inbound TLS. Required for production. Omit the tls: block entirely for
+  # plaintext (development only — the proxy will warn at startup).
+  #
+  # tls:
+  #   cert_file: /etc/apc-proxy/server.crt
+  #   key_file:  /etc/apc-proxy/server.key
+  #   # ca_file present = require client cert (mTLS) signed by that CA:
+  #   # ca_file: /etc/apc-proxy/client-ca.crt
+
+aws:
+  region: us-east-1
+  # Named profile. Omit to use the default chain (IAM role → env → ~/.aws/credentials).
+  # profile: apc-proxy
+
+# Discovery / passthrough mode.
+#
+# When enabled, commands with no registered handler are forwarded to the real
+# HSM rather than returning error 68. Use during the discovery phase to
+# capture which commands your application actually sends.
+#
+# discover:
+#   enabled: true
+#   hsm_host: 192.168.1.10
+#   hsm_port: 1500
+#   log_file: discovery.jsonl   # NDJSON, one record per unique command code
+#   hsm_read_timeout_secs: 30   # default 30; lower to surface unresponsive HSMs faster
+#
+#   # Outbound TLS to the HSM. Required for any production payShield (host
+#   # command port is TLS-only there) — without this block the proxy connects
+#   # plaintext and the handshake fails.
+#   #
+#   # tls:
+#   #   ca_file: /etc/apc-proxy/hsm-ca.crt
+#   #   # mTLS — proxy presents a client cert to the HSM:
+#   #   # client_cert_file: /etc/apc-proxy/proxy.crt
+#   #   # client_key_file:  /etc/apc-proxy/proxy.key
+#   #   # Override the SNI / server name validation (default = hsm_host):
+#   #   # server_name: hsm.example.local
+
+# Key mappings: label or LMK-encrypted hex (as the application sends it) →
+# APC key ARN or alias.
+#
+# X9.143 / TR-31 wrapped key blocks with a KC optional block are resolved
+# automatically against the startup APC list_keys scan — no entry needed
+# here for those. See docs/key-presentation.md for the full wire-form matrix.
+#
+# Prefer aliases over raw ARNs: aliases survive key rotation.
+key_mappings:
+  # ZPK_INBOUND:        alias/zpk-inbound
+  # ZPK_OUTBOUND:       alias/zpk-outbound
+  # LIVETEST_MAC_001:   alias/live-mac-001
+  # BDK_TERMINAL:       arn:aws:payment-cryptography:us-east-1:123456789012:key/abc123
