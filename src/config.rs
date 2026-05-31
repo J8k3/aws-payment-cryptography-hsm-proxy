@@ -73,6 +73,32 @@ pub struct DiscoverConfig {
     /// raise if a legitimate operation can take longer.
     #[serde(default)]
     pub hsm_read_timeout_secs: Option<u64>,
+    /// TLS configuration for the outbound leg to the real HSM. Omit for
+    /// plaintext (development / legacy HSMs only). Production payShield
+    /// deployments listen for host commands over TLS, often mTLS, so this
+    /// block is required to reach them.
+    pub tls: Option<ForwardTlsConfig>,
+}
+
+/// TLS configuration for the outbound forward leg (proxy → real HSM).
+///
+/// `ca_file` is required — the HSM's server cert must be validated against
+/// a CA the operator has decided to trust. `client_cert_file` +
+/// `client_key_file` together enable mTLS; provide both or neither.
+#[derive(Debug, Deserialize)]
+pub struct ForwardTlsConfig {
+    /// PEM file containing the CA(s) that signed the HSM's server cert.
+    pub ca_file: PathBuf,
+    /// PEM file containing the proxy's client cert chain (leaf first) when
+    /// the HSM requires mTLS. Must be paired with `client_key_file`.
+    pub client_cert_file: Option<PathBuf>,
+    /// PEM file containing the proxy's client private key when mTLS is in use.
+    pub client_key_file: Option<PathBuf>,
+    /// Override the server name used for SNI and certificate verification.
+    /// Defaults to `hsm_host` from the surrounding `DiscoverConfig`. Set this
+    /// when the HSM cert is issued for a different hostname than the address
+    /// the proxy connects to (common when the HSM is reached by IP).
+    pub server_name: Option<String>,
 }
 
 fn default_host() -> String {

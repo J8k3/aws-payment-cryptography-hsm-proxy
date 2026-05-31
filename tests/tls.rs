@@ -66,6 +66,7 @@ async fn inbound_tls_b2_heartbeat() {
             key_path: certs.key_path.clone(),
             ca_path: None,
         }),
+        forward_tls: None,
     });
 
     let connector = TlsConnector::from(certs.client_config());
@@ -120,6 +121,7 @@ async fn inbound_tls_rejects_plaintext_client() {
             key_path: certs.key_path.clone(),
             ca_path: None,
         }),
+        forward_tls: None,
     });
 
     let mut tcp = TcpStream::connect(proxy.addr)
@@ -185,6 +187,7 @@ async fn inbound_mtls_b2_heartbeat_with_valid_client_cert() {
             key_path: server_certs.key_path.clone(),
             ca_path: Some(server_certs.ca_cert_pem_path.clone()),
         }),
+        forward_tls: None,
     });
 
     let connector = TlsConnector::from(server_certs.client_config_with_auth(&client_cert));
@@ -233,6 +236,7 @@ async fn inbound_mtls_rejects_client_without_cert() {
             key_path: server_certs.key_path.clone(),
             ca_path: Some(server_certs.ca_cert_pem_path.clone()),
         }),
+        forward_tls: None,
     });
 
     // Client trusts the server CA but presents NO client cert.
@@ -270,11 +274,17 @@ async fn inbound_mtls_rejects_client_without_cert() {
 /// one the proxy was configured to trust. Server must reject the chain.
 #[tokio::test(flavor = "multi_thread")]
 async fn inbound_mtls_rejects_client_with_wrong_ca_cert() {
-    let dir = TempDir::new();
-    let server_certs = TlsCerts::generate(&dir.path, "localhost");
-    // Completely separate CA — the proxy doesn't trust this one.
-    let other_ca = TlsCerts::generate(&dir.path, "other-localhost");
-    let untrusted_client = other_ca.issue_client_cert(&dir.path, "untrusted-client");
+    // Separate temp dirs — TlsCerts writes server.crt/key/ca.crt with fixed
+    // names, so reusing one dir would have the second generate() overwrite
+    // the first on disk. Without this split, the test would pass for the
+    // wrong reason (server cert mismatch with client's expected CA, not
+    // client cert mismatch with server's expected CA).
+    let server_dir = TempDir::new();
+    let other_dir = TempDir::new();
+    let client_dir = TempDir::new();
+    let server_certs = TlsCerts::generate(&server_dir.path, "localhost");
+    let other_ca = TlsCerts::generate(&other_dir.path, "other-localhost");
+    let untrusted_client = other_ca.issue_client_cert(&client_dir.path, "untrusted-client");
 
     let proxy = ProxyProcess::spawn(&ProxyConfigInput {
         vendor: "thales_payshield",
@@ -286,6 +296,7 @@ async fn inbound_mtls_rejects_client_with_wrong_ca_cert() {
             key_path: server_certs.key_path.clone(),
             ca_path: Some(server_certs.ca_cert_pem_path.clone()),
         }),
+        forward_tls: None,
     });
 
     let connector = TlsConnector::from(server_certs.client_config_with_auth(&untrusted_client));

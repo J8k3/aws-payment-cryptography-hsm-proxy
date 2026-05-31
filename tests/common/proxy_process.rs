@@ -37,6 +37,9 @@ pub struct ProxyConfigInput<'a> {
     pub hsm_read_timeout_secs: Option<u64>,
     /// Inbound TLS configuration. `None` = plaintext listener.
     pub tls: Option<TlsInput>,
+    /// Outbound TLS configuration on the forward leg (proxy → real HSM).
+    /// `None` = plaintext forward connection.
+    pub forward_tls: Option<ForwardTlsInput>,
 }
 
 pub struct TlsInput {
@@ -45,6 +48,13 @@ pub struct TlsInput {
     /// Optional CA path: setting this turns the listener into mTLS (the
     /// client must present a cert signed by this CA).
     pub ca_path: Option<PathBuf>,
+}
+
+pub struct ForwardTlsInput {
+    pub ca_file: PathBuf,
+    pub client_cert_file: Option<PathBuf>,
+    pub client_key_file: Option<PathBuf>,
+    pub server_name: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -78,12 +88,29 @@ impl ProxyProcess {
             }
             None => String::new(),
         };
+        let forward_tls_block = match &input.forward_tls {
+            Some(t) => {
+                use std::fmt::Write as _;
+                let mut s = format!("  tls:\n    ca_file: {}\n", t.ca_file.display());
+                if let Some(p) = &t.client_cert_file {
+                    let _ = writeln!(s, "    client_cert_file: {}", p.display());
+                }
+                if let Some(p) = &t.client_key_file {
+                    let _ = writeln!(s, "    client_key_file: {}", p.display());
+                }
+                if let Some(n) = &t.server_name {
+                    let _ = writeln!(s, "    server_name: {n}");
+                }
+                s
+            }
+            None => String::new(),
+        };
         let yaml = format!(
             "vendor: {vendor}\n\
              listen:\n  host: 127.0.0.1\n  port: {port}\n{tls_block}\
              aws:\n  region: us-east-1\n\
              key_mappings: {{}}\n\
-             discover:\n  enabled: true\n  hsm_host: {hsm_host}\n  hsm_port: {hsm_port}\n  log_file: {log_path}\n{read_timeout_line}"
+             discover:\n  enabled: true\n  hsm_host: {hsm_host}\n  hsm_port: {hsm_port}\n  log_file: {log_path}\n{read_timeout_line}{forward_tls_block}"
         );
 
         std::fs::write(&config_path, yaml).expect("write temp proxy.yaml");

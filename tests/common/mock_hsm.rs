@@ -3,11 +3,15 @@
 //! handled exactly once: read the inbound frame, write a canned response,
 //! record what was received for the test to assert on. Lives entirely in
 //! `tests/` — not part of the shipped proxy.
+//!
+//! Optionally accepts TLS / mTLS for testing the proxy's outbound TLS path
+//! (`discover.tls`). Server cert + optional client-cert-CA come from the same
+//! `TlsCerts` fixture used by `tests/tls.rs`.
 
 use std::sync::Arc;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -25,8 +29,6 @@ pub struct MockHsm {
     _task: JoinHandle<()>,
 }
 
-/// Test fixture: variants are added as later passthrough tests need them.
-/// `AcceptThenHang` will be wired in when we add the timeout test.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub enum MockBehavior {
@@ -37,12 +39,28 @@ pub enum MockBehavior {
     AcceptThenHang,
 }
 
+/// How the mock should accept connections. `Plaintext` is the default;
+/// `Tls` wraps each accepted TCP stream with a rustls server config.
+#[allow(dead_code)]
+pub enum TransportMode {
+    Plaintext,
+    /// One-way TLS. `server_config` already pinned with the cert + key.
+    Tls(Arc<rustls::ServerConfig>),
+}
+
 #[allow(dead_code)]
 impl MockHsm {
-    /// Spawn a mock that serves at most `connections` connections then exits.
-    /// Returns once the listener is bound — callers can immediately read
-    /// `addr` and feed it into a proxy config.
+    /// Spawn a plaintext mock that serves at most `connections` then exits.
     pub async fn spawn(behavior: MockBehavior, connections: usize) -> Self {
+        Self::spawn_with_transport(behavior, connections, TransportMode::Plaintext).await
+    }
+
+    /// Spawn a mock with a configurable transport (plaintext or TLS).
+    pub async fn spawn_with_transport(
+        behavior: MockBehavior,
+        connections: usize,
+        transport: TransportMode,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind mock HSM listener");
@@ -53,29 +71,22 @@ impl MockHsm {
 
         let task = tokio::spawn(async move {
             for _ in 0..connections {
-                let Ok((mut stream, _)) = listener.accept().await else {
+                let Ok((tcp, _)) = listener.accept().await else {
                     return;
                 };
-                // Read whatever the proxy forwards in one go. The proxy
-                // currently sends a single frame per connection and waits
-                // for a single response, so one read is sufficient.
-                let mut buf = vec![0u8; 65536];
-                let Ok(n) = stream.read(&mut buf).await else {
-                    continue;
-                };
-                buf.truncate(n);
-                received_for_task.lock().await.push(buf);
-
-                match &behavior {
-                    MockBehavior::Respond(reply) => {
-                        let _ = stream.write_all(reply).await;
-                        let _ = stream.shutdown().await;
+                let received = Arc::clone(&received_for_task);
+                let behavior = behavior.clone();
+                match &transport {
+                    TransportMode::Plaintext => {
+                        handle_one(tcp, &behavior, &received).await;
                     }
-                    MockBehavior::AcceptThenHang => {
-                        // Hold the socket open without replying so the proxy
-                        // exercises its read-timeout. Sleep long enough that
-                        // any reasonable test timeout fires first.
-                        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    TransportMode::Tls(server_cfg) => {
+                        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(server_cfg));
+                        let Ok(tls_stream) = acceptor.accept(tcp).await else {
+                            // Handshake failed — record nothing, move on.
+                            continue;
+                        };
+                        handle_one(tls_stream, &behavior, &received).await;
                     }
                 }
             }
@@ -94,3 +105,73 @@ impl MockHsm {
         self.received.lock().await.clone()
     }
 }
+
+async fn handle_one<S>(mut stream: S, behavior: &MockBehavior, received: &Arc<Mutex<Vec<Vec<u8>>>>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut buf = vec![0u8; 65536];
+    let Ok(n) = stream.read(&mut buf).await else {
+        return;
+    };
+    buf.truncate(n);
+    received.lock().await.push(buf);
+
+    match behavior {
+        MockBehavior::Respond(reply) => {
+            let _ = stream.write_all(reply).await;
+            let _ = stream.shutdown().await;
+        }
+        MockBehavior::AcceptThenHang => {
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+        }
+    }
+}
+
+/// Build a rustls `ServerConfig` for the mock HSM from a TlsCerts fixture.
+/// `client_ca` enables mTLS — the mock will require the proxy to present a
+/// client cert signed by that CA.
+#[allow(dead_code)]
+pub fn server_config_from_cert_pem(
+    cert_pem: &str,
+    key_pem: &str,
+    client_ca_pem: Option<&str>,
+) -> Arc<rustls::ServerConfig> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let cert_chain: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut std::io::BufReader::new(cert_pem.as_bytes()))
+            .collect::<Result<_, _>>()
+            .expect("parse mock cert");
+    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_pem.as_bytes()))
+        .expect("parse mock key")
+        .expect("mock key present");
+
+    let cfg = if let Some(ca_pem) = client_ca_pem {
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut std::io::BufReader::new(ca_pem.as_bytes())) {
+            roots
+                .add(cert.expect("parse mock client CA"))
+                .expect("add client CA");
+        }
+        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+            .build()
+            .expect("client verifier");
+        rustls::ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(cert_chain, key)
+            .expect("server config (mTLS)")
+    } else {
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, key)
+            .expect("server config")
+    };
+
+    Arc::new(cfg)
+}
+
+/// Convenience: re-export `TcpStream` so tests that need to construct
+/// transport directly don't have to import from tokio themselves.
+#[allow(dead_code)]
+pub type RawStream = TcpStream;

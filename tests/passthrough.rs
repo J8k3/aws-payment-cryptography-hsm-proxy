@@ -59,6 +59,7 @@ async fn thales_unhandled_command_is_forwarded_and_logged() {
         hsm_port: mock.addr.port(),
         hsm_read_timeout_secs: None,
         tls: None,
+        forward_tls: None,
     });
 
     let proxy_addr = proxy.addr;
@@ -113,6 +114,7 @@ async fn futurex_unhandled_command_is_forwarded_and_log_redacts_sensitive_params
         hsm_port: mock.addr.port(),
         hsm_read_timeout_secs: None,
         tls: None,
+        forward_tls: None,
     });
 
     let proxy_addr = proxy.addr;
@@ -175,6 +177,7 @@ async fn thales_unhandled_command_returns_error_when_hsm_unreachable() {
         hsm_port: unreachable_port,
         hsm_read_timeout_secs: None,
         tls: None,
+        forward_tls: None,
     });
 
     let client_frame = thales_frame(*b"XX", b"payload");
@@ -214,6 +217,7 @@ async fn thales_unhandled_command_returns_error_on_hsm_read_timeout() {
         hsm_port: mock.addr.port(),
         hsm_read_timeout_secs: Some(1),
         tls: None,
+        forward_tls: None,
     });
 
     let client_frame = thales_frame(*b"XX", b"payload");
