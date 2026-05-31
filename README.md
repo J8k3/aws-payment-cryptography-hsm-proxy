@@ -62,10 +62,20 @@ key_mappings: {}
 In another terminal, send a B2 heartbeat (no APC call — proxy responds locally):
 
 ```sh
-# Frame: 0x0004 (length) 0x0000 (header) "B2"
+# macOS / Linux: frame is [0x00 0x04][0x00 0x00]"B2"
 printf '\x00\x04\x00\x00B2' | nc 127.0.0.1 1500 | xxd
-# Expect: 00 06 00 00 BB 00 followed by an "00" success code
 ```
+
+```powershell
+# Windows PowerShell — nc isn't standard:
+$c = [System.Net.Sockets.TcpClient]::new('127.0.0.1', 1500)
+$s = $c.GetStream(); $s.Write([byte[]](0x00,0x04,0x00,0x00,0x42,0x32), 0, 6)
+$buf = New-Object byte[] 16; $n = $s.Read($buf, 0, 16)
+($buf[0..($n-1)] | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+$c.Close()
+```
+
+Expected response: `00 06 00 00 42 33 30 30` — length `0006`, header `0000`, response code `B3` (the B2 reply), error code `00` (success).
 
 For anything beyond a heartbeat, follow [`docs/setup.md`](docs/setup.md) — APC keys, IAM, inbound/outbound TLS, discovery, validation via `--verify-only`, cutover.
 
@@ -279,7 +289,9 @@ Measured on 2026-05-30, us-east-1, proxy co-located with the calling process (lo
 
 **Steady state:** 13–20 ms per APC operation at same-region loopback latency. Cross-region deployments or higher network latency will add the round-trip delta. Applications with socket timeouts under 500 ms should extend them to at least 2 seconds to absorb both cold start and APC latency variance.
 
-**No-APC commands** (B2 heartbeat, future passthrough in discovery mode): sub-millisecond — no network call involved.
+**No-APC commands** (B2 heartbeat): sub-millisecond — no network call involved.
+
+**Startup** adds an APC `list_keys` scan (used to populate the wrapped-key resolution index) plus AWS credential resolution; typically under 300 ms total for an account with a few dozen keys. Not on the per-command path.
 
 The `latency_us` field is logged for every handled command:
 
@@ -310,7 +322,7 @@ This is wall-clock time from completed frame parse to response encoding — i.e.
 
 **ARQC session key derivation variant** — KQ and KW use APC's `EmvCommon` session key derivation (PAN + PAN Sequence + ATC), which is correct for standard EMV and Visa CVN10/CVN14. Visa CVN17/CVN18/CVN22 use a different derivation formula (PAN + PAN Sequence only, no ATC) that requires APC's `Visa` session key derivation variant; Mastercard M/Chip SKD uses a separate derivation that requires the `Mastercard` variant with the Unpredictable Number. If your deployment uses these card types and ARQC verification returns error 01 (mismatch) for valid transactions, the session key derivation variant is the first place to investigate.
 
-**Key map completeness** — Every key reference the application sends must appear in `key_mappings`. Discovery mode against a real HSM is the reliable way to enumerate them — look for parameter codes that carry key material (`AX`, `BT` in Futurex; the key field in Thales commands) and make sure each value has a mapping.
+**Key map completeness** — Key references the application sends fall into two paths. Wrapped key blocks in X9.143 / TR-31 format with a `KC` optional block resolve automatically against the startup APC scan — no `key_mappings` entry needed. Label-style and variant-LMK encrypted hex references must each appear as a `key_mappings` entry. Discovery mode against a real HSM is the reliable way to enumerate the label/hex references — look for parameter codes that carry key material (`AX`, `BT` in Futurex; the key field in Thales commands) and confirm every non-wrapped value has a mapping. See [`docs/key-presentation.md`](docs/key-presentation.md) for the full wire-form matrix.
 
 ---
 

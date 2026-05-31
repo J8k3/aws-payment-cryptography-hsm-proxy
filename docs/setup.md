@@ -215,9 +215,9 @@ apc-proxy verify-only against us-east-1
 ─────────────────────────────────────────────────────────────
   ok    AWS credentials resolved
   ok    APC list_keys scan succeeded
-  ok    LIVETEST_DEK_001    → key/mbn... (TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY/TDES_2KEY, KCV=57860B)
-  ok    LTEST_P0SRC_0001    → key/idj... (TR31_P0_PIN_ENCRYPTION_KEY/TDES_2KEY, KCV=D5D44F)
-  FAIL  LTEST_OLD_LABEL     → key/abc... NOT FOUND in APC
+  ok    LIVETEST_DEK_001                     → key/mbnnew5hljwmrelc (TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY/TDES_2KEY, KCV=57860B)
+  ok    LTEST_P0SRC_0001                     → key/idjhww6xxgz4gggd (TR31_P0_PIN_ENCRYPTION_KEY/TDES_2KEY, KCV=D5D44F)
+  FAIL  LTEST_OLD_LABEL                      → key/abc123xyz0000000 NOT FOUND in APC
   ok    listen.tls.cert_file: /etc/apc-proxy/server.crt
   ok    listen.tls.key_file:  /etc/apc-proxy/server.key
 ─────────────────────────────────────────────────────────────

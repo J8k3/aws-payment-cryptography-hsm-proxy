@@ -4,6 +4,11 @@ version = "0.2.0"
 edition = "2021"
 description = "Thales payShield 10K and Futurex Excrypt → AWS Payment Cryptography protocol proxy"
 license = "Apache-2.0"
+repository = "https://github.com/J8k3/aws-payment-cryptography-hsm-proxy"
+homepage = "https://github.com/J8k3/aws-payment-cryptography-hsm-proxy"
+readme = "README.md"
+keywords = ["aws", "payment-cryptography", "hsm", "payshield", "futurex"]
+categories = ["cryptography", "command-line-utilities", "network-programming"]
 
 [[bin]]
 name = "apc-proxy"
