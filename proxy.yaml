@@ -62,50 +62,36 @@ aws:
 # for deletion after testing.
 # ──────────────────────────────────────────────────────────────────────────────
 key_mappings:
-  # ── Futurex TPIN key labels (Excrypt AX/BT parameter values) ─────────────────
-  ZPK_INBOUND:  "arn:aws:payment-cryptography:us-east-1:030716882260:key/njodcvi5plbzmhkg"  # P0SRC [known]
-  ZPK_OUTBOUND: "arn:aws:payment-cryptography:us-east-1:030716882260:key/xaude4iot7jabf5m"  # P0DST [known]
-
-  # ── 16-char labels (parse_legacy_key plain / parse_legacy_key 16H) ──────────
-
-  # Existing live test keys (MA/MC and HE/HG integration tests)
-  LIVETEST_MAC_001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/igkljfe7u77hg37c"  # M1 TDES
-  LIVETEST_DEK_001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/hygvlh26clxy4jx3"  # D0 TDES
-
-  # MAC keys
-  LTEST_M1_MAC_001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/igkljfe7u77hg37c"  # M1 ISO9797-Alg1 TDES
-  LTEST_M3_MAC_001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/tcpuujxalggq75pc"  # M3 ISO9797-Alg3 TDES
-  LTEST_M6_MAC_001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/xoyhrt3k7yi2tjgm"  # M6 CMAC AES-128
-
-  # HMAC key
-  LTEST_HMAC_00001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/lyo3yae4a7j22jsx"  # M7 HMAC AES-128
-
-  # Card verification key
-  LTEST_CVK_000001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/i6fwfb5atwo4rcbe"  # C0 CVK TDES
-
-  # PIN keys [known material] — used in DA/DC/CA DA
-  LTEST_P0SRC_0001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/njodcvi5plbzmhkg"  # P0 ZPK src [known]
-  LTEST_P0DST_0001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/xaude4iot7jabf5m"  # P0 ZPK dst [known]
-  LTEST_V1PVK_0001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/fh7ebt6ieyiyw57e"  # V1 IBM PVK [known]
-
-  # EMV ARQC master key (APC-generated; no known material — Level 1 test only)
-  LTEST_E0IMK_0001: "arn:aws:payment-cryptography:us-east-1:030716882260:key/iiv65vnfxrbvofbv"  # E0 AES-256
-
-  # ── 32-char labels (parse_key_32 / parse_bdk plain / CA 32H key field) ──────
-
-  # Visa PVV PVK [known material] — 32H for parse_key_32 (DC/EC command)
-  "LTEST_V2PVK_0001LTEST_V2PVK_0001": "arn:aws:payment-cryptography:us-east-1:030716882260:key/s5oan6j3kbvb735q"
-
-  # DUKPT BDK [known material] — 32H for parse_bdk (GW command)
-  "LTEST_B0BDK_0001LTEST_B0BDK_0001": "arn:aws:payment-cryptography:us-east-1:030716882260:key/nmn2jogdb57p4dbx"
-
-  # M1/M3 keys addressed as 32H (C2/C4 command — key is always 32H, no parse_legacy_key prefix)
-  "LTEST_M1_MAC_001LTEST_M1_MAC_001": "arn:aws:payment-cryptography:us-east-1:030716882260:key/igkljfe7u77hg37c"
-  "LTEST_M3_MAC_001LTEST_M3_MAC_001": "arn:aws:payment-cryptography:us-east-1:030716882260:key/tcpuujxalggq75pc"
-
-  # P0 ZPK keys as 32H — CA/CC/BQ use bytes 2-34 and 34-66 as key IDs (always 32H)
-  "LTEST_P0SRC_0001_LTEST_P0SRC_001": "arn:aws:payment-cryptography:us-east-1:030716882260:key/njodcvi5plbzmhkg"
-  "LTEST_P0DST_0001_LTEST_P0DST_001": "arn:aws:payment-cryptography:us-east-1:030716882260:key/xaude4iot7jabf5m"
-
-  # C0 CVK as 32H — CW/CY read CVK as fixed 32H (bytes 1-33), no parse_legacy_key
-  "LTEST_CVK_000001LTEST_CVK_000001": "arn:aws:payment-cryptography:us-east-1:030716882260:key/i6fwfb5atwo4rcbe"
+  # Provisioned by scripts/import_test_keys.py. Re-run after every cleanup; paste
+  # the script's output over this block. ARNs change on every re-import — labels
+  # are stable.
+  #
+  # Known-material keys (KEY_CRYPTOGRAM import, KCVs match imported clear bytes):
+  #   LTEST_P0SRC_0001  P0 TDES  D5D44F
+  #   LTEST_P0DST_0001  P0 TDES  A68CDC
+  #   LTEST_V1PVK_0001  V1 TDES  85A8D3
+  #   LTEST_V2PVK_*     V2 TDES  664CDA  (32-char label)
+  #   LTEST_B0BDK_*     B0 TDES  08D7B4  (32-char label)
+  # APC-generated keys (create_key — KCVs are random; round-trip tests only):
+  #   LTEST_M1/M3/M6/M7, LTEST_CVK_*, LIVETEST_MAC_001, LIVETEST_DEK_001,
+  #   LTEST_E0IMK_0001
+  "LIVETEST_DEK_001":                  "arn:aws:payment-cryptography:us-east-1:030716882260:key/mbnnew5hljwmrelc"
+  "LIVETEST_MAC_001":                  "arn:aws:payment-cryptography:us-east-1:030716882260:key/saufbxr5js5myx57"
+  "LTEST_B0BDK_0001LTEST_B0BDK_0001":  "arn:aws:payment-cryptography:us-east-1:030716882260:key/gejdfs6msuu6tq5h"
+  "LTEST_CVK_000001":                  "arn:aws:payment-cryptography:us-east-1:030716882260:key/4sd3cp7xyno3c3s6"
+  "LTEST_CVK_000001LTEST_CVK_000001":  "arn:aws:payment-cryptography:us-east-1:030716882260:key/4sd3cp7xyno3c3s6"
+  "LTEST_E0IMK_0001":                  "arn:aws:payment-cryptography:us-east-1:030716882260:key/lm555eh72hfoyyng"
+  "LTEST_HMAC_00001":                  "arn:aws:payment-cryptography:us-east-1:030716882260:key/bepemosiajwc6dm3"
+  "LTEST_M1_MAC_001":                  "arn:aws:payment-cryptography:us-east-1:030716882260:key/saufbxr5js5myx57"
+  "LTEST_M1_MAC_001LTEST_M1_MAC_001":  "arn:aws:payment-cryptography:us-east-1:030716882260:key/saufbxr5js5myx57"
+  "LTEST_M3_MAC_001":                  "arn:aws:payment-cryptography:us-east-1:030716882260:key/v5eqc6eolsv4brcs"
+  "LTEST_M3_MAC_001LTEST_M3_MAC_001":  "arn:aws:payment-cryptography:us-east-1:030716882260:key/v5eqc6eolsv4brcs"
+  "LTEST_M6_MAC_001":                  "arn:aws:payment-cryptography:us-east-1:030716882260:key/eranyu7ylrafeo3a"
+  "LTEST_P0DST_0001":                  "arn:aws:payment-cryptography:us-east-1:030716882260:key/taxy43dcg3n7g5c5"
+  "LTEST_P0DST_0001_LTEST_P0DST_001":  "arn:aws:payment-cryptography:us-east-1:030716882260:key/taxy43dcg3n7g5c5"
+  "LTEST_P0SRC_0001":                  "arn:aws:payment-cryptography:us-east-1:030716882260:key/idjhww6xxgz4gggd"
+  "LTEST_P0SRC_0001_LTEST_P0SRC_001":  "arn:aws:payment-cryptography:us-east-1:030716882260:key/idjhww6xxgz4gggd"
+  "LTEST_V1PVK_0001":                  "arn:aws:payment-cryptography:us-east-1:030716882260:key/lz44ugmk3ld4jovu"
+  "LTEST_V2PVK_0001LTEST_V2PVK_0001":  "arn:aws:payment-cryptography:us-east-1:030716882260:key/eeb53s7yrk7ffivv"
+  "ZPK_INBOUND":                       "arn:aws:payment-cryptography:us-east-1:030716882260:key/idjhww6xxgz4gggd"
+  "ZPK_OUTBOUND":                      "arn:aws:payment-cryptography:us-east-1:030716882260:key/taxy43dcg3n7g5c5"

@@ -252,6 +252,111 @@ fn thales_he_hg_roundtrip_live() {
     );
 }
 
+// ── HE with TR-31 wrapped key block ('S' prefix) ────────────────────────────
+
+/// Build an X9.143 / TR-31 ASCII key block (without 'S' prefix) carrying a KC
+/// optional block. The encrypted-key-data + MAC region is filler — the proxy
+/// only reads the header + optional blocks for KCV-based resolution, then
+/// hands off to APC by ARN. APC operates on the already-imported clear key.
+fn build_tr31_with_kc(usage: &[u8; 2], algo: u8, kcv: &str) -> Vec<u8> {
+    let kc = format!("KC0C00{kcv}"); // ID=KC, len=0C(12), version=00, 6-char KCV
+    assert_eq!(kc.len(), 12);
+    let header_no_len = format!(
+        "D____{u0}{u1}{a}B00N0100",
+        u0 = usage[0] as char,
+        u1 = usage[1] as char,
+        a = algo as char,
+    );
+    let total_len: usize = 80;
+    let mut header = header_no_len.into_bytes();
+    let len_str = format!("{total_len:04}");
+    header[1..5].copy_from_slice(len_str.as_bytes());
+    assert_eq!(header.len(), 16);
+
+    let padding_len = total_len - header.len() - kc.len();
+    let padding: Vec<u8> = std::iter::repeat(b'0').take(padding_len).collect();
+
+    let mut block = Vec::with_capacity(total_len);
+    block.extend_from_slice(&header);
+    block.extend_from_slice(kc.as_bytes());
+    block.extend_from_slice(&padding);
+    assert_eq!(block.len(), total_len);
+    block
+}
+
+/// End-to-end wrapped-key test: the proxy must extract the KCV from the TR-31
+/// "KC" optional block and resolve it against the APC inventory loaded at
+/// startup — no `key_mappings` entry exists for this wire form, so success
+/// proves the KCV path. The known-material D0 DEK (KCV=57860B) must exist in
+/// APC and be the only key with that (usage, algorithm, kcv).
+#[test]
+#[ignore = "requires live proxy with the D0 DEK KCV=57860B in APC inventory"]
+fn thales_he_resolves_wrapped_key_via_kcv() {
+    let plaintext_hex = b"AABBCCDDEE112233"; // 8 bytes as 16H
+
+    // Build the wrapped key field: 'S' + 80-char TR-31 block declaring D0/TDES
+    // with KC optional block carrying the D0 DEK's KCV (57860B).
+    let tr31 = build_tr31_with_kc(b"D0", b'T', "57860B");
+    let mut he_payload = vec![b'S'];
+    he_payload.extend_from_slice(&tr31);
+    he_payload.extend_from_slice(plaintext_hex);
+
+    let resp = send_recv(&make_thales_frame([0x00, 0x00], b"HE", &he_payload));
+    let (ec, ciphertext) = parse_thales_response(&resp);
+    assert_eq!(
+        &ec,
+        b"00",
+        "wrapped HE should succeed via KCV resolution; got: {}",
+        String::from_utf8_lossy(&resp)
+    );
+    assert_eq!(
+        ciphertext.len(),
+        16,
+        "HE should return 16H ciphertext; got {} chars",
+        ciphertext.len()
+    );
+
+    // Round-trip via HG using the same wrapped block: confirms the same ARN
+    // is selected (resolver is deterministic) and the encrypt/decrypt pair
+    // recovers the original plaintext.
+    let mut hg_payload = vec![b'S'];
+    hg_payload.extend_from_slice(&tr31);
+    hg_payload.extend_from_slice(&ciphertext);
+    let resp2 = send_recv(&make_thales_frame([0x00, 0x00], b"HG", &hg_payload));
+    let (ec2, recovered) = parse_thales_response(&resp2);
+    assert_eq!(
+        &ec2,
+        b"00",
+        "wrapped HG should succeed: {}",
+        String::from_utf8_lossy(&resp2)
+    );
+    assert_eq!(
+        recovered, plaintext_hex,
+        "HG via wrapped key should recover plaintext"
+    );
+}
+
+/// Wrapped-key resolution failure case: KCV in the block doesn't match any
+/// APC key, proxy should refuse with error 10 (KeyNotFound), not silently
+/// fall through to label config or a wrong key.
+#[test]
+#[ignore = "requires live proxy"]
+fn thales_he_wrapped_key_unknown_kcv_returns_10() {
+    let tr31 = build_tr31_with_kc(b"D0", b'T', "DEADBE"); // not a real KCV
+    let mut payload = vec![b'S'];
+    payload.extend_from_slice(&tr31);
+    payload.extend_from_slice(b"AABBCCDDEE112233");
+
+    let resp = send_recv(&make_thales_frame([0x00, 0x00], b"HE", &payload));
+    let (ec, _) = parse_thales_response(&resp);
+    assert_eq!(
+        &ec,
+        b"10",
+        "unknown wrapped-key KCV should map to error 10 (KeyNotFound); got: {}",
+        String::from_utf8_lossy(&ec)
+    );
+}
+
 // ── C2/C4 MAC (32H key, fixed layout) ────────────────────────────────────────
 
 /// C2/C4 Alg1 round-trip: generate then verify an ISO 9797 Alg 1 MAC.

@@ -137,9 +137,14 @@ impl KeyMap {
 
     /// Populate the KCV index from APC `list_keys`. Should be called once at startup.
     ///
-    /// Filters to `CREATE_COMPLETE` keys only. Logs a warning and picks the
-    /// lexicographically smallest ARN on collisions (same clear key imported
-    /// multiple times — functionally identical but ambiguous addressing).
+    /// Filters to `CREATE_COMPLETE` + `Enabled=true` — keys in any other state
+    /// (DELETE_PENDING, CREATE_IN_PROGRESS) or disabled cannot be used in
+    /// data-plane operations. Disabled CREATE_COMPLETE keys are surfaced as a
+    /// warning so operators notice unusable inventory.
+    ///
+    /// Logs a warning and picks the lexicographically smallest ARN on
+    /// collisions (same clear key imported multiple times — functionally
+    /// identical but ambiguous addressing).
     pub async fn scan_apc(
         &mut self,
         client: &aws_sdk_paymentcryptography::Client,
@@ -149,6 +154,7 @@ impl KeyMap {
         let mut collisions: HashMap<KcvKey, Vec<String>> = HashMap::new();
         let mut next_token: Option<String> = None;
         let mut scanned = 0_usize;
+        let mut skipped_disabled = 0_usize;
 
         loop {
             let mut req = client.list_keys().key_state(KeyState::CreateComplete);
@@ -165,6 +171,17 @@ impl KeyMap {
                 let Some(attrs) = summary.key_attributes() else {
                     continue;
                 };
+                if !summary.enabled() {
+                    skipped_disabled += 1;
+                    warn!(
+                        arn   = %summary.key_arn(),
+                        usage = %attrs.key_usage().as_str(),
+                        algo  = %attrs.key_algorithm().as_str(),
+                        kcv   = %summary.key_check_value(),
+                        "APC key is disabled; skipping (cannot be used in data-plane ops)"
+                    );
+                    continue;
+                }
                 let key = KcvKey {
                     key_usage: attrs.key_usage().as_str().to_string(),
                     algorithm: attrs.key_algorithm().as_str().to_string(),
@@ -202,6 +219,7 @@ impl KeyMap {
         info!(
             scanned,
             indexed = self.kcv_index.len(),
+            skipped_disabled,
             labels = self.labels.len(),
             "APC key inventory loaded"
         );
