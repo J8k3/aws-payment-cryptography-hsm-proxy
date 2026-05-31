@@ -15,11 +15,29 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Sanity gate: don't ship a binary from a commit that doesn't build
+      # cleanly or whose non-ignored tests fail. The integration suite that
+      # talks to live APC is #[ignore]'d; the in-process suites
+      # (passthrough / tls / forward_tls) run here and don't need AWS.
+      - name: Test
+        run: cargo test --tests
       - name: Build release binary
         run: cargo build --release
       - name: Extract version from tag
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Locate release notes
+        id: notes
+        run: |
+          notes_file="release-notes-${{ github.ref_name }}.md"
+          if [ -f "$notes_file" ]; then
+            echo "file=$notes_file" >> "$GITHUB_OUTPUT"
+            echo "flag=--notes-file" >> "$GITHUB_OUTPUT"
+          else
+            # Fall back to auto-generated notes if no curated file is present.
+            echo "file=" >> "$GITHUB_OUTPUT"
+            echo "flag=--generate-notes" >> "$GITHUB_OUTPUT"
+          fi
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -28,4 +46,4 @@ jobs:
           gh release create "${{ github.ref_name }}" \
             target/release/apc-proxy \
             --title "apc-hsm-proxy ${{ github.ref_name }}" \
-            --generate-notes
+            ${{ steps.notes.outputs.flag }} ${{ steps.notes.outputs.file }}
