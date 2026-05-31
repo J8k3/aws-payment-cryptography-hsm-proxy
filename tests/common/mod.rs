@@ -3,3 +3,4 @@
 
 pub mod mock_hsm;
 pub mod proxy_process;
+pub mod tls_certs;

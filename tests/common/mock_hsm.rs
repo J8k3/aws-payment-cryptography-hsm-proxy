@@ -14,6 +14,10 @@ use tokio::task::JoinHandle;
 /// A running mock HSM. Drop the handle when the test ends; the task will
 /// finish naturally after `expected_connections` are served (or whenever the
 /// process exits).
+///
+/// `tests/common/` compiles once per test binary; the TLS test binary
+/// doesn't use this struct, so silence the per-binary dead-code lint.
+#[allow(dead_code)]
 pub struct MockHsm {
     pub addr: std::net::SocketAddr,
     /// Captured frames the proxy forwarded — one entry per accepted connection.
@@ -33,6 +37,7 @@ pub enum MockBehavior {
     AcceptThenHang,
 }
 
+#[allow(dead_code)]
 impl MockHsm {
     /// Spawn a mock that serves at most `connections` connections then exits.
     /// Returns once the listener is bound — callers can immediately read
