@@ -140,6 +140,8 @@ async fn inbound_tls_rejects_plaintext_client() {
     let read_result =
         tokio::time::timeout(std::time::Duration::from_secs(2), tcp.read(&mut resp)).await;
 
+    #[allow(clippy::match_same_arms)]
+    // arms are semantically distinct (clean close vs error/timeout); kept separate for readability
     match read_result {
         Ok(Ok(0)) => {
             // Clean close — server rejected and dropped us. Pass.
@@ -159,6 +161,156 @@ async fn inbound_tls_rejects_plaintext_client() {
         }
         Ok(Err(_)) | Err(_) => {
             // Read error or timeout — also fine. Server closed without reply.
+        }
+    }
+}
+
+// ── mTLS ─────────────────────────────────────────────────────────────────
+
+/// mTLS happy path: proxy listener requires a client cert, client presents
+/// one signed by the same CA, B2 round-trips with error code 00.
+#[tokio::test(flavor = "multi_thread")]
+async fn inbound_mtls_b2_heartbeat_with_valid_client_cert() {
+    let dir = TempDir::new();
+    let server_certs = TlsCerts::generate(&dir.path, "localhost");
+    let client_cert = server_certs.issue_client_cert(&dir.path, "test-client");
+
+    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+        vendor: "thales_payshield",
+        hsm_host: "127.0.0.1",
+        hsm_port: 1,
+        hsm_read_timeout_secs: None,
+        tls: Some(TlsInput {
+            cert_path: server_certs.cert_path.clone(),
+            key_path: server_certs.key_path.clone(),
+            ca_path: Some(server_certs.ca_cert_pem_path.clone()),
+        }),
+    });
+
+    let connector = TlsConnector::from(server_certs.client_config_with_auth(&client_cert));
+    let tcp = TcpStream::connect(proxy.addr)
+        .await
+        .expect("tcp connect to proxy");
+    let server_name =
+        rustls::pki_types::ServerName::try_from("localhost").expect("parse server name");
+    let mut stream = connector
+        .connect(server_name, tcp)
+        .await
+        .expect("mTLS handshake with valid client cert");
+
+    let frame = thales_b2_frame();
+    stream.write_all(&frame).await.expect("write B2 frame");
+
+    let mut resp = vec![0u8; 4096];
+    let n = stream.read(&mut resp).await.expect("read response");
+    resp.truncate(n);
+
+    assert!(resp.len() >= 8, "expected framed response");
+    let error_code = &resp[6..8];
+    assert_eq!(
+        error_code,
+        b"00",
+        "B2 over mTLS should return error code 00; got: {}",
+        String::from_utf8_lossy(error_code)
+    );
+}
+
+/// mTLS rejection: proxy requires a client cert, client offers none. The
+/// handshake must fail at the server's CertificateRequest / Finished step;
+/// no Thales response should ever reach the client.
+#[tokio::test(flavor = "multi_thread")]
+async fn inbound_mtls_rejects_client_without_cert() {
+    let dir = TempDir::new();
+    let server_certs = TlsCerts::generate(&dir.path, "localhost");
+
+    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+        vendor: "thales_payshield",
+        hsm_host: "127.0.0.1",
+        hsm_port: 1,
+        hsm_read_timeout_secs: None,
+        tls: Some(TlsInput {
+            cert_path: server_certs.cert_path.clone(),
+            key_path: server_certs.key_path.clone(),
+            ca_path: Some(server_certs.ca_cert_pem_path.clone()),
+        }),
+    });
+
+    // Client trusts the server CA but presents NO client cert.
+    let connector = TlsConnector::from(server_certs.client_config());
+    let tcp = TcpStream::connect(proxy.addr)
+        .await
+        .expect("tcp connect to proxy");
+    let server_name =
+        rustls::pki_types::ServerName::try_from("localhost").expect("parse server name");
+
+    // Either the handshake itself errors (server sends a fatal alert), or
+    // the handshake "succeeds" and the first write/read after fails. Both
+    // are acceptable — what matters is no Thales success response.
+    match connector.connect(server_name, tcp).await {
+        Err(_) => { /* handshake aborted — pass */ }
+        Ok(mut stream) => {
+            let _ = stream.write_all(&thales_b2_frame()).await;
+            let mut resp = vec![0u8; 64];
+            let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut resp))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or(0);
+            resp.truncate(n);
+            assert_ne!(
+                resp.get(4..8),
+                Some(b"BB00".as_ref()),
+                "proxy must not serve a no-cert mTLS client; got: {resp:?}"
+            );
+        }
+    }
+}
+
+/// mTLS rejection: client presents a cert signed by a DIFFERENT CA than the
+/// one the proxy was configured to trust. Server must reject the chain.
+#[tokio::test(flavor = "multi_thread")]
+async fn inbound_mtls_rejects_client_with_wrong_ca_cert() {
+    let dir = TempDir::new();
+    let server_certs = TlsCerts::generate(&dir.path, "localhost");
+    // Completely separate CA — the proxy doesn't trust this one.
+    let other_ca = TlsCerts::generate(&dir.path, "other-localhost");
+    let untrusted_client = other_ca.issue_client_cert(&dir.path, "untrusted-client");
+
+    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+        vendor: "thales_payshield",
+        hsm_host: "127.0.0.1",
+        hsm_port: 1,
+        hsm_read_timeout_secs: None,
+        tls: Some(TlsInput {
+            cert_path: server_certs.cert_path.clone(),
+            key_path: server_certs.key_path.clone(),
+            ca_path: Some(server_certs.ca_cert_pem_path.clone()),
+        }),
+    });
+
+    let connector = TlsConnector::from(server_certs.client_config_with_auth(&untrusted_client));
+    let tcp = TcpStream::connect(proxy.addr)
+        .await
+        .expect("tcp connect to proxy");
+    let server_name =
+        rustls::pki_types::ServerName::try_from("localhost").expect("parse server name");
+
+    match connector.connect(server_name, tcp).await {
+        Err(_) => { /* handshake aborted — pass */ }
+        Ok(mut stream) => {
+            let _ = stream.write_all(&thales_b2_frame()).await;
+            let mut resp = vec![0u8; 64];
+            let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut resp))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or(0);
+            resp.truncate(n);
+            assert_ne!(
+                resp.get(4..8),
+                Some(b"BB00".as_ref()),
+                "proxy must not serve an mTLS client whose cert chain is not trusted; got: {resp:?}"
+            );
         }
     }
 }
