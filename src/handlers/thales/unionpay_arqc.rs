@@ -20,7 +20,7 @@ use crate::key_map::KeyDescriptor;
 ///                          '2'=ARPC-only (reject: APC requires transaction data)
 ///   Scheme ID    1N ASCII  always '1' (CUP Card Key Derivation ver4.2) — consumed
 ///   Key          var       32H | 'U'+32H | 'T'+48H  (parse_key_32; no key-type prefix)
-///   PAN+Seq      8B binary BCD — 12 PAN digits + 2 seq + 2 padding nibbles (0xFF)
+///   PAN+Seq      8B binary BCD — pre-formatted PAN‖PSN, EMV Option A (16 digits, left zero-pad)
 ///   ATC          2B binary Application Transaction Counter
 ///   Padding Flag 1N ASCII  '0'=none, '1'=CUP 0x80-pad applied — consumed
 ///   TxnLen       2H ASCII  byte count of TxnData (max 0xFF = 255 bytes)
@@ -262,8 +262,9 @@ async fn handle_js(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
 mod tests {
     use super::*;
 
-    // PAN=123456789012, Seq=01 → BCD nibbles: 1234567890120 1FF
-    const PAN_SEQ_BCD: [u8; 8] = [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01, 0xFF];
+    // PAN 123456789012, Seq 01 → EMV Option A pre-format (rightmost-16(PAN‖PSN),
+    // left zero-padded): "0012345678901201".
+    const PAN_SEQ_BCD: [u8; 8] = [0x00, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01];
 
     fn double_key() -> Vec<u8> {
         b"1234567890ABCDEF1234567890ABCDEF".to_vec() // 32H baseline

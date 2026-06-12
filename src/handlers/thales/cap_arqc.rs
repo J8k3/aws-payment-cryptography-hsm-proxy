@@ -254,9 +254,10 @@ mod tests {
         b"1234567890ABCDEF".to_vec()
     }
 
-    // PAN: 123456789012, Seq: 01 → BCD: 12 34 56 78 90 12 | 01 FF
+    // PAN 123456789012, Seq 01 → EMV Option A pre-format (rightmost-16(PAN‖PSN),
+    // left zero-padded): "0012345678901201".
     fn pan_bcd() -> [u8; 8] {
-        [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01, 0xFF]
+        [0x00, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01]
     }
 
     fn k2_payload(key: &[u8], txn: &[u8]) -> Vec<u8> {

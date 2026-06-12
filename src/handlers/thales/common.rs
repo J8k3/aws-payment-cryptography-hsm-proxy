@@ -318,13 +318,31 @@ pub fn bytes_to_hex(bytes: &[u8]) -> String {
         })
 }
 
-/// Decode 8 BCD bytes → `(pan_12_digits, pan_seq_2_digits)`.
+/// Decode the Thales 8-byte pre-formatted PAN/PSN field → `(pan_digits, pan_seq_2_digits)`.
 ///
-/// The 8 bytes encode 16 nibbles: first 12 = rightmost PAN digits,
-/// next 2 = PAN sequence number, last 2 = 0xF padding.
+/// Per payShield Core Host Commands (PUGD0537-004 — KU p.481, K2 p.485, K0 p.490),
+/// the fixed 8-byte field holds the *pre-formatted PAN ‖ PAN-sequence-number,
+/// padded to 8 bytes according to EMV Option A*: the 16 rightmost digits of
+/// `PAN ‖ PSN`, BCD, **left-padded with zeros** when shorter than 16 digits
+/// (EMV Book 2, Annex A1.4.1). There is no `0xF` padding — that only appears in
+/// other (non-EMV) Thales fields.
+///
+/// The last two digits are the PAN sequence number; the preceding 14 are the
+/// rightmost PAN digits (Option A left zero-padding). APC re-applies Option A —
+/// `rightmost-16(PAN ‖ PSN)` — internally, so returning those 14 digits (with the
+/// Option A zero-padding stripped) and the 2-digit PSN reproduces the exact
+/// derivation value for any PAN length.
+///
+/// The previous implementation read the first 12 digits as the PAN, digits 13–14
+/// as the PSN, and discarded digits 15–16 — corrupting both the PAN and the PSN
+/// for any fully-populated (16-digit-PAN) field and guaranteeing an ARQC mismatch.
 pub fn decode_bcd_pan_seq(bytes: [u8; 8]) -> (String, String) {
-    let hex = bytes_to_hex(&bytes);
-    (hex[..12].to_string(), hex[12..14].to_string())
+    let hex = bytes_to_hex(&bytes); // exactly 16 BCD digits
+    let pan_seq = hex[14..16].to_string();
+    // Strip the EMV Option A left zero-padding to hand APC a conventional PAN;
+    // the derivation value is unchanged since APC re-takes rightmost-16(PAN‖PSN).
+    let pan = hex[..14].trim_start_matches('0').to_string();
+    (pan, pan_seq)
 }
 
 #[cfg(test)]
@@ -338,11 +356,34 @@ mod tests {
     }
 
     #[test]
-    fn decode_bcd_pan_and_seq() {
-        let bytes = [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01, 0xFF];
+    fn decode_bcd_pan_and_seq_short_pan() {
+        // 12-digit PAN 123456789012, PSN 01 → EMV Option A pre-format =
+        // rightmost-16(PAN‖PSN) left zero-padded: "0012345678901201".
+        let bytes = [0x00, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01];
         let (pan, seq) = decode_bcd_pan_seq(bytes);
         assert_eq!(pan, "123456789012");
         assert_eq!(seq, "01");
+    }
+
+    #[test]
+    fn decode_bcd_pan_seq_16_digit_pan() {
+        // 16-digit-PAN issuer: the field is a full 16 digits, no padding.
+        // Option A keeps rightmost-16(PAN‖PSN) = 14 PAN digits + 2 PSN digits.
+        // The old fixed 12-digit split read pan="12345678901234"[..12] and seq="34",
+        // discarding the real PSN "01" → guaranteed ARQC mismatch.
+        let bytes = [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x01];
+        let (pan, seq) = decode_bcd_pan_seq(bytes);
+        assert_eq!(pan, "12345678901234");
+        assert_eq!(seq, "01");
+    }
+
+    #[test]
+    fn decode_bcd_pan_seq_strips_option_a_zero_pad() {
+        // Heavily zero-padded short value still yields the significant PAN digits.
+        let bytes = [0x00, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78, 0x05];
+        let (pan, seq) = decode_bcd_pan_seq(bytes);
+        assert_eq!(pan, "12345678");
+        assert_eq!(seq, "05");
     }
 
     #[test]
