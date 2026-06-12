@@ -21,7 +21,7 @@ use crate::key_map::KeyDescriptor;
 ///   Derivation Method 1A ASCII 'A'=EMV_OPTION_A, 'B'=EMV_OPTION_B (used for session key)
 ///   Key Type         3H ASCII  consumed
 ///   Key              var       16H | 'U'+32H | 'T'+48H
-///   PAN+Seq          8B binary BCD — 12 PAN digits + 2 seq digits, right-padded 0xFF
+///   PAN+Seq          8B binary BCD — pre-formatted PAN‖PSN, EMV Option A (16 digits, left zero-pad)
 ///   ATC              2B binary Application Transaction Counter
 ///   UN               4B binary Unpredictable Number
 ///   TxnLen           2B binary big-endian byte count of transaction data
@@ -384,9 +384,10 @@ mod tests {
         b"1234567890ABCDEF".to_vec() // 16H single-length
     }
 
-    // PAN: 123456789012, Seq: 01 → BCD: 12 34 56 78 90 12 | 01 FF
+    // PAN 123456789012, Seq 01 → EMV Option A pre-format (rightmost-16(PAN‖PSN),
+    // left zero-padded): "0012345678901201".
     fn pan_bcd() -> [u8; 8] {
-        [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01, 0xFF]
+        [0x00, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01]
     }
 
     fn kw_prefix(mode: u8, scheme: u8, deriv: u8, key: &[u8], txn: &[u8]) -> Vec<u8> {

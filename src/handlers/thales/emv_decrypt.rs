@@ -17,7 +17,7 @@ use crate::key_map::KeyDescriptor;
 /// K0 (→ K1) wire format per PUGD0537-004:
 ///   Key Type    3H ASCII    consumed (E1 — IMK-ENC)
 ///   Key         var         16H | 'U'+32H | 'T'+48H
-///   PAN+Seq     8B binary   BCD — 12 PAN digits + 2 seq digits, right-padded 0xFF
+///   PAN+Seq     8B binary   BCD — pre-formatted PAN‖PSN, EMV Option A (16 digits, left zero-pad)
 ///   ATC         2B binary   Application Transaction Counter
 ///   DataLen     2B binary   big-endian byte count of encrypted data
 ///   EncData     nB binary   ciphertext
@@ -176,9 +176,10 @@ mod tests {
         b"1234567890ABCDEF".to_vec()
     }
 
-    // PAN: 123456789012, Seq: 01 → BCD: 12 34 56 78 90 12 | 01 FF
+    // PAN 123456789012, Seq 01 → EMV Option A pre-format (rightmost-16(PAN‖PSN),
+    // left zero-padded): "0012345678901201".
     fn pan_bcd() -> [u8; 8] {
-        [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01, 0xFF]
+        [0x00, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01]
     }
 
     fn k0_payload(key: &[u8], data: &[u8]) -> Vec<u8> {

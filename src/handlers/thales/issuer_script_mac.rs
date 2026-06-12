@@ -27,7 +27,7 @@ use crate::key_map::KeyDescriptor;
 ///        '1' = Mastercard EMV Option B
 ///   [3H] Key Type (consumed)
 ///   [variable] MK-SMI Key (16H | U+32H | T+48H, encrypted under LMK)
-///   [8B] PAN + PAN Sequence Number (BCD binary: 12 PAN digits + 2 seq digits + 1 byte 0xFF padding)
+///   [8B] PAN + PAN Sequence Number (BCD binary: pre-formatted PAN‖PSN, EMV Option A, 16 digits left zero-pad)
 ///   [2B] ATC (Application Transaction Counter, big-endian binary)
 ///   [4H] MAC Message Data Length (byte count, hex)
 ///   [nB] MAC Message Data (raw binary)
@@ -255,9 +255,10 @@ mod tests {
         b"1234567890ABCDEF".to_vec()
     }
 
-    // PAN 4111111111111111, seq 00 → BCD: 11,11,11,11,11,11, 0x00, 0xFF
+    // PAN 4111111111111111, seq 00 → EMV Option A pre-format (rightmost-16(PAN‖PSN)):
+    // "1111111111111100".
     fn pan_seq_bytes() -> [u8; 8] {
-        [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x00, 0xFF]
+        [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x00]
     }
 
     #[test]
