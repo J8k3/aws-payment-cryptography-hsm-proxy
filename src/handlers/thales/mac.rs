@@ -359,7 +359,7 @@ mod tests {
         p.extend_from_slice(b"MA1"); // key type 3H
         p.extend_from_slice(key);
         let byte_count = msg_hex.len() / 2;
-        p.extend_from_slice(format!("{:04X}", byte_count).as_bytes());
+        p.extend_from_slice(format!("{byte_count:04X}").as_bytes());
         p.extend_from_slice(msg_hex);
         p
     }
