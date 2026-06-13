@@ -370,11 +370,11 @@ mod tests {
     use super::*;
 
     /// Build a complete KQ binary payload up through ARQC.
-    fn kq_prefix(mode: u8, scheme: u8, key: &[u8], pan_seq_bcd: &[u8; 8], txn: &[u8]) -> Vec<u8> {
+    fn kq_prefix(mode: u8, scheme: u8, key: &[u8], pan_seq_bcd: [u8; 8], txn: &[u8]) -> Vec<u8> {
         let mut v = vec![mode, scheme];
         v.extend_from_slice(b"00E"); // key type 3H
         v.extend_from_slice(key);
-        v.extend_from_slice(pan_seq_bcd); // 8B BCD
+        v.extend_from_slice(&pan_seq_bcd); // 8B BCD
         v.extend_from_slice(&[0x00, 0x01]); // ATC 2B
         v.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // UN 4B
         let len = txn.len() as u16;
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn kq_parse_verify_only() {
-        let payload = kq_prefix(b'0', b'0', &single_key(), &pan_bcd(), &[0xDE, 0xAD]);
+        let payload = kq_prefix(b'0', b'0', &single_key(), pan_bcd(), &[0xDE, 0xAD]);
         let f = parse_kq(&payload).unwrap();
         assert!(matches!(f.mode, KqMode::VerifyOnly));
         assert!(f.deriv_mode_a);
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn kq_parse_method1_arpc() {
-        let mut payload = kq_prefix(b'1', b'0', &single_key(), &pan_bcd(), &[0xDE, 0xAD]);
+        let mut payload = kq_prefix(b'1', b'0', &single_key(), pan_bcd(), &[0xDE, 0xAD]);
         payload.extend_from_slice(&[0x00, 0x10]); // ARC 2B binary
         let f = parse_kq(&payload).unwrap();
         assert!(matches!(f.mode, KqMode::VerifyArpcMethod1));
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn kq_parse_method2_arpc_no_pad() {
-        let mut payload = kq_prefix(b'2', b'1', &single_key(), &pan_bcd(), &[0xDE, 0xAD]);
+        let mut payload = kq_prefix(b'2', b'1', &single_key(), pan_bcd(), &[0xDE, 0xAD]);
         payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CSU 4B
         payload.push(0x00); // PAD len 0
         let f = parse_kq(&payload).unwrap();
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn kq_parse_method2_arpc_with_pad() {
-        let mut payload = kq_prefix(b'2', b'1', &single_key(), &pan_bcd(), &[0xDE, 0xAD]);
+        let mut payload = kq_prefix(b'2', b'1', &single_key(), pan_bcd(), &[0xDE, 0xAD]);
         payload.extend_from_slice(&[0xAB, 0xCD, 0xEF, 0x12]); // CSU 4B
         payload.push(0x02); // PAD len 2
         payload.extend_from_slice(&[0xCA, 0xFE]); // PAD 2B
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn kq_rejects_mode_3() {
-        let payload = kq_prefix(b'3', b'0', &single_key(), &pan_bcd(), &[]);
+        let payload = kq_prefix(b'3', b'0', &single_key(), pan_bcd(), &[]);
         assert!(matches!(
             parse_kq(&payload),
             Err(ProxyError::MalformedPayload(_))
@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn kq_rejects_invalid_scheme() {
-        let payload = kq_prefix(b'0', b'2', &single_key(), &pan_bcd(), &[]);
+        let payload = kq_prefix(b'0', b'2', &single_key(), pan_bcd(), &[]);
         assert!(matches!(
             parse_kq(&payload),
             Err(ProxyError::MalformedPayload(_))
@@ -472,7 +472,7 @@ mod tests {
     fn kq_parse_double_length_key() {
         let mut key = vec![b'U'];
         key.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
-        let payload = kq_prefix(b'0', b'0', &key, &pan_bcd(), &[0xAB]);
+        let payload = kq_prefix(b'0', b'0', &key, pan_bcd(), &[0xAB]);
         let f = parse_kq(&payload).unwrap();
         assert_eq!(f.key_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
     }
@@ -480,7 +480,7 @@ mod tests {
     #[test]
     fn kq_rejects_missing_delimiter() {
         // Build a payload but replace the 0x3B with 0x00
-        let mut payload = kq_prefix(b'0', b'0', &single_key(), &pan_bcd(), &[0xDE]);
+        let mut payload = kq_prefix(b'0', b'0', &single_key(), pan_bcd(), &[0xDE]);
         // The 0x3B delimiter is at the end before ARQC — find and corrupt it
         let delim_pos = payload.len() - 9; // 1B delim + 8B ARQC
         payload[delim_pos] = 0x00;

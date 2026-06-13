@@ -281,7 +281,7 @@ mod tests {
         v.extend_from_slice(bdk);
         v.extend_from_slice(ksn_block);
         let byte_count = msg_hex.len() / 2;
-        v.extend_from_slice(format!("{:04X}", byte_count).as_bytes());
+        v.extend_from_slice(format!("{byte_count:04X}").as_bytes());
         v.extend_from_slice(msg_hex);
         if let Some(m) = mac {
             v.extend_from_slice(m);

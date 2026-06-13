@@ -278,7 +278,7 @@ mod tests {
         let mut v = vec![sha_char];
         v.extend_from_slice(key);
         let byte_count = message.len() / 2;
-        v.extend_from_slice(format!("{:04X}", byte_count).as_bytes());
+        v.extend_from_slice(format!("{byte_count:04X}").as_bytes());
         v.extend_from_slice(message);
         v
     }
@@ -406,7 +406,7 @@ mod tests {
         let mut payload = vec![b'2'];
         payload.extend_from_slice(&single_key());
         let byte_count = message.len() / 2;
-        payload.extend_from_slice(format!("{:04X}", byte_count).as_bytes());
+        payload.extend_from_slice(format!("{byte_count:04X}").as_bytes());
         payload.extend_from_slice(message);
         payload.extend_from_slice(&hmac);
 

@@ -258,7 +258,7 @@ fn thales_he_hg_roundtrip_live() {
 /// optional block. The encrypted-key-data + MAC region is filler — the proxy
 /// only reads the header + optional blocks for KCV-based resolution, then
 /// hands off to APC by ARN. APC operates on the already-imported clear key.
-fn build_tr31_with_kc(usage: &[u8; 2], algo: u8, kcv: &str) -> Vec<u8> {
+fn build_tr31_with_kc(usage: [u8; 2], algo: u8, kcv: &str) -> Vec<u8> {
     let kc = format!("KC0C00{kcv}"); // ID=KC, len=0C(12), version=00, 6-char KCV
     assert_eq!(kc.len(), 12);
     let header_no_len = format!(
@@ -274,7 +274,7 @@ fn build_tr31_with_kc(usage: &[u8; 2], algo: u8, kcv: &str) -> Vec<u8> {
     assert_eq!(header.len(), 16);
 
     let padding_len = total_len - header.len() - kc.len();
-    let padding: Vec<u8> = std::iter::repeat(b'0').take(padding_len).collect();
+    let padding: Vec<u8> = std::iter::repeat_n(b'0', padding_len).collect();
 
     let mut block = Vec::with_capacity(total_len);
     block.extend_from_slice(&header);
@@ -296,7 +296,7 @@ fn thales_he_resolves_wrapped_key_via_kcv() {
 
     // Build the wrapped key field: 'S' + 80-char TR-31 block declaring D0/TDES
     // with KC optional block carrying the D0 DEK's KCV (57860B).
-    let tr31 = build_tr31_with_kc(b"D0", b'T', "57860B");
+    let tr31 = build_tr31_with_kc(*b"D0", b'T', "57860B");
     let mut he_payload = vec![b'S'];
     he_payload.extend_from_slice(&tr31);
     he_payload.extend_from_slice(plaintext_hex);
@@ -342,7 +342,7 @@ fn thales_he_resolves_wrapped_key_via_kcv() {
 #[test]
 #[ignore = "requires live proxy"]
 fn thales_he_wrapped_key_unknown_kcv_returns_10() {
-    let tr31 = build_tr31_with_kc(b"D0", b'T', "DEADBE"); // not a real KCV
+    let tr31 = build_tr31_with_kc(*b"D0", b'T', "DEADBE"); // not a real KCV
     let mut payload = vec![b'S'];
     payload.extend_from_slice(&tr31);
     payload.extend_from_slice(b"AABBCCDDEE112233");
@@ -426,7 +426,7 @@ fn m6_payload_16h(algo: u8, mac_size: u8, key_label: &[u8], msg_hex: &[u8]) -> V
     p.extend_from_slice(b"MA1"); // key type 3H (consumed)
     p.extend_from_slice(key_label); // 16H key
     let byte_count = msg_hex.len() / 2;
-    p.extend_from_slice(format!("{:04X}", byte_count).as_bytes());
+    p.extend_from_slice(format!("{byte_count:04X}").as_bytes());
     p.extend_from_slice(msg_hex);
     p
 }
@@ -714,10 +714,12 @@ fn thales_dc_visa_pvv_verify_correct_pin() {
 /// GW DUKPT Alg3 MAC round-trip using known BDK material.
 ///
 /// GW payload layout:
-///   mode(1) + infmt(1) + macsize(1) + algo(1) + pad(1)
-///   + BDK (parse_bdk 32H) + KSN_desc(3H) + KSN(20H for TDES)
-///   + msg_len(4H) + message_hex
-///   verify appends: mac(8H)
+/// ```text
+/// mode(1) + infmt(1) + macsize(1) + algo(1) + pad(1)
+/// + BDK (parse_bdk 32H) + KSN_desc(3H) + KSN(20H for TDES)
+/// + msg_len(4H) + message_hex
+/// verify appends: mac(8H)
+/// ```
 ///
 /// KSN descriptor "014": key_type=0, nibble_count=0x14=20 → 20H TDES KSN.
 #[test]

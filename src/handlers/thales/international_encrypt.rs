@@ -421,7 +421,7 @@ mod tests {
         v.extend_from_slice(key_type);
         v.extend_from_slice(key);
         let byte_count = data.len() / 2; // data is already hex chars
-        v.extend_from_slice(format!("{:04X}", byte_count).as_bytes());
+        v.extend_from_slice(format!("{byte_count:04X}").as_bytes());
         v.extend_from_slice(data);
         v
     }
