@@ -409,13 +409,18 @@ pub fn bytes_to_hex(bytes: &[u8]) -> String {
         })
 }
 
-/// Decode 8 BCD bytes → `(pan_12_digits, pan_seq_2_digits)`.
+/// Decode the EMV "pre-formatted" PAN/PAN-Sequence field (8 BCD bytes = 16
+/// digits) into `(pan, pan_seq)` for APC.
 ///
-/// The 8 bytes encode 16 nibbles: first 12 = rightmost PAN digits,
-/// next 2 = PAN sequence number, last 2 = 0xF padding.
+/// Per EMV Book 2 Annex A1.4.1 this field carries the RIGHTMOST 16 digits of
+/// (PAN || 2-digit PAN sequence number), left zero-padded — NOT a left-justified
+/// PAN with 0xF padding. Splitting it as (first 14 digits, last 2 digits) yields
+/// `(pan, pan_seq)` whose `rightmost16(pan || pan_seq)` reproduces the original
+/// 16-digit field, so APC re-derives the same ICC master key. Verified against
+/// live APC: a 16-digit-PAN ARQC verifies (error 00) only with this split.
 pub fn decode_bcd_pan_seq(bytes: [u8; 8]) -> (String, String) {
     let hex = bytes_to_hex(&bytes);
-    (hex[..12].to_string(), hex[12..14].to_string())
+    (hex[..14].to_string(), hex[14..16].to_string())
 }
 
 #[cfg(test)]
@@ -430,9 +435,10 @@ mod tests {
 
     #[test]
     fn decode_bcd_pan_and_seq() {
-        let bytes = [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01, 0xFF];
+        // EMV pre-formatted (rightmost 16 of PAN||PSN): "1234567890123401" -> first 14 / last 2.
+        let bytes = [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x01];
         let (pan, seq) = decode_bcd_pan_seq(bytes);
-        assert_eq!(pan, "123456789012");
+        assert_eq!(pan, "12345678901234");
         assert_eq!(seq, "01");
     }
 

@@ -26,7 +26,7 @@ use crate::key_map::KeyDescriptor;
 ///   Derivation Method 1A ASCII 'A'/'B' (consumed; see note below)
 ///   Key Type         3H ASCII  consumed
 ///   Key              var       16H | 'U'+32H | 'T'+48H
-///   PAN+Seq          8B binary BCD — 12 PAN digits + 2 seq digits, right-padded 0xFF
+///   PAN+Seq          8B binary BCD — EMV pre-formatted: rightmost 16 of (PAN||PSN), left 0-padded
 ///   ATC              2B binary Application Transaction Counter
 ///   UN               4B binary Unpredictable Number
 ///   TxnLen           2B binary big-endian byte count of transaction data
@@ -398,9 +398,9 @@ mod tests {
         b"1234567890ABCDEF".to_vec() // 16H single-length
     }
 
-    // PAN: 123456789012, Seq: 01 → BCD: 12 34 56 78 90 12 | 01 FF
+    // EMV pre-formatted (rightmost 16 of PAN||PSN) "1234567890123401" -> PAN 12345678901234, Seq 01
     fn pan_bcd() -> [u8; 8] {
-        [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01, 0xFF]
+        [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x01]
     }
 
     fn kw_prefix(mode: u8, scheme: u8, deriv: u8, key: &[u8], txn: &[u8]) -> Vec<u8> {
@@ -425,7 +425,7 @@ mod tests {
         assert!(matches!(f.mode, KwMode::VerifyOnly));
         assert!(f.deriv_mode_a); // scheme '0' = Option A
         assert_eq!(f.session, EmvSession::Emv2000); // scheme '0' = EMV2000
-        assert_eq!(f.pan, "123456789012");
+        assert_eq!(f.pan, "12345678901234");
         assert_eq!(f.pan_seq, "01");
         assert_eq!(f.atc, "0001");
         assert_eq!(f.un, "DEADBEEF");

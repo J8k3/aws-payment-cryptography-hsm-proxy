@@ -263,8 +263,8 @@ async fn handle_js(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
 mod tests {
     use super::*;
 
-    // PAN=123456789012, Seq=01 → BCD nibbles: 1234567890120 1FF
-    const PAN_SEQ_BCD: [u8; 8] = [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01, 0xFF];
+    // EMV pre-formatted (rightmost 16 of PAN||PSN) "1234567890123401" -> PAN 12345678901234, Seq 01
+    const PAN_SEQ_BCD: [u8; 8] = [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x01];
 
     fn double_key() -> Vec<u8> {
         b"1234567890ABCDEF1234567890ABCDEF".to_vec() // 32H baseline
@@ -295,7 +295,7 @@ mod tests {
         let payload = build_payload(b'0', &double_key(), false);
         let f = parse_js(&payload).unwrap();
         assert_eq!(f.key_id.raw, "1234567890ABCDEF1234567890ABCDEF");
-        assert_eq!(f.pan, "123456789012");
+        assert_eq!(f.pan, "12345678901234");
         assert_eq!(f.pan_seq, "01");
         assert_eq!(f.atc, "0001");
         assert_eq!(f.txn_data.as_str(), "DEADBEEF80000000"); // EMV method-2 padded for APC

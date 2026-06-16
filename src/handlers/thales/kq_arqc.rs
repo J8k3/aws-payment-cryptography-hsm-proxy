@@ -24,7 +24,7 @@ use crate::key_map::KeyDescriptor;
 ///                         '2'=Amex AEIPS (Amex SKD)
 ///   Key Type    3H ASCII  e.g. '00E' for IMK-AC (consumed)
 ///   Key         var       16H | 'U'+32H | 'T'+48H  (parse_legacy_key)
-///   PAN+Seq     8B binary BCD — 12 PAN digits + 2 seq digits, right-padded 0xFF
+///   PAN+Seq     8B binary BCD — EMV pre-formatted: rightmost 16 of (PAN||PSN), left 0-padded
 ///   ATC         2B binary Application Transaction Counter
 ///   UN          4B binary Unpredictable Number
 ///   TxnLen      2B binary big-endian byte count of transaction data
@@ -395,9 +395,9 @@ mod tests {
         b"1234567890ABCDEF".to_vec() // 16H single-length
     }
 
-    // PAN: 123456789012, Seq: 01 → BCD nibbles: 1 2 3 4 5 6 7 8 9 0 1 2 | 0 1 F F
+    // EMV pre-formatted (rightmost 16 of PAN||PSN) "1234567890123401" -> PAN 12345678901234, Seq 01
     fn pan_bcd() -> [u8; 8] {
-        [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01, 0xFF]
+        [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x01]
     }
 
     #[test]
@@ -407,7 +407,7 @@ mod tests {
         assert!(matches!(f.mode, KqMode::VerifyOnly));
         assert_eq!(f.session, EmvSession::Mastercard);
         assert_eq!(f.key_id.raw, "1234567890ABCDEF");
-        assert_eq!(f.pan, "123456789012");
+        assert_eq!(f.pan, "12345678901234");
         assert_eq!(f.pan_seq, "01");
         assert_eq!(f.atc, "0001");
         assert_eq!(f.un, "DEADBEEF");

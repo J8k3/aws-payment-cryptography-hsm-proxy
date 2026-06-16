@@ -257,9 +257,9 @@ mod tests {
         b"1234567890ABCDEF".to_vec()
     }
 
-    // PAN: 123456789012, Seq: 01 → BCD: 12 34 56 78 90 12 | 01 FF
+    // EMV pre-formatted (rightmost 16 of PAN||PSN) "1234567890123401" -> PAN 12345678901234, Seq 01
     fn pan_bcd() -> [u8; 8] {
-        [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01, 0xFF]
+        [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x01]
     }
 
     fn k2_payload(key: &[u8], txn: &[u8]) -> Vec<u8> {
@@ -294,7 +294,7 @@ mod tests {
         let payload = k2_payload(&single_key(), &[0xDE, 0xAD]);
         let f = parse_cap(&payload, true).unwrap();
         assert_eq!(f.key_id.raw, "1234567890ABCDEF");
-        assert_eq!(f.pan, "123456789012");
+        assert_eq!(f.pan, "12345678901234");
         assert_eq!(f.pan_seq, "01");
         assert_eq!(f.atc, "0001");
         assert_eq!(f.unpredictable_number, Some("DEADBEEF".to_string()));
@@ -307,7 +307,7 @@ mod tests {
         let payload = ks_payload(&single_key(), &[0xCA, 0xFE]);
         let f = parse_cap(&payload, false).unwrap();
         assert_eq!(f.key_id.raw, "1234567890ABCDEF");
-        assert_eq!(f.pan, "123456789012");
+        assert_eq!(f.pan, "12345678901234");
         assert_eq!(f.atc, "0001");
         assert!(f.unpredictable_number.is_none());
         assert_eq!(f.txn_data.as_str(), "CAFE800000000000"); // EMV method-2 padded for APC

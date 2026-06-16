@@ -176,9 +176,9 @@ mod tests {
         b"1234567890ABCDEF".to_vec()
     }
 
-    // PAN: 123456789012, Seq: 01 → BCD: 12 34 56 78 90 12 | 01 FF
+    // EMV pre-formatted (rightmost 16 of PAN||PSN) "1234567890123401" -> PAN 12345678901234, Seq 01
     fn pan_bcd() -> [u8; 8] {
-        [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01, 0xFF]
+        [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x01]
     }
 
     fn k0_payload(key: &[u8], data: &[u8]) -> Vec<u8> {
@@ -198,7 +198,7 @@ mod tests {
         let payload = k0_payload(&single_key(), &data);
         let f = parse_k0(&payload).unwrap();
         assert_eq!(f.key_id.raw, "1234567890ABCDEF");
-        assert_eq!(f.pan, "123456789012");
+        assert_eq!(f.pan, "12345678901234");
         assert_eq!(f.pan_seq, "01");
         assert_eq!(f.atc, "002A");
         assert_eq!(f.cipher_text.as_str(), "DEADBEEFCAFE0001");
