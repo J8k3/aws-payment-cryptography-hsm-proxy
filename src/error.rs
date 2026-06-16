@@ -17,6 +17,12 @@ pub enum ProxyError {
     #[error("unsupported MAC algorithm mode: {0}")]
     UnsupportedMacMode(String),
 
+    /// The command is well-formed but requests a derivation/scheme that APC
+    /// cannot model (e.g. a static EMV session key, EMV Option C, or a
+    /// proprietary SKD with no APC equivalent). Maps to payShield "68".
+    #[error("unsupported by APC: {0}")]
+    Unsupported(String),
+
     /// APC returned a verification mismatch (wrong PIN, MAC, or CVV value).
     /// Distinct from ApcError — the call succeeded but the value was incorrect.
     #[error("verification failed")]
@@ -36,6 +42,7 @@ impl ProxyError {
             ProxyError::MalformedPayload(_) | ProxyError::UnsupportedMacMode(_) => *b"15",
             ProxyError::ApcError(_) => *b"41",
             ProxyError::UnsupportedPinFormat(_) => *b"23",
+            ProxyError::Unsupported(_) => *b"68",
             ProxyError::VerificationFailed => *b"01",
         }
     }

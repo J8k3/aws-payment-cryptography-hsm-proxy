@@ -961,7 +961,7 @@ async fn thales_gw_key_not_found_returns_10() {
 /// Build a KQ binary payload through ARQC. `mode` = b'0' verify-only, b'1' verify+ARPC.
 fn kq_binary_payload(mode: u8, key: &[u8]) -> Vec<u8> {
     let txn: &[u8] = &[0xAA, 0xBB, 0xCC, 0xDD]; // 4B txn data
-    let mut v = vec![mode, b'0']; // Mode + Scheme (Visa/EmvOptionA)
+    let mut v = vec![mode, b'1']; // Mode + Scheme '1' (Mastercard M/Chip, Option A + Mastercard SKD)
     v.extend_from_slice(b"00E"); // key type 3H
     v.extend_from_slice(key); // IMK
     v.extend_from_slice(&[0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01, 0xFF]); // PAN+Seq BCD
@@ -1048,12 +1048,13 @@ async fn thales_kq_tc_type_returns_15() {
     let registry = Registry::build();
     let handler = registry.get(b"KQ").expect("KQ registered");
 
-    // Cryptogram type '1' = TC — not supported
+    // Mode '1', valid scheme '1' (Mastercard), then a truncated body that fails
+    // field parsing → malformed payload → error 15.
     let mut payload = vec![b'1'];
-    payload.extend_from_slice(b"00E1234567890ABCDEF9A12345678901201000100010000AABBCCDDEEFF0011");
+    payload.extend_from_slice(b"10E1234567890ABCDEF9A12345678901201000100010000AABBCCDDEEFF0011");
 
     let result = handler.handle(b"KQ", &payload, &state).await;
-    assert_eq!(&result.error_code, b"15", "TC type → error 15");
+    assert_eq!(&result.error_code, b"15", "truncated KQ body → error 15");
 }
 
 // ── Unsupported commands ──────────────────────────────────────────────────────

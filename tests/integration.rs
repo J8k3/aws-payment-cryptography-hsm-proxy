@@ -785,7 +785,7 @@ fn thales_gw_dukpt_alg3_mac_roundtrip() {
 fn thales_kq_arqc_verify_reaches_apc() {
     let mut payload = Vec::new();
     payload.push(b'0'); // mode 0 = verify ARQC only
-    payload.push(b'0'); // scheme 0 = Visa/Amex EmvOptionA
+    payload.push(b'1'); // scheme 1 = Mastercard M/Chip (Option A + Mastercard SKD)
     payload.extend_from_slice(b"000"); // key type 3H (consumed)
     payload.extend_from_slice(b"LTEST_E0IMK_0001"); // E0 AES-256 key 16H
                                                     // PAN+seq BCD: PAN 411111111111 (6 bytes) + seq 01 (1 byte) + 0xFF pad

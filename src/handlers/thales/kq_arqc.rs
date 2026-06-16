@@ -4,7 +4,9 @@ use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
-use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, parse_legacy_key};
+use crate::handlers::thales::common::{
+    build_session_key, bytes_to_hex, decode_bcd_pan_seq, emv_pad, parse_legacy_key, EmvSession,
+};
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -16,8 +18,10 @@ use crate::key_map::KeyDescriptor;
 ///                         '1'=verify + ARPC Method 1 (ARC)
 ///                         '2'=verify + ARPC Method 2 (CSU)
 ///                         '3'/'4'=skip-verify ARPC (not supported by APC)
-///   Scheme ID   1N ASCII  '0'=Visa/Amex → EmvOptionA
-///                         '1'=Mastercard → EmvOptionB
+///   Scheme ID   1N ASCII  selects session-key derivation; all use EMV Option A:
+///                         '0'=Visa VIS (static, no session key — no APC equivalent)
+///                         '1'=Mastercard M/Chip (Mastercard proprietary SKD + UN)
+///                         '2'=Amex AEIPS (Amex SKD)
 ///   Key Type    3H ASCII  e.g. '00E' for IMK-AC (consumed)
 ///   Key         var       16H | 'U'+32H | 'T'+48H  (parse_legacy_key)
 ///   PAN+Seq     8B binary BCD — 12 PAN digits + 2 seq digits, right-padded 0xFF
@@ -57,10 +61,11 @@ enum ArpcParams {
 struct KqFields {
     key_id: KeyDescriptor,
     mode: KqMode,
-    deriv_mode_a: bool,
+    session: EmvSession,
     pan: String,
     pan_seq: String,
     atc: String,
+    un: String,
     txn_data: Zeroizing<String>,
     arqc: String,
     arpc_params: Option<ArpcParams>,
@@ -95,12 +100,22 @@ fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
     if payload.len() < pos + 1 {
         return Err(ProxyError::MalformedPayload("KQ: scheme ID missing".into()));
     }
-    let deriv_mode_a = match payload[pos] {
-        b'0' => true,  // Visa/Amex → EmvOptionA
-        b'1' => false, // Mastercard → EmvOptionB
+    // All KQ schemes use EMV Option A major derivation (PUGD0537-004 p.468);
+    // the Scheme ID selects the session-key method.
+    let session = match payload[pos] {
+        b'1' => EmvSession::Mastercard, // Option A + Mastercard proprietary SKD (M/Chip)
+        b'2' => EmvSession::Amex,       // Option A + Amex AEIPS
+        b'0' => {
+            // Visa VIS is static (ICC master key used directly, no session key).
+            // APC always derives a session key, so this has no faithful equivalent
+            // (verified against live APC: every APC session mode rejects it).
+            return Err(ProxyError::Unsupported(
+                "KQ scheme '0' (Visa VIS, static session key) has no APC equivalent".into(),
+            ));
+        }
         other => {
             return Err(ProxyError::MalformedPayload(format!(
-                "KQ: invalid scheme ID '{}' (0=Visa/Amex, 1=MC)",
+                "KQ: invalid scheme ID '{}' (1=MC M/Chip, 2=Amex)",
                 other as char
             )))
         }
@@ -136,11 +151,12 @@ fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
     let atc = bytes_to_hex(&payload[pos..pos + 2]);
     pos += 2;
 
-    // UN (4B binary)
+    // UN (4B binary) — forwarded; required by the Mastercard proprietary SKD
     if payload.len() < pos + 4 {
         return Err(ProxyError::MalformedPayload("KQ: UN missing".into()));
     }
-    pos += 4; // UN: parsed for position only; not forwarded (see KNOWN GAP in EmvCommon comment)
+    let un = bytes_to_hex(&payload[pos..pos + 4]);
+    pos += 4;
 
     // TxnLen (2B binary big-endian)
     if payload.len() < pos + 2 {
@@ -157,7 +173,8 @@ fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
             "KQ: transaction data too short: need {txn_byte_len} bytes"
         )));
     }
-    let txn_data = Zeroizing::new(bytes_to_hex(&payload[pos..pos + txn_byte_len]));
+    // APC does not pad; forward EMV (ISO 9797-1 method 2) padded data.
+    let txn_data = Zeroizing::new(bytes_to_hex(&emv_pad(&payload[pos..pos + txn_byte_len])));
     pos += txn_byte_len;
 
     // Delimiter 0x3B
@@ -223,10 +240,11 @@ fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
     Ok(KqFields {
         key_id,
         mode,
-        deriv_mode_a,
+        session,
         pan,
         pan_seq,
         atc,
+        un,
         txn_data,
         arqc,
         arpc_params,
@@ -262,35 +280,23 @@ async fn handle_kq(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
 
     use aws_sdk_paymentcryptographydata::types::{
         CryptogramAuthResponse, CryptogramVerificationArpcMethod1,
-        CryptogramVerificationArpcMethod2, MajorKeyDerivationMode, SessionKeyDerivation,
-        SessionKeyEmvCommon,
+        CryptogramVerificationArpcMethod2, MajorKeyDerivationMode,
     };
 
-    let deriv_mode = if fields.deriv_mode_a {
-        MajorKeyDerivationMode::EmvOptionA
-    } else {
-        MajorKeyDerivationMode::EmvOptionB
-    };
+    // Every KQ scheme uses EMV Option A major (ICC master key) derivation
+    // (PUGD0537-004 p.468); the Scheme ID selects only the session-key method.
+    let deriv_mode = MajorKeyDerivationMode::EmvOptionA;
 
-    let emv_common = match SessionKeyEmvCommon::builder()
-        .application_transaction_counter(&fields.atc)
-        .pan_sequence_number(&fields.pan_seq)
-        .primary_account_number(&fields.pan)
-        .build()
-        .map_err(|e: aws_sdk_paymentcryptographydata::error::BuildError| {
-            ProxyError::ApcError(e.to_string())
-        }) {
-        Ok(a) => a,
+    let session_key_attrs = match build_session_key(
+        fields.session,
+        &fields.pan,
+        &fields.pan_seq,
+        &fields.atc,
+        &fields.un,
+    ) {
+        Ok(s) => s,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-
-    // KNOWN GAP: EmvCommon (PAN+PanSeq+ATC) covers standard EMV and Visa CVN10/CVN14.
-    // APC also offers SessionKeyDerivation::Visa (PAN+PanSeq only — for CVN17/18/22, which
-    // do not include ATC in UDK derivation) and ::Mastercard (adds UN for M/Chip derivation).
-    // The KQ wire format does not expose the card's CVN, so the derivation variant cannot be
-    // auto-selected. Deployments using Visa CVN17/18/22 or Mastercard M/Chip may need a
-    // config-driven selector here.
-    let session_key_attrs = SessionKeyDerivation::EmvCommon(emv_common);
 
     let auth_response_attrs: Option<CryptogramAuthResponse> = match fields.arpc_params {
         Some(ArpcParams::Method1 {
@@ -330,7 +336,7 @@ async fn handle_kq(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     debug!(
         key = %key_arn,
         mode = ?fields.mode,
-        deriv = if fields.deriv_mode_a { "EmvOptionA" } else { "EmvOptionB" },
+        session = ?fields.session,
         "KQ: verify_auth_request_cryptogram"
     );
 
@@ -396,22 +402,24 @@ mod tests {
 
     #[test]
     fn kq_parse_verify_only() {
-        let payload = kq_prefix(b'0', b'0', &single_key(), pan_bcd(), &[0xDE, 0xAD]);
+        let payload = kq_prefix(b'0', b'1', &single_key(), pan_bcd(), &[0xDE, 0xAD]);
         let f = parse_kq(&payload).unwrap();
         assert!(matches!(f.mode, KqMode::VerifyOnly));
-        assert!(f.deriv_mode_a);
+        assert_eq!(f.session, EmvSession::Mastercard);
         assert_eq!(f.key_id.raw, "1234567890ABCDEF");
         assert_eq!(f.pan, "123456789012");
         assert_eq!(f.pan_seq, "01");
         assert_eq!(f.atc, "0001");
-        assert_eq!(f.txn_data.as_str(), "DEAD");
+        assert_eq!(f.un, "DEADBEEF");
+        // txn data is EMV (ISO 9797-1 method 2) padded for APC: DEAD + 80 + zeros
+        assert_eq!(f.txn_data.as_str(), "DEAD800000000000");
         assert_eq!(f.arqc, "AABBCCDDEEFF0011");
         assert!(f.arpc_params.is_none());
     }
 
     #[test]
     fn kq_parse_method1_arpc() {
-        let mut payload = kq_prefix(b'1', b'0', &single_key(), pan_bcd(), &[0xDE, 0xAD]);
+        let mut payload = kq_prefix(b'1', b'1', &single_key(), pan_bcd(), &[0xDE, 0xAD]);
         payload.extend_from_slice(&[0x00, 0x10]); // ARC 2B binary
         let f = parse_kq(&payload).unwrap();
         assert!(matches!(f.mode, KqMode::VerifyArpcMethod1));
@@ -427,7 +435,7 @@ mod tests {
         payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CSU 4B
         payload.push(0x00); // PAD len 0
         let f = parse_kq(&payload).unwrap();
-        assert!(!f.deriv_mode_a); // Mastercard
+        assert_eq!(f.session, EmvSession::Mastercard);
         assert!(matches!(f.mode, KqMode::VerifyArpcMethod2));
         assert!(matches!(
             f.arpc_params,
@@ -460,8 +468,25 @@ mod tests {
     }
 
     #[test]
+    fn kq_parse_amex_scheme() {
+        let payload = kq_prefix(b'0', b'2', &single_key(), pan_bcd(), &[0xDE, 0xAD]);
+        let f = parse_kq(&payload).unwrap();
+        assert_eq!(f.session, EmvSession::Amex);
+    }
+
+    #[test]
+    fn kq_rejects_scheme_0_static() {
+        // Visa VIS static has no APC equivalent → Unsupported (payShield 68).
+        let payload = kq_prefix(b'0', b'0', &single_key(), pan_bcd(), &[0xDE, 0xAD]);
+        assert!(matches!(
+            parse_kq(&payload),
+            Err(ProxyError::Unsupported(_))
+        ));
+    }
+
+    #[test]
     fn kq_rejects_invalid_scheme() {
-        let payload = kq_prefix(b'0', b'2', &single_key(), pan_bcd(), &[]);
+        let payload = kq_prefix(b'0', b'9', &single_key(), pan_bcd(), &[]);
         assert!(matches!(
             parse_kq(&payload),
             Err(ProxyError::MalformedPayload(_))
@@ -472,7 +497,7 @@ mod tests {
     fn kq_parse_double_length_key() {
         let mut key = vec![b'U'];
         key.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
-        let payload = kq_prefix(b'0', b'0', &key, pan_bcd(), &[0xAB]);
+        let payload = kq_prefix(b'0', b'1', &key, pan_bcd(), &[0xAB]);
         let f = parse_kq(&payload).unwrap();
         assert_eq!(f.key_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
     }
@@ -480,7 +505,7 @@ mod tests {
     #[test]
     fn kq_rejects_missing_delimiter() {
         // Build a payload but replace the 0x3B with 0x00
-        let mut payload = kq_prefix(b'0', b'0', &single_key(), pan_bcd(), &[0xDE]);
+        let mut payload = kq_prefix(b'0', b'1', &single_key(), pan_bcd(), &[0xDE]);
         // The 0x3B delimiter is at the end before ARQC — find and corrupt it
         let delim_pos = payload.len() - 9; // 1B delim + 8B ARQC
         payload[delim_pos] = 0x00;

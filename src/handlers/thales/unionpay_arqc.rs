@@ -4,7 +4,7 @@ use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
-use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, parse_key_32};
+use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, emv_pad, parse_key_32};
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -126,7 +126,8 @@ fn parse_js(payload: &[u8]) -> Result<JsFields, ProxyError> {
             "JS: TxnData truncated: need {txn_byte_len}B"
         )));
     }
-    let txn_data = Zeroizing::new(bytes_to_hex(&payload[pos..pos + txn_byte_len]));
+    // APC does not pad; forward EMV (ISO 9797-1 method 2) padded transaction data.
+    let txn_data = Zeroizing::new(bytes_to_hex(&emv_pad(&payload[pos..pos + txn_byte_len])));
     pos += txn_byte_len;
 
     // 0x3B delimiter
@@ -297,7 +298,7 @@ mod tests {
         assert_eq!(f.pan, "123456789012");
         assert_eq!(f.pan_seq, "01");
         assert_eq!(f.atc, "0001");
-        assert_eq!(f.txn_data.as_str(), "DEADBEEF");
+        assert_eq!(f.txn_data.as_str(), "DEADBEEF80000000"); // EMV method-2 padded for APC
         assert_eq!(f.arqc, "AABBCCDDEEFF0011");
         assert!(f.arc.is_none());
     }

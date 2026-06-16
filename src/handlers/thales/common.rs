@@ -1,6 +1,97 @@
 use crate::error::ProxyError;
 use crate::key_map::{KeyBlockMeta, KeyDescriptor};
 
+use aws_sdk_paymentcryptographydata::types::{
+    SessionKeyAmex, SessionKeyDerivation, SessionKeyEmv2000, SessionKeyEmvCommon,
+    SessionKeyMastercard,
+};
+
+/// Apply EMV (ISO 9797-1 method 2) padding to ARQC MAC input: append a single
+/// `0x80`, then `0x00` up to the next 8-byte boundary (always at least one byte).
+///
+/// APC's `verify_auth_request_cryptogram` MACs the transaction data exactly as
+/// supplied and does not pad, whereas the card (and a real payShield) MAC the
+/// method-2-padded data. The proxy receives unpadded host data, so it must pad
+/// before forwarding — verified against live APC.
+pub fn emv_pad(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() + 8);
+    out.extend_from_slice(data);
+    out.push(0x80);
+    while out.len() % 8 != 0 {
+        out.push(0x00);
+    }
+    out
+}
+
+/// EMV session-key derivation method selected by a Thales KQ/KW Scheme ID.
+///
+/// Mapping verified against PUGD0537-004 Core Host Commands (KQ p.468, KW p.471)
+/// and confirmed end-to-end against live AWS Payment Cryptography: the session
+/// method materially changes the derived key, so an incorrect choice causes APC
+/// to reject a valid cryptogram (error 01).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmvSession {
+    /// EMV Common Session Key derivation (PAN + PAN seq + ATC).
+    EmvCommon,
+    /// EMV2000 session key derivation (PAN + PAN seq + ATC).
+    Emv2000,
+    /// Mastercard proprietary session key derivation (PAN + PAN seq + ATC + UN).
+    Mastercard,
+    /// American Express AEIPS (PAN + PAN seq).
+    Amex,
+}
+
+/// Build the APC `SessionKeyDerivation` for `method`.
+///
+/// `un` (unpredictable number) is consumed only by the Mastercard method; `atc`
+/// is consumed by every method except Amex. Other arguments unused by a given
+/// method are ignored.
+pub fn build_session_key(
+    method: EmvSession,
+    pan: &str,
+    pan_seq: &str,
+    atc: &str,
+    un: &str,
+) -> Result<SessionKeyDerivation, ProxyError> {
+    // Non-capturing closure: Copy, so it can be reused across the arms' map_err.
+    let be =
+        |e: aws_sdk_paymentcryptographydata::error::BuildError| ProxyError::ApcError(e.to_string());
+    Ok(match method {
+        EmvSession::EmvCommon => SessionKeyDerivation::EmvCommon(
+            SessionKeyEmvCommon::builder()
+                .primary_account_number(pan)
+                .pan_sequence_number(pan_seq)
+                .application_transaction_counter(atc)
+                .build()
+                .map_err(be)?,
+        ),
+        EmvSession::Emv2000 => SessionKeyDerivation::Emv2000(
+            SessionKeyEmv2000::builder()
+                .primary_account_number(pan)
+                .pan_sequence_number(pan_seq)
+                .application_transaction_counter(atc)
+                .build()
+                .map_err(be)?,
+        ),
+        EmvSession::Mastercard => SessionKeyDerivation::Mastercard(
+            SessionKeyMastercard::builder()
+                .primary_account_number(pan)
+                .pan_sequence_number(pan_seq)
+                .application_transaction_counter(atc)
+                .unpredictable_number(un)
+                .build()
+                .map_err(be)?,
+        ),
+        EmvSession::Amex => SessionKeyDerivation::Amex(
+            SessionKeyAmex::builder()
+                .primary_account_number(pan)
+                .pan_sequence_number(pan_seq)
+                .build()
+                .map_err(be)?,
+        ),
+    })
+}
+
 /// Parse a TR-31 key block introduced by an 'S' prefix in the wire frame.
 ///
 /// payShield "Key Block LMK" form: a leading 'S' byte followed by an ASCII
