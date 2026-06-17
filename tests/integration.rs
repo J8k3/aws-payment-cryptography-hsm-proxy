@@ -1,5 +1,17 @@
 //! Integration tests against real HSM hardware or a simulator.
 //!
+//! !!! STALE — DO NOT TRUST THE VECTORS HERE !!!
+//!
+//! These tests predate the `fix/pin-block-format-mapping` handler audit and
+//! encode the *old fabricated* wire formats (e.g. `C2 [mode][32H key]`, `CW`
+//! with a mode byte, `CA` with `00/01/03/04` format codes, `M6` half-MAC = 2
+//! bytes), and several now reference commands that have been gated (`LQ`/`JU`/
+//! `KU`/`KY`). They also map against a standing test-key pool that has since
+//! been deleted. Correctness coverage is moving to the in-process differential
+//! property harness — see `docs/property-testing-plan.md`. Until rewritten,
+//! treat passing/failing results here as meaningless. The framing helpers
+//! (`make_thales_frame`, `parse_thales_response`) are still reusable.
+//!
 //! All tests here are `#[ignore]` by default. Run them with:
 //!
 //!   cargo test --test integration -- --ignored
