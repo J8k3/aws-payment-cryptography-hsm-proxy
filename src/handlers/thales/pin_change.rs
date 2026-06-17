@@ -4,7 +4,7 @@ use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
-use crate::handlers::thales::common::{parse_key_32, parse_legacy_key};
+use crate::handlers::thales::common::{map_pin_block_format, parse_key_32, parse_legacy_key};
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -23,7 +23,7 @@ use crate::key_map::KeyDescriptor;
 ///   Max PIN Length:    2N  consumed
 ///   Min PIN Length:    2N  consumed
 ///   Current PIN Block: 16H (current PIN encrypted under ZPK)
-///   PIN Block Format:  2N  consumed (proxy hardcodes IsoFormat0)
+///   PIN Block Format:  2N  read and mapped to APC IsoFormat (covers both PIN blocks)
 ///   Account Number:   12N  rightmost 12 PAN digits excl. check digit
 ///   Decimalization Table: 16H
 ///   PIN Validation Data:  12A
@@ -40,7 +40,7 @@ use crate::key_map::KeyDescriptor;
 ///   Max PIN Length:    2N  consumed
 ///   Min PIN Length:    2N  consumed
 ///   Current PIN Block: 16H (current PIN encrypted under ZPK)
-///   PIN Block Format:  2N  consumed
+///   PIN Block Format:  2N  read and mapped to APC IsoFormat (covers both PIN blocks)
 ///   Account Number:   12N
 ///   PVKI:              1N  PIN Verification Key Indicator (1–6)
 ///   Current PVV:       4N  current Visa PVV for verification
@@ -66,6 +66,7 @@ struct DuFields {
     enc_key_id: KeyDescriptor,
     pvk_id: KeyDescriptor,
     cur_pin_block: Zeroizing<String>,
+    pin_block_format: String,
     account: String,
     decim_table: String,
     pin_val_data: String,
@@ -77,6 +78,7 @@ struct CuFields {
     enc_key_id: KeyDescriptor,
     pvk_id: KeyDescriptor,
     cur_pin_block: Zeroizing<String>,
+    pin_block_format: String,
     account: String,
     pvki: i32,
     cur_pvv: String,
@@ -115,6 +117,7 @@ fn parse_du(payload: &[u8]) -> Result<DuFields, ProxyError> {
         cur_pin_block: Zeroizing::new(
             String::from_utf8_lossy(&payload[pos..cur_pin_end]).to_string(),
         ),
+        pin_block_format: String::from_utf8_lossy(&payload[cur_pin_end..fmt_end]).to_string(),
         account: String::from_utf8_lossy(&payload[fmt_end..acct_end]).to_string(),
         decim_table: String::from_utf8_lossy(&payload[acct_end..decim_end]).to_string(),
         pin_val_data: String::from_utf8_lossy(&payload[decim_end..pvdata_end]).to_string(),
@@ -162,6 +165,7 @@ fn parse_cu(payload: &[u8]) -> Result<CuFields, ProxyError> {
         cur_pin_block: Zeroizing::new(
             String::from_utf8_lossy(&payload[pos..cur_pin_end]).to_string(),
         ),
+        pin_block_format: String::from_utf8_lossy(&payload[cur_pin_end..fmt_end]).to_string(),
         account: String::from_utf8_lossy(&payload[fmt_end..acct_end]).to_string(),
         pvki,
         cur_pvv: String::from_utf8_lossy(&payload[pvki_end..pvv_end]).to_string(),
@@ -209,8 +213,14 @@ async fn handle_du(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     };
 
     use aws_sdk_paymentcryptographydata::types::{
-        Ibm3624PinOffset, Ibm3624PinVerification, PinBlockFormatForPinData,
-        PinGenerationAttributes, PinVerificationAttributes,
+        Ibm3624PinOffset, Ibm3624PinVerification, PinGenerationAttributes,
+        PinVerificationAttributes,
+    };
+
+    // One PIN Block Format Code covers both the current and new PIN blocks (same key).
+    let pin_format = match map_pin_block_format(&fields.pin_block_format) {
+        Ok(f) => f,
+        Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
     // Step 1: verify current PIN
@@ -235,7 +245,7 @@ async fn handle_du(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         .verification_key_identifier(&pvk_arn)
         .encrypted_pin_block(fields.cur_pin_block.as_str())
         .primary_account_number(&fields.account)
-        .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+        .pin_block_format(pin_format.clone())
         .verification_attributes(PinVerificationAttributes::Ibm3624Pin(ibm_verify))
         .send()
         .await
@@ -275,7 +285,7 @@ async fn handle_du(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         .encryption_key_identifier(&enc_arn)
         .generation_attributes(PinGenerationAttributes::Ibm3624PinOffset(ibm_gen))
         .primary_account_number(&fields.account)
-        .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+        .pin_block_format(pin_format)
         .send()
         .await
     {
@@ -319,8 +329,14 @@ async fn handle_cu(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     };
 
     use aws_sdk_paymentcryptographydata::types::{
-        PinBlockFormatForPinData, PinGenerationAttributes, PinVerificationAttributes,
-        VisaPinVerification, VisaPinVerificationValue,
+        PinGenerationAttributes, PinVerificationAttributes, VisaPinVerification,
+        VisaPinVerificationValue,
+    };
+
+    // One PIN Block Format Code covers both the current and new PIN blocks (same key).
+    let pin_format = match map_pin_block_format(&fields.pin_block_format) {
+        Ok(f) => f,
+        Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
     // Step 1: verify current Visa PVV
@@ -343,7 +359,7 @@ async fn handle_cu(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         .verification_key_identifier(&pvk_arn)
         .encrypted_pin_block(fields.cur_pin_block.as_str())
         .primary_account_number(&fields.account)
-        .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+        .pin_block_format(pin_format.clone())
         .verification_attributes(PinVerificationAttributes::VisaPin(visa_verify))
         .send()
         .await
@@ -381,7 +397,7 @@ async fn handle_cu(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         .encryption_key_identifier(&enc_arn)
         .generation_attributes(PinGenerationAttributes::VisaPinVerificationValue(visa_gen))
         .primary_account_number(&fields.account)
-        .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+        .pin_block_format(pin_format)
         .send()
         .await
     {
