@@ -4,7 +4,7 @@ use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
-use crate::handlers::thales::common::{parse_key_32, parse_legacy_key};
+use crate::handlers::thales::common::{map_pin_block_format, parse_key_32, parse_legacy_key};
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -57,6 +57,7 @@ struct IbmFields {
     enc_key_id: KeyDescriptor,
     pvk_id: KeyDescriptor,
     pin_block: Zeroizing<String>,
+    pin_block_format: String,
     account: String,
     decim_table: String,
     pin_val_data: String,
@@ -67,6 +68,7 @@ struct VisaFields {
     enc_key_id: KeyDescriptor,
     pvk_id: KeyDescriptor,
     pin_block: Zeroizing<String>,
+    pin_block_format: String,
     account: String,
     pvki: i32,
     pvv: String,
@@ -101,7 +103,7 @@ fn parse_ibm(payload: &[u8]) -> Result<IbmFields, ProxyError> {
         enc_key_id,
         pvk_id,
         pin_block: Zeroizing::new(String::from_utf8_lossy(&payload[pos..pin_end]).to_string()),
-        // PIN block format at pin_end..fmt_end consumed; proxy hardcodes IsoFormat0
+        pin_block_format: String::from_utf8_lossy(&payload[pin_end..fmt_end]).to_string(),
         account: String::from_utf8_lossy(&payload[fmt_end..acct_end]).to_string(),
         decim_table: String::from_utf8_lossy(&payload[acct_end..decim_end]).to_string(),
         pin_val_data: String::from_utf8_lossy(&payload[decim_end..pvdata_end]).to_string(),
@@ -143,6 +145,7 @@ fn parse_visa(payload: &[u8]) -> Result<VisaFields, ProxyError> {
         enc_key_id,
         pvk_id,
         pin_block: Zeroizing::new(String::from_utf8_lossy(&payload[pos..pin_end]).to_string()),
+        pin_block_format: String::from_utf8_lossy(&payload[pin_end..fmt_end]).to_string(),
         account: String::from_utf8_lossy(&payload[fmt_end..acct_end]).to_string(),
         pvki,
         pvv: String::from_utf8_lossy(&payload[pvki_end..pvv_end]).to_string(),
@@ -188,7 +191,7 @@ async fn handle_ibm(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     };
 
     use aws_sdk_paymentcryptographydata::types::{
-        Ibm3624PinVerification, PinBlockFormatForPinData, PinVerificationAttributes,
+        Ibm3624PinVerification, PinVerificationAttributes,
     };
 
     // payShield left-justifies the offset and right-pads with 'F' to 12H.
@@ -207,6 +210,11 @@ async fn handle_ibm(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
+    let pin_format = match map_pin_block_format(&fields.pin_block_format) {
+        Ok(f) => f,
+        Err(e) => return HandlerResult::from_proxy_error(&e),
+    };
+
     debug!(enc = %enc_arn, pvk = %pvk_arn, "DA/EA: verify_pin_data IBM3624");
 
     match state
@@ -216,9 +224,7 @@ async fn handle_ibm(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         .verification_key_identifier(&pvk_arn)
         .encrypted_pin_block(fields.pin_block.as_str())
         .primary_account_number(&fields.account)
-        // KNOWN GAP: the 2N PIN block format field is consumed rather than forwarded. APC supports
-        // IsoFormat0/1/3/4. To fix: read the field, map payShield's 2N value to the APC enum, pass it here.
-        .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+        .pin_block_format(pin_format)
         .verification_attributes(PinVerificationAttributes::Ibm3624Pin(ibm_attrs))
         .send()
         .await
@@ -255,9 +261,7 @@ async fn handle_visa(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    use aws_sdk_paymentcryptographydata::types::{
-        PinBlockFormatForPinData, PinVerificationAttributes, VisaPinVerification,
-    };
+    use aws_sdk_paymentcryptographydata::types::{PinVerificationAttributes, VisaPinVerification};
 
     let visa_attrs = match VisaPinVerification::builder()
         .pin_verification_key_index(fields.pvki)
@@ -266,6 +270,11 @@ async fn handle_visa(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         .map_err(|e| ProxyError::ApcError(e.to_string()))
     {
         Ok(a) => a,
+        Err(e) => return HandlerResult::from_proxy_error(&e),
+    };
+
+    let pin_format = match map_pin_block_format(&fields.pin_block_format) {
+        Ok(f) => f,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
@@ -278,9 +287,7 @@ async fn handle_visa(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         .verification_key_identifier(&pvk_arn)
         .encrypted_pin_block(fields.pin_block.as_str())
         .primary_account_number(&fields.account)
-        // KNOWN GAP: the 2N PIN block format field is consumed rather than forwarded. APC supports
-        // IsoFormat0/1/3/4. To fix: read the field, map payShield's 2N value to the APC enum, pass it here.
-        .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+        .pin_block_format(pin_format)
         .verification_attributes(PinVerificationAttributes::VisaPin(visa_attrs))
         .send()
         .await
@@ -344,6 +351,7 @@ mod tests {
         let f = parse_ibm(&payload).unwrap();
         assert_eq!(f.enc_key_id.raw, "1234567890ABCDEF");
         assert_eq!(f.pvk_id.raw, "1234567890ABCDEF");
+        assert_eq!(f.pin_block_format, "01"); // mapped to APC IsoFormat0
         assert_eq!(f.account, "123456789012");
         assert_eq!(f.decim_table, "1234567890123456");
         assert_eq!(f.pin_val_data, "NNNNNNNNNNNN");

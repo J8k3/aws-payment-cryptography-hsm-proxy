@@ -23,6 +23,32 @@ pub fn emv_pad(data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Map a Thales 2-digit PIN Block Format Code to the APC `PinBlockFormatForPinData`.
+///
+/// Source: PUGD0537-004 ("Only these Thales PIN Block formats are supported"):
+///   '01' = ISO 9564-1 & ANSI X9.8 Format 0  -> IsoFormat0
+///   '05' = ISO 9564-1 Format 1              -> IsoFormat1
+///   '47' = ISO 9564-1 & ANSI X9.8 Format 3  -> IsoFormat3
+///   '48' = ISO 9564-1 Format 4 (AES)        -> IsoFormat4
+///
+/// Docutel ('02'), Diebold/IBM ('03'), PLUS ('04') and EMV-1996 / ISO Format 2 ('34')
+/// have no APC equivalent and return an error (payShield 23) rather than silently
+/// mis-decoding the PIN block. APC does not default this; the caller must map it.
+pub fn map_pin_block_format(
+    code: &str,
+) -> Result<aws_sdk_paymentcryptographydata::types::PinBlockFormatForPinData, ProxyError> {
+    use aws_sdk_paymentcryptographydata::types::PinBlockFormatForPinData;
+    match code {
+        "01" => Ok(PinBlockFormatForPinData::IsoFormat0),
+        "05" => Ok(PinBlockFormatForPinData::IsoFormat1),
+        "47" => Ok(PinBlockFormatForPinData::IsoFormat3),
+        "48" => Ok(PinBlockFormatForPinData::IsoFormat4),
+        other => Err(ProxyError::UnsupportedPinFormat(format!(
+            "Thales PIN block format code '{other}' has no APC equivalent (supported: 01/05/47/48)"
+        ))),
+    }
+}
+
 /// EMV session-key derivation method selected by a Thales KQ/KW Scheme ID.
 ///
 /// Mapping verified against PUGD0537-004 Core Host Commands (KQ p.468, KW p.471)
