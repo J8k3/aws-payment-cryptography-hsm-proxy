@@ -1,0 +1,10 @@
+# Normalize all text files to LF in the repository and on checkout, so the
+# working tree is identical on macOS, Linux and Windows (no CRLF churn).
+* text=auto eol=lf
+
+# Explicitly binary (never touch these)
+*.png binary
+*.jpg binary
+*.gz binary
+*.7z binary
+*.pdf binary
