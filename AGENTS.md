@@ -2,6 +2,52 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Current work — start here
+
+**Goal.** Make the Thales command translations *correct and trustworthy* — faithful
+to the authoritative payShield manual (PUGD0537-004), replacing handlers that had
+been written from an unverified ("inferred") wire spec (wrong field offsets, a
+wrong PIN-block-format-code scheme). Prove that correctness with a *grounded* test
+framework — one whose every decision is sourced, so we don't manufacture false
+confidence — and then **land the work by merging the feature branches to `main`
+once testing validates them.**
+
+**This is a deliver-to-merge task, not a build-and-stop task.** The end state is:
+fixes validated by the harness, branches merged.
+
+**Branches to land (both together — the MCP changes mirror the proxy fixes):**
+- this repo: `fix/pin-block-format-mapping`
+- `aws-payment-cryptography-mcp`: `docs/validated-command-mappings-and-constraints`
+
+**Merge gate (definition of done).** The property harness validates the *fixed*
+handlers against live APC: CVV `CW`/`CY` is already live-validated; `GO`/`GQ`,
+`CA`/`CC`, `M6`/`C2` still need `vec-thru` coverage. When the fixed set is green,
+**merge both branches to `main`.** The gated handlers (return 68) and the doc/MCP
+changes land with them. Do **not** merge a fix the harness hasn't backed. Auditing
+the still-unaudited handlers can run before or after the merge, but never block a
+validated fix from landing — and never land an unvalidated one.
+
+**Status of the audit:**
+- **Fixed** (manual-verified; CVV also live-validated): CVV `CW`/`CY`, DUKPT
+  verify `GO`/`GQ`, PIN translate `CA`/`CC`, MAC `M6`/`C2`.
+- **Gated as Unsupported (payShield 68)**: Diebold `GA`/`CE`/`GS`, `JA`, `NY`/`RY`,
+  `QY`/`PM`, `GU`, `BQ`, HMAC `LQ`/`LS`, issuer-script `JU`/`KU`/`KY`; dropped
+  non-existent `CI`.
+- **Verified correct, unchanged:** `international_encrypt` (M0/M2/M4).
+- **Not yet audited:** `legacy_mac`, `dukpt_mac`, `mac_translate`, `emv_decrypt`,
+  `encrypt_decrypt`, `CK`/`CM`.
+
+**Read before building the harness:**
+- `docs/property-testing-plan.md` — differential-vs-APC design, per-run *varying*
+  keys, in-crate `#[cfg(test)]`/`#[ignore]` module (the crate is a bin, no `lib.rs`).
+- `docs/test-grounding-inventory.md` — what each test is grounded in, and the
+  cite-or-gate discipline ("inferred" fails review) with crypto/wire labels.
+
+**Non-negotiable harness rules:** every wire decision **cites the manual
+page+field**; nothing "inferred"; APC test keys are **created per run and deleted
+on every exit path** with a zero-surviving-key assertion (a prior run leaked test
+keys).
+
 ## Project Purpose
 
 A Rust TCP proxy that translates Thales payShield 10K and Futurex Excrypt wire-protocol commands to AWS Payment Cryptography (APC) API calls. Target use case: migrating payment applications that can't be refactored to call APC directly. The application sends the same commands to the same address; the proxy translates them on the outbound side without touching application code.
