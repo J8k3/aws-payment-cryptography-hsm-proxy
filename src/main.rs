@@ -1,22 +1,8 @@
-// `unwrap_used` is denied crate-wide (see Cargo.toml) to keep it out of production
-// code paths. In `#[cfg(test)]` modules a panic *is* the intended failure mode and
-// the test runner already reports file:line, so the lint is relaxed there.
-#![cfg_attr(test, allow(clippy::unwrap_used))]
-
 use anyhow::Result;
+use apc_proxy::{config, server, verify};
 use clap::Parser;
 use std::path::PathBuf;
 use tracing::info;
-
-mod config;
-mod error;
-mod handlers;
-mod key_map;
-mod protocol;
-mod server;
-#[cfg(test)]
-mod tests;
-mod verify;
 
 #[derive(Parser)]
 #[command(

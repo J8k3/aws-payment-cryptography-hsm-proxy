@@ -1,4 +1,4 @@
-//! In-process integration tests using a mock APC HTTP server.
+//! Mock-APC integration tests for the handler layer.
 //!
 //! Each test:
 //!   1. Spins up a mock APC HTTP server on an ephemeral port.
@@ -7,12 +7,15 @@
 //!   3. Calls the handler under test directly, bypassing the TCP layer.
 //!   4. Asserts on the `HandlerResult` error code and payload.
 //!
-//! Run with: `cargo test` (included automatically).
-//! Run with output: `cargo test -- --nocapture`.
+//! Run with: `cargo test --test mock_apc`.
 //!
 //! The mock server is intentionally minimal — it routes by HTTP path and
 //! returns pre-configured JSON bodies. It does not validate request bodies
 //! or AWS SigV4 signatures.
+
+// Tests live outside the prod source tree; panic IS the intended failure mode
+// and the runner already reports file:line.
+#![allow(clippy::unwrap_used)]
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,8 +23,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
-use crate::handlers::{AppState, Registry};
-use crate::key_map::KeyMap;
+use apc_proxy::handlers::{AppState, Registry};
+use apc_proxy::key_map::KeyMap;
 
 // ── Mock APC HTTP server ──────────────────────────────────────────────────────
 
