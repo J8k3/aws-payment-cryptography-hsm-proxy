@@ -47,9 +47,10 @@ use aws_sdk_paymentcryptography::types::{
     KeyAlgorithm, KeyAttributes, KeyClass, KeyModesOfUse, KeyState, KeyUsage,
 };
 use aws_sdk_paymentcryptographydata::types::{
-    CardGenerationAttributes, CardVerificationValue1, MacAlgorithm, MacAttributes,
-    PinBlockFormatForPinData, PinGenerationAttributes, TranslationIsoFormats,
-    TranslationPinDataIsoFormat034, VisaPin,
+    CardGenerationAttributes, CardVerificationValue1, DukptAttributes, DukptDerivationType,
+    Ibm3624NaturalPin, Ibm3624PinVerification, MacAlgorithm, MacAttributes,
+    PinBlockFormatForPinData, PinGenerationAttributes, PinVerificationAttributes,
+    TranslationIsoFormats, TranslationPinDataIsoFormat034, VisaPin,
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
@@ -1118,6 +1119,247 @@ async fn pin_translate_ca_cc_differential() -> anyhow::Result<()> {
         eprintln!(
             "case={case_idx:02} OK cmd={} src={src_name} dst={dst_name} pan={pan}",
             String::from_utf8_lossy(cmd),
+        );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+// ── DUKPT PIN verify GO (live differential, IBM3624 3DES) ─────────────────────
+//
+// GO verifies a DUKPT-encrypted PIN against an IBM 3624 offset (PUGD0537-004
+// p.349). Wire: Mode(1N) || BDK || PVK || KSN-descriptor(3H)+KSN || PIN block ||
+// fmt code(2N) || check len(2N) || PAN(12N) || decim table(16H) || PIN
+// validation data(12A) || offset(12H, left-justified F-padded).
+//
+// NOTE: this covers IBM3624 + 3DES DUKPT. The Visa-PVV sibling (GQ) is currently
+// blocked by an APC-side bug — verify_pin_data with DukptAttributes + VisaPin
+// returns InternalServerException (500), reproducibly, across 3DES/AES and
+// regions, while IBM3624 + DUKPT (this test) and non-DUKPT Visa PVV both work.
+//
+// Verify has no deterministic output to diff, so the differential is on the
+// VERDICT: a valid PIN is minted via generate_pin_data (IBM3624 natural PIN,
+// offset 0) and translated to a DUKPT block; the proxy's GO verdict must match a
+// direct APC verify_pin_data verdict (both accept). A wrong field offset in the
+// proxy parse feeds APC garbage, which APC rejects -> verdicts diverge.
+
+const GO_BDK_WIRE_LABEL: &str = "U00000000000000000000000000000010";
+const GO_PVK_WIRE_LABEL: &str = "U00000000000000000000000000000011";
+const GO_DECIM_TABLE: &str = "0123456789012345";
+
+/// Encode a GO frame (IBM3624, 3DES DUKPT, ISO format 0) per PUGD0537-004 p.349.
+#[allow(clippy::too_many_arguments)]
+fn encode_go(
+    bdk_label: &str,
+    pvk_label: &str,
+    ksn: &str,
+    pin_block16: &str,
+    pan: &str,
+    decim: &str,
+    pvid: &str,
+    offset12: &str,
+) -> Vec<u8> {
+    let mut v = vec![b'0']; // Mode '0' = PIN verify only
+    v.extend_from_slice(bdk_label.as_bytes());
+    v.extend_from_slice(pvk_label.as_bytes());
+    v.extend_from_slice(b"014"); // KSN descriptor: char0 ignored + "14"=0x14=20 nibbles (3DES)
+    v.extend_from_slice(ksn.as_bytes()); // 20H
+    v.extend_from_slice(pin_block16.as_bytes()); // 16H DUKPT-encrypted PIN block
+    v.extend_from_slice(b"01"); // PIN Block Format Code (ISO0)
+    v.extend_from_slice(b"04"); // Check Length (PIN length 4)
+    v.extend_from_slice(pan.as_bytes()); // 12N
+    v.extend_from_slice(decim.as_bytes()); // 16H decimalization table
+    v.extend_from_slice(pvid.as_bytes()); // 12A PIN validation data
+    v.extend_from_slice(offset12.as_bytes()); // 12H offset
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn dukpt_pin_verify_go_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+
+    eprintln!(
+        "dukpt_pin_verify_go_differential: grounding crypto=apc \
+         wire=diff-xprov(IBM3624 3DES DUKPT; verdict differential)"
+    );
+
+    let (cpc, data) = aws_clients().await;
+
+    let specs = [
+        KeySpec {
+            role: "BDK",
+            wire_label: GO_BDK_WIRE_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31B0BaseDerivationKey,
+            modes: KeyModesOfUse::builder().derive_key(true).build(),
+        },
+        KeySpec {
+            role: "PVK",
+            wire_label: GO_PVK_WIRE_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31V1Ibm3624PinVerificationKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+        KeySpec {
+            role: "ZPK",
+            wire_label: "ZPK_UNUSED_IN_WIRE",
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31P0PinEncryptionKey,
+            modes: KeyModesOfUse::builder()
+                .encrypt(true)
+                .decrypt(true)
+                .wrap(true)
+                .unwrap(true)
+                .build(),
+        },
+    ];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let bdk_arn = keys.arn("BDK").to_string();
+    let pvk_arn = keys.arn("PVK").to_string();
+    let zpk_arn = keys.arn("ZPK").to_string();
+    let bdk_label = keys.wire_label("BDK").to_string();
+    let pvk_label = keys.wire_label("PVK").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let go_handler = registry.get(b"GO").expect("GO handler registered");
+
+    const LABEL: &str = "dukpt_pin_verify_go";
+    let run = cases_to_run();
+    eprintln!(
+        "dukpt_pin_verify_go_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let pvid = pan.clone(); // PIN validation data: 12 digits, consistent per case
+                                // KSN counter varied (low bits) to exercise different DUKPT derivations.
+        let ctr = edge_biased(&mut rng, 1, 0xFFFF, &[1, 2, 0xFFFF]);
+        let ksn = format!("FFFF9876543210{:06X}", 0xE0_0000 | ctr); // 20 hex, 3DES KSN
+
+        // 1) Mint an IBM3624 natural-PIN block under the ZPK (offset 0).
+        let gen = data
+            .generate_pin_data()
+            .generation_key_identifier(&pvk_arn)
+            .encryption_key_identifier(&zpk_arn)
+            .primary_account_number(&pan)
+            .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+            .generation_attributes(PinGenerationAttributes::Ibm3624NaturalPin(
+                Ibm3624NaturalPin::builder()
+                    .decimalization_table(GO_DECIM_TABLE)
+                    .pin_validation_data(&pvid)
+                    .pin_validation_data_pad_character("F")
+                    .build()?,
+            ))
+            .send()
+            .await?;
+        let zblk = gen.encrypted_pin_block().to_string();
+
+        // 2) Translate ZPK -> BDK as a DUKPT-encrypted block at this KSN.
+        let dblk = data
+            .translate_pin_data()
+            .incoming_key_identifier(&zpk_arn)
+            .outgoing_key_identifier(&bdk_arn)
+            .encrypted_pin_block(&zblk)
+            .incoming_translation_attributes(translate_iso(0, &pan)?)
+            .outgoing_translation_attributes(translate_iso(0, &pan)?)
+            .outgoing_dukpt_attributes(
+                aws_sdk_paymentcryptographydata::types::DukptDerivationAttributes::builder()
+                    .key_serial_number(&ksn)
+                    .dukpt_key_derivation_type(DukptDerivationType::Tdes2Key)
+                    .build()?,
+            )
+            .send()
+            .await?;
+        let dblk = dblk.pin_block().to_string();
+
+        // Natural PIN -> offset is all-zero for the PIN length; wire offset is
+        // 12H left-justified, F-padded.
+        let offset_wire = "0000FFFFFFFF";
+
+        // 3) Proxy GO verdict.
+        let wire = encode_go(
+            &bdk_label,
+            &pvk_label,
+            &ksn,
+            &dblk,
+            &pan,
+            GO_DECIM_TABLE,
+            &pvid,
+            offset_wire,
+        );
+        let proxy = go_handler.handle(b"GO", &wire, &state).await;
+        let proxy_pass = &proxy.error_code == b"00";
+
+        // 4) Oracle verdict: direct APC verify_pin_data (IBM3624 + DUKPT).
+        let oracle = data
+            .verify_pin_data()
+            .verification_key_identifier(&pvk_arn)
+            .encryption_key_identifier(&bdk_arn)
+            .encrypted_pin_block(&dblk)
+            .primary_account_number(&pan)
+            .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+            .verification_attributes(PinVerificationAttributes::Ibm3624Pin(
+                Ibm3624PinVerification::builder()
+                    .decimalization_table(GO_DECIM_TABLE)
+                    .pin_validation_data(&pvid)
+                    .pin_validation_data_pad_character("F")
+                    .pin_offset("0000")
+                    .build()?,
+            ))
+            .dukpt_attributes(
+                DukptAttributes::builder()
+                    .key_serial_number(&ksn)
+                    .dukpt_derivation_type(DukptDerivationType::Tdes2Key)
+                    .build()?,
+            )
+            .send()
+            .await;
+        let oracle_pass = oracle.is_ok();
+
+        if proxy_pass != oracle_pass {
+            eprintln!(
+                "{}",
+                replay_hint("dukpt_pin_verify_go_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} GO verdict mismatch: proxy_pass={proxy_pass} \
+                 (error_code={}) oracle_pass={oracle_pass} pan={pan} ksn={ksn}",
+                String::from_utf8_lossy(&proxy.error_code),
+            ));
+            break;
+        }
+        if !oracle_pass {
+            eprintln!(
+                "{}",
+                replay_hint("dukpt_pin_verify_go_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} GO: constructed PIN should verify but BOTH proxy and oracle \
+                 rejected it (pan={pan} ksn={ksn}) — likely a setup/offset error"
+            ));
+            break;
+        }
+
+        eprintln!(
+            "case={case_idx:02} OK pan={pan} ksn=..{} verdict=pass",
+            &ksn[14..]
         );
     }
 

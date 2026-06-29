@@ -309,11 +309,17 @@ async fn handle_go(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
+    // The GO wire offset is 12H, left-justified and F-padded (PUGD0537-004
+    // p.349). APC's pin_offset must be digits only (^[0-9]+$), so strip the F
+    // padding — the significant offset digits match the PIN length. (Verified
+    // against live APC: a padded offset is rejected with a ValidationException.)
+    let pin_offset = fields.offset.trim_end_matches('F');
+
     let ibm_attrs = match Ibm3624PinVerification::builder()
         .decimalization_table(&fields.decim_table)
         .pin_validation_data_pad_character("F")
         .pin_validation_data(&fields.pin_val_data)
-        .pin_offset(&fields.offset)
+        .pin_offset(pin_offset)
         .build()
         .map_err(|e| ProxyError::ApcError(e.to_string()))
     {
