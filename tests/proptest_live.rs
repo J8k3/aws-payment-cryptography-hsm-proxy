@@ -48,6 +48,8 @@ use aws_sdk_paymentcryptography::types::{
 };
 use aws_sdk_paymentcryptographydata::types::{
     CardGenerationAttributes, CardVerificationValue1, MacAlgorithm, MacAttributes,
+    PinBlockFormatForPinData, PinGenerationAttributes, TranslationIsoFormats,
+    TranslationPinDataIsoFormat034, VisaPin,
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
@@ -872,6 +874,250 @@ async fn mac_c2_c4_differential() -> anyhow::Result<()> {
             "case={case_idx:02} OK mode={} alg={} msg_bytes={msg_bytes} MAC={proxy_mac}",
             mac_mode as char,
             if alg3 { "ALG3" } else { "ALG1" },
+        );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+// ── PIN translate CA/CC (live differential, format-canonicalized) ─────────────
+//
+// CC translates a PIN block ZPK->ZPK; CA does TPK->ZPK (identical wire when the
+// destination is a ZPK with no DUKPT key flag). Wire (PUGD0537-004 p.282/285):
+// source key || dest key || Max PIN Length(2N) || source PIN block(16H) ||
+// source fmt code(2N) || dest fmt code(2N) || PAN(12N). Format codes are the edge
+// axis: 01=ISO0, 47=ISO3 (both PAN-based and generatable).
+//
+// SUBTLETY: ISO 9564-1 Format 3 uses RANDOM fill, so translating the same input
+// to Format 3 twice yields different ciphertext — a naive proxy-vs-oracle
+// compare would fail spuriously. Instead we canonicalize: decode both the
+// proxy's output and the original input down to deterministic Format 0 under a
+// shared CANON key, and compare those. This validates the proxy's full translate
+// (source-format parse + dest-format encode) for any format combo, immune to the
+// random fill. A valid encrypted input block is minted per case via
+// generate_pin_data (APC rejects malformed blocks).
+
+const SRC_ZPK_WIRE_LABEL: &str = "U0000000000000000000000000000000D";
+const DST_ZPK_WIRE_LABEL: &str = "U0000000000000000000000000000000E";
+
+/// (wire format code, APC generate/pin-block format, short name) for a format
+/// index: 0 -> ISO format 0 (code "01"); 1 -> ISO format 3 (code "47").
+fn translate_fmt(idx: usize) -> (&'static str, PinBlockFormatForPinData, &'static str) {
+    if idx == 0 {
+        ("01", PinBlockFormatForPinData::IsoFormat0, "ISO0")
+    } else {
+        ("47", PinBlockFormatForPinData::IsoFormat3, "ISO3")
+    }
+}
+
+/// APC `TranslationIsoFormats` for a format index + PAN (ISO 0 and 3 carry PAN).
+fn translate_iso(idx: usize, pan: &str) -> anyhow::Result<TranslationIsoFormats> {
+    let attrs = TranslationPinDataIsoFormat034::builder()
+        .primary_account_number(pan)
+        .build()?;
+    Ok(if idx == 0 {
+        TranslationIsoFormats::IsoFormat0(attrs)
+    } else {
+        TranslationIsoFormats::IsoFormat3(attrs)
+    })
+}
+
+/// Encode a CC/CA static translate frame (ZPK dest, no DUKPT flag) per
+/// PUGD0537-004 p.282/285.
+fn encode_translate(
+    src_label: &str,
+    dst_label: &str,
+    pin_block: &str,
+    src_fmt_code: &str,
+    dst_fmt_code: &str,
+    pan: &str,
+) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.extend_from_slice(src_label.as_bytes());
+    v.extend_from_slice(dst_label.as_bytes());
+    v.extend_from_slice(b"12"); // Max PIN Length (2N), consumed
+    v.extend_from_slice(pin_block.as_bytes()); // 16H source PIN block
+    v.extend_from_slice(src_fmt_code.as_bytes());
+    v.extend_from_slice(dst_fmt_code.as_bytes());
+    v.extend_from_slice(pan.as_bytes()); // 12N
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn pin_translate_ca_cc_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+
+    eprintln!(
+        "pin_translate_ca_cc_differential: grounding crypto=apc \
+         wire=diff-xprov(format-code+cmd-randomised, Format-0-canonicalized)"
+    );
+
+    let (cpc, data) = aws_clients().await;
+
+    let zpk_modes = || {
+        KeyModesOfUse::builder()
+            .encrypt(true)
+            .decrypt(true)
+            .wrap(true)
+            .unwrap(true)
+            .build()
+    };
+    let specs = [
+        KeySpec {
+            role: "SRC_ZPK",
+            wire_label: SRC_ZPK_WIRE_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31P0PinEncryptionKey,
+            modes: zpk_modes(),
+        },
+        KeySpec {
+            role: "DST_ZPK",
+            wire_label: DST_ZPK_WIRE_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31P0PinEncryptionKey,
+            modes: zpk_modes(),
+        },
+        KeySpec {
+            role: "CANON_ZPK",
+            wire_label: "CANON_UNUSED_IN_WIRE",
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31P0PinEncryptionKey,
+            modes: zpk_modes(),
+        },
+        KeySpec {
+            role: "PGK",
+            wire_label: "PGK_UNUSED_IN_WIRE",
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31V2VisaPinVerificationKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+    ];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let src_arn = keys.arn("SRC_ZPK").to_string();
+    let dst_arn = keys.arn("DST_ZPK").to_string();
+    let canon_arn = keys.arn("CANON_ZPK").to_string();
+    let pgk_arn = keys.arn("PGK").to_string();
+    let src_label = keys.wire_label("SRC_ZPK").to_string();
+    let dst_label = keys.wire_label("DST_ZPK").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let cc_handler = registry.get(b"CC").expect("CC handler registered");
+    let ca_handler = registry.get(b"CA").expect("CA handler registered");
+
+    const LABEL: &str = "pin_translate_ca_cc";
+    let run = cases_to_run();
+    eprintln!(
+        "pin_translate_ca_cc_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let src_idx = rng.random_range(0..2_usize);
+        let dst_idx = rng.random_range(0..2_usize);
+        let use_ca = rng.random_bool(0.5);
+        let (src_code, src_gen_fmt, src_name) = translate_fmt(src_idx);
+        let (dst_code, _dst_gen_fmt, dst_name) = translate_fmt(dst_idx);
+
+        // Mint a valid source-ZPK-encrypted PIN block in the source format.
+        let gen = data
+            .generate_pin_data()
+            .generation_key_identifier(&pgk_arn)
+            .encryption_key_identifier(&src_arn)
+            .primary_account_number(&pan)
+            .pin_block_format(src_gen_fmt)
+            .generation_attributes(PinGenerationAttributes::VisaPin(
+                VisaPin::builder().pin_verification_key_index(1).build()?,
+            ))
+            .send()
+            .await?;
+        let input_block = gen.encrypted_pin_block().to_string();
+
+        // Proxy translate (CA or CC), source -> dest.
+        let (cmd, handler): (&[u8], _) = if use_ca {
+            (b"CA", &ca_handler)
+        } else {
+            (b"CC", &cc_handler)
+        };
+        let wire = encode_translate(
+            &src_label,
+            &dst_label,
+            &input_block,
+            src_code,
+            dst_code,
+            &pan,
+        );
+        let proxy = handler.handle(cmd, &wire, &state).await;
+        if &proxy.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("pin_translate_ca_cc_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} {} error_code={} (src={src_name} dst={dst_name} pan={pan})",
+                String::from_utf8_lossy(cmd),
+                String::from_utf8_lossy(&proxy.error_code),
+            ));
+            break;
+        }
+        let proxy_block = String::from_utf8(proxy.payload.to_vec())?;
+
+        // Canonicalize both to Format 0 under CANON and compare (immune to ISO-3
+        // random fill): decode the proxy's dst-format output, and the original
+        // source-format input, both down to deterministic Format 0.
+        let proxy_canon = data
+            .translate_pin_data()
+            .incoming_key_identifier(&dst_arn)
+            .outgoing_key_identifier(&canon_arn)
+            .encrypted_pin_block(&proxy_block)
+            .incoming_translation_attributes(translate_iso(dst_idx, &pan)?)
+            .outgoing_translation_attributes(translate_iso(0, &pan)?)
+            .send()
+            .await?;
+        let ref_canon = data
+            .translate_pin_data()
+            .incoming_key_identifier(&src_arn)
+            .outgoing_key_identifier(&canon_arn)
+            .encrypted_pin_block(&input_block)
+            .incoming_translation_attributes(translate_iso(src_idx, &pan)?)
+            .outgoing_translation_attributes(translate_iso(0, &pan)?)
+            .send()
+            .await?;
+
+        let proxy_c = proxy_canon.pin_block();
+        let ref_c = ref_canon.pin_block();
+        if !proxy_c.eq_ignore_ascii_case(ref_c) {
+            eprintln!(
+                "{}",
+                replay_hint("pin_translate_ca_cc_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} {} PIN mismatch after canonicalization: proxy->{proxy_c} \
+                 ref->{ref_c} (src={src_name} dst={dst_name} pan={pan})",
+                String::from_utf8_lossy(cmd),
+            ));
+            break;
+        }
+
+        eprintln!(
+            "case={case_idx:02} OK cmd={} src={src_name} dst={dst_name} pan={pan}",
+            String::from_utf8_lossy(cmd),
         );
     }
 
