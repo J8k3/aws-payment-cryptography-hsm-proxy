@@ -722,3 +722,164 @@ async fn mac_m6_m8_differential() -> anyhow::Result<()> {
     survivor_result?;
     Ok(())
 }
+
+// ── MAC C2/C4 (live differential + verify round-trip) ─────────────────────────
+//
+// C2/C4 share the APC mapping with M6/M8 but have a DISTINCT wire header
+// (PUGD0537-004 p.583): Block Number, Key Type, MAC generation Mode, Message
+// Type — vs M6's Mode/InputFormat/MACSize/MACAlgo/PadMethod/KeyType. So the C2
+// wire parse needs its own differential. The MAC generation Mode selects the
+// algorithm: '0' = X9.9 → ISO9797 Algorithm 1; '1' = X9.19 → ISO9797 Algorithm 3.
+
+const TAK_M1_WIRE_LABEL: &str = "U0000000000000000000000000000000B";
+const TAK_M3_WIRE_LABEL: &str = "U0000000000000000000000000000000C";
+
+/// Encode a C2 (generate) wire frame per PUGD0537-004 Rev A p.583.
+///
+/// Wire: BlockNumber(1N '0') || KeyType(1N '0'=TAK) || MACMode(1N) ||
+///       MessageType(1N '1'=hex) || Key || MsgLen(4H) || Msg(hex)
+fn encode_c2(key_label: &str, mac_mode: u8, msg_hex: &str) -> Vec<u8> {
+    let mut v = vec![b'0', b'0', mac_mode, b'1'];
+    v.extend_from_slice(key_label.as_bytes());
+    let byte_count = msg_hex.len() / 2;
+    v.extend_from_slice(format!("{byte_count:04X}").as_bytes());
+    v.extend_from_slice(msg_hex.as_bytes());
+    v
+}
+
+/// C4 (verify) = the C2 frame with the 8H (4-byte) MAC appended.
+fn encode_c4(key_label: &str, mac_mode: u8, msg_hex: &str, mac_hex: &str) -> Vec<u8> {
+    let mut v = encode_c2(key_label, mac_mode, msg_hex);
+    v.extend_from_slice(mac_hex.as_bytes());
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn mac_c2_c4_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+
+    // crypto = apc        (differential vs APC generate_mac)
+    // wire   = diff-xprov (manual-sourced C2 encoder vs corpus handler;
+    //                      mode + length randomised)
+    eprintln!(
+        "mac_c2_c4_differential: grounding crypto=apc wire=diff-xprov(mode+length-randomised)"
+    );
+
+    let (cpc, data) = aws_clients().await;
+
+    // One key per algorithm: X9.9/ALG1 → M1 key; X9.19/ALG3 → M3 key.
+    let specs = [
+        KeySpec {
+            role: "TAK_M1",
+            wire_label: TAK_M1_WIRE_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31M1Iso97971MacKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+        KeySpec {
+            role: "TAK_M3",
+            wire_label: TAK_M3_WIRE_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31M3Iso97973MacKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+    ];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let arn_m1 = keys.arn("TAK_M1").to_string();
+    let arn_m3 = keys.arn("TAK_M3").to_string();
+    let label_m1 = keys.wire_label("TAK_M1").to_string();
+    let label_m3 = keys.wire_label("TAK_M3").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let c2_handler = registry.get(b"C2").expect("C2 handler registered");
+    let c4_handler = registry.get(b"C4").expect("C4 handler registered");
+
+    const LABEL: &str = "mac_c2_c4";
+    let run = cases_to_run();
+    eprintln!(
+        "mac_c2_c4_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        // Edge over both MAC modes (algorithms); edge-biased message length.
+        let alg3 = rng.random_bool(0.5);
+        let (mac_mode, key_label, key_arn, oracle_algo) = if alg3 {
+            (b'1', &label_m3, &arn_m3, MacAlgorithm::Iso9797Algorithm3)
+        } else {
+            (b'0', &label_m1, &arn_m1, MacAlgorithm::Iso9797Algorithm1)
+        };
+        let msg_bytes = edge_biased(&mut rng, 1, 32, &[1, 7, 8, 9, 16, 24, 32]);
+        let msg_hex = gen_hex_message(&mut rng, msg_bytes);
+
+        // 1) C2 generate via proxy.
+        let c2_wire = encode_c2(key_label, mac_mode, &msg_hex);
+        let proxy_c2 = c2_handler.handle(b"C2", &c2_wire, &state).await;
+        if &proxy_c2.error_code != b"00" {
+            eprintln!("{}", replay_hint("mac_c2_c4_differential", LABEL, case_idx));
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} C2 error_code={} (mode={} msg_bytes={msg_bytes})",
+                String::from_utf8_lossy(&proxy_c2.error_code),
+                mac_mode as char,
+            ));
+            break;
+        }
+        let proxy_mac = String::from_utf8(proxy_c2.payload.to_vec())?;
+
+        // 2) Oracle: direct APC generate_mac with the matching algorithm.
+        let oracle = data
+            .generate_mac()
+            .key_identifier(key_arn)
+            .message_data(&msg_hex)
+            .generation_attributes(MacAttributes::Algorithm(oracle_algo))
+            .send()
+            .await?;
+        let oracle_mac = oracle.mac().to_string();
+
+        if !proxy_mac.eq_ignore_ascii_case(&oracle_mac) {
+            eprintln!("{}", replay_hint("mac_c2_c4_differential", LABEL, case_idx));
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} C2 differential mismatch (mode={}): proxy={proxy_mac} \
+                 oracle={oracle_mac} msg_bytes={msg_bytes} msg={msg_hex}",
+                mac_mode as char,
+            ));
+            break;
+        }
+
+        // 3) C4 round-trip: the proxy's C4 verifier must accept the MAC C2 made.
+        let c4_wire = encode_c4(key_label, mac_mode, &msg_hex, &proxy_mac);
+        let proxy_c4 = c4_handler.handle(b"C4", &c4_wire, &state).await;
+        if &proxy_c4.error_code != b"00" {
+            eprintln!("{}", replay_hint("mac_c2_c4_differential", LABEL, case_idx));
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} C4 round-trip rejected proxy C2 MAC: error_code={} mac={proxy_mac}",
+                String::from_utf8_lossy(&proxy_c4.error_code),
+            ));
+            break;
+        }
+
+        eprintln!(
+            "case={case_idx:02} OK mode={} alg={} msg_bytes={msg_bytes} MAC={proxy_mac}",
+            mac_mode as char,
+            if alg3 { "ALG3" } else { "ALG1" },
+        );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
