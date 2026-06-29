@@ -357,6 +357,25 @@ fn live_state(data: aws_sdk_paymentcryptographydata::Client, keys: &TestKeys) ->
 }
 
 // ── Generators ───────────────────────────────────────────────────────────────
+//
+// Inputs are varied within each variable's *known bounds*, with the boundary and
+// structurally-interesting values **over-sampled** (`edge_biased`). Uniform
+// sampling over a range hits the endpoints only ~1/width of the time, so a small
+// live sweep would routinely miss the exact edges where fixed-offset parse bugs
+// live (shortest/longest PAN, the Amex-15 length, the 8-byte DES block boundary).
+// Boundary coverage improves as `APC_LIVE_CASES` rises.
+
+/// Sample the inclusive range `[lo, hi]` with `interesting` values
+/// over-represented: ~60% of the time return one of them (clamped into range),
+/// otherwise a uniform interior draw. Deterministic in the case RNG, so replay
+/// reproduces the same value.
+fn edge_biased(rng: &mut StdRng, lo: usize, hi: usize, interesting: &[usize]) -> usize {
+    if !interesting.is_empty() && rng.random_bool(0.6) {
+        interesting[rng.random_range(0..interesting.len())].clamp(lo, hi)
+    } else {
+        rng.random_range(lo..=hi)
+    }
+}
 
 /// Random valid PAN: first digit 1..9 (no leading zero), rest 0..9. Length per
 /// caller. ISO/IEC 7812 PANs are 8..19 digits; CVV practice spans 13..19.
@@ -369,10 +388,19 @@ fn gen_pan(rng: &mut StdRng, len: usize) -> String {
     s
 }
 
-/// Random MMYY-style expiry (4 digits). Year 25..30, month 01..12, encoded as YYMM.
+/// PAN length for CVV, edge-biased over its known bounds. Bounds: ISO/IEC 7812
+/// 13..19. Interesting edges: 13 (min), 15 (Amex — the CW handler's documented
+/// fixed-16 mis-read risk), 16 (Visa/MC default — must NOT be special-cased),
+/// 19 (max).
+fn gen_pan_len(rng: &mut StdRng) -> usize {
+    edge_biased(rng, 13, 19, &[13, 15, 16, 19])
+}
+
+/// Random YYMM expiry (4N). Year 25..30, month 01..12, both edge-biased so the
+/// month/year boundaries of the fixed 4-digit field are exercised.
 fn gen_expiry(rng: &mut StdRng) -> String {
-    let yy = rng.random_range(25..=30_u8);
-    let mm = rng.random_range(1..=12_u8);
+    let yy = edge_biased(rng, 25, 30, &[25, 30]) as u8;
+    let mm = edge_biased(rng, 1, 12, &[1, 12]) as u8;
     format!("{yy:02}{mm:02}")
 }
 
@@ -466,7 +494,7 @@ async fn cvv_cw_cy_differential() -> anyhow::Result<()> {
 
     for case_idx in run {
         let mut rng = case_rng(LABEL, case_idx);
-        let pan_len = rng.random_range(13..=19_usize);
+        let pan_len = gen_pan_len(&mut rng);
         let pan = gen_pan(&mut rng, pan_len);
         let expiry = gen_expiry(&mut rng);
         let service_code = gen_service_code(&mut rng);
@@ -622,8 +650,11 @@ async fn mac_m6_m8_differential() -> anyhow::Result<()> {
 
     for case_idx in run {
         let mut rng = case_rng(LABEL, case_idx);
-        // Randomise message length (whole bytes) to surface fixed-offset bugs.
-        let msg_bytes = rng.random_range(1..=32_usize);
+        // Message length (whole bytes), edge-biased over its bounds. Bounds: 1..32.
+        // Interesting edges cluster around the 8-byte DES block boundary that
+        // ISO 9797 pads/chains on: 1 (min), 7/8/9 (block ±1), 16 (two blocks),
+        // 24 (three), 32 (max).
+        let msg_bytes = edge_biased(&mut rng, 1, 32, &[1, 7, 8, 9, 16, 24, 32]);
         let msg_hex = gen_hex_message(&mut rng, msg_bytes);
 
         // 1) M6 generate via proxy. algo '3' = ISO9797 ALG3; MAC size '0' = a

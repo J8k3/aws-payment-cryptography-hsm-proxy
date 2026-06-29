@@ -69,6 +69,14 @@ assert result_proxy == result_oracle
   the two don't share a wrong assumption. Randomizing PAN length, format codes,
   key prefixes (`16H`/`U+32H`), and service codes exposes offset bugs a fixed
   input would mask.
+- **Edge-biased generation.** Each input is varied within its known bounds with
+  the boundary and structurally-interesting values *over-sampled* (`edge_biased`),
+  not uniformly random — a small live sweep would otherwise rarely hit the exact
+  edges where fixed-offset parse bugs live. Document the bounds and the
+  interesting values per variable: e.g. PAN length 13..19 with edges
+  {13, 15 (Amex), 16 (default), 19}; MAC message 1..32 bytes with edges around
+  the 8-byte DES block {1, 7, 8, 9, 16, 32}. When a handler adds an axis (PIN
+  block format code, KSN length, key prefix), give it the same treatment.
 
 ### Tier 2 — independent spec oracle (later; the CyberChef story)
 
