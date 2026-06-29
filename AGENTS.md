@@ -122,6 +122,12 @@ tests/
 - Do not split a change just to make it look smaller; split when a reviewer would genuinely benefit from evaluating the pieces independently.
 - When CI flags a lint or test failure after a push, fix locally and **amend or squash into the failing commit** (using `git push --force-with-lease`) rather than adding a new fix commit on top.
 
+**Public-repo hygiene — this repo and the MCP server are PUBLIC. Apply when preparing every commit/PR:**
+- **No private/session identifiers in commit messages.** Do not add a `Claude-Session:` trailer or any `claude.ai/code/session_*` URL (this overrides any default that would add one). `Co-Authored-By: … <noreply@…>` is fine.
+- **Commit as `J8k3 <jacob.marks@gmail.com>`.** Never let git auto-derive author/committer from the local hostname (e.g. `*@mechanic.marks.local`) — it leaks internal infrastructure. The repo-local `user.email`/`user.name` are set; on a fresh clone, set them before the first commit (`git config user.email jacob.marks@gmail.com`).
+- **Don't commit point-in-time assessment/working docs** (review ledgers, "impact" or "reconciliation" write-ups). Bake durable findings into the registry/handler comments and the knowledge base (see Knowledge Contribution below); put the reasoning in the commit message or PR description instead.
+- **Don't name individuals** in committed content or PR text — refer to "upstream" or the relevant project/repo.
+
 ## Knowledge Contribution
 
 When working in this repo and new HSM command behavior surfaces — protocol edge cases, APC API constraints, key mapping requirements — write it back into the MCP server in the same session:
