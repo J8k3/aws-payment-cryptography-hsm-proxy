@@ -119,6 +119,16 @@ Notes:
 - Use a **seeded** RNG (reproducible), a small fixed case count per run, and *not*
   proptest shrinking for the live tier (shrinking re-runs cases → cost). Proptest
   fits Tier 2's fast local oracle.
+- **Many cases per run + single-case replay.** Each test runs `APC_LIVE_CASES`
+  randomized cases (the sweep). Each case is seeded *independently* from
+  `(base seed, command label, case index)` via SplitMix64, so cases don't couple
+  and any one can be re-run alone with `APC_LIVE_REPLAY=<idx>` (comma-separated
+  for several). On failure the test prints the exact replay command. Replay
+  reproduces the **wire inputs** deterministically — it does **not** pin the key
+  (keys still rotate per run by requirement #1). That is sufficient for the
+  parse/offset/mapping bug class this tier targets: such a bug makes
+  proxy ≠ oracle for the reproduced input regardless of key. Reproducing a
+  key-specific failure needs known key material (Tier 2).
 - `TestKeys` is an RAII guard: `create` provisions and polls to `CREATE_COMPLETE`;
   `Drop` schedules deletion of each ARN. A final check lists `CREATE_COMPLETE`
   keys and fails if any test key survives.

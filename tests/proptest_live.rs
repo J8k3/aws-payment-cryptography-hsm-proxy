@@ -13,10 +13,15 @@
 //!
 //! Optional env vars:
 //!   `AWS_REGION` (default `us-east-1`)
-//!   `APC_LIVE_SEED` (u64, default `0xA5C3F00C0FFEE_u64`) — reproducible RNG seed
-//!   `APC_LIVE_CASES` (usize, default `8`) — cases per command
+//!   `APC_LIVE_SEED` (u64, default `0xA5C3F00C0FFEE_u64`) — reproducible base seed
+//!   `APC_LIVE_CASES` (usize, default `8`) — cases per command per run
+//!   `APC_LIVE_REPLAY` (e.g. `5` or `3,5,7`) — run only these case indices
 //!
-//! Each test creates fresh APC keys via `TestKeys::create`, exercises a
+//! Each test runs many randomized cases per invocation (the sweep). Every case
+//! gets an independent RNG seeded from `(base seed, command, index)`, so a
+//! failing case can be reproduced on its own without replaying the cases before
+//! it — on failure the test prints the exact `APC_LIVE_REPLAY=…` command to do
+//! so. Each case creates fresh APC keys via `TestKeys::create`, exercises a
 //! handler through its wire frame, compares the handler's APC result against
 //! a direct APC SDK call built from the same field values, and tears down
 //! every test key before exiting. A final `assert_no_surviving` check
@@ -68,6 +73,75 @@ fn case_count() -> usize {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8)
+}
+
+// ── Case selection & deterministic replay ─────────────────────────────────────
+//
+// Each test runs *many* randomized cases per invocation (the sweep). Every case
+// gets its own RNG seeded from (base seed, command label, case index), so cases
+// are independent and any single one can be reproduced in isolation — you don't
+// have to replay the cases before it.
+//
+// Replay: when a case fails, the harness prints the exact command to re-run just
+// that case. `APC_LIVE_REPLAY=5` (or `3,5,7`) runs only those indices, with the
+// same per-case seed they had in the full sweep, so the failing **wire inputs**
+// (PAN, format codes, message, KSN, …) are reproduced byte-for-byte. Pin
+// `APC_LIVE_SEED` to the value the failing run printed.
+//
+// What replay does and does NOT pin: the *inputs* are deterministic; the *keys*
+// are not — fresh random keys are created every run by design (a fixed key hides
+// bugs; see the plan's requirement #1). So crypto outputs (CVV/MAC) differ
+// run-to-run, but that is irrelevant to the differential property: a wire /
+// parse / mapping bug makes proxy ≠ oracle for the reproduced input regardless
+// of key value, so it reproduces identically. (A bug that only triggers for a
+// specific key value is what the per-run key *rotation* surfaces — not what
+// replay targets; reproducing that needs known key material, the Tier-2 path.)
+
+/// SplitMix64 — a small, stable mixing function. Chosen over `DefaultHasher`
+/// because its output is fixed forever (no dependence on std/Rust version), so a
+/// recorded `(seed, index)` replays identically months later.
+fn splitmix64(x: u64) -> u64 {
+    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Per-case RNG seed: deterministic in `(base, command label, case index)`.
+fn case_seed(base: u64, label: &str, idx: usize) -> u64 {
+    let mut h = splitmix64(base);
+    for b in label.bytes() {
+        h = splitmix64(h ^ u64::from(b));
+    }
+    splitmix64(h ^ idx as u64)
+}
+
+/// Fresh RNG for one case, derived from the base seed + command label + index.
+fn case_rng(label: &str, idx: usize) -> StdRng {
+    StdRng::seed_from_u64(case_seed(rng_seed(), label, idx))
+}
+
+/// The case indices to run: `APC_LIVE_REPLAY` (comma-separated) if set,
+/// otherwise `0..case_count()`.
+fn cases_to_run() -> Vec<usize> {
+    match std::env::var("APC_LIVE_REPLAY") {
+        Ok(s) if !s.trim().is_empty() => s
+            .split(',')
+            .filter_map(|t| t.trim().parse::<usize>().ok())
+            .collect(),
+        _ => (0..case_count()).collect(),
+    }
+}
+
+/// The command line that reproduces exactly one case of a failing test.
+fn replay_hint(test_fn: &str, label: &str, idx: usize) -> String {
+    format!(
+        "REPLAY this case: APC_LIVE=1 AWS_REGION={region} APC_LIVE_SEED=0x{seed:016X} \
+         APC_LIVE_REPLAY={idx} cargo test --test proptest_live {test_fn} -- --ignored --nocapture\n\
+         (case label={label})",
+        region = aws_region(),
+        seed = rng_seed(),
+    )
 }
 
 // ── AWS clients ──────────────────────────────────────────────────────────────
@@ -380,16 +454,18 @@ async fn cvv_cw_cy_differential() -> anyhow::Result<()> {
     let cw_handler = registry.get(b"CW").expect("CW handler registered");
     let cy_handler = registry.get(b"CY").expect("CY handler registered");
 
-    let mut rng = StdRng::seed_from_u64(rng_seed());
-    let cases = case_count();
+    const LABEL: &str = "cvv_cw_cy";
+    let run = cases_to_run();
     eprintln!(
-        "cvv_cw_cy_differential: seed=0x{:016X} cases={cases}",
-        rng_seed()
+        "cvv_cw_cy_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
     );
 
     let mut result: anyhow::Result<()> = Ok(());
 
-    for case_idx in 0..cases {
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
         let pan_len = rng.random_range(13..=19_usize);
         let pan = gen_pan(&mut rng, pan_len);
         let expiry = gen_expiry(&mut rng);
@@ -399,6 +475,7 @@ async fn cvv_cw_cy_differential() -> anyhow::Result<()> {
         let cw_wire = encode_cw(&cvk_label, &pan, &expiry, service_code);
         let proxy_cw = cw_handler.handle(b"CW", &cw_wire, &state).await;
         if &proxy_cw.error_code != b"00" {
+            eprintln!("{}", replay_hint("cvv_cw_cy_differential", LABEL, case_idx));
             result = Err(anyhow::anyhow!(
                 "case={case_idx} CW error_code={} (PAN={pan} expiry={expiry} svc={service_code})",
                 String::from_utf8_lossy(&proxy_cw.error_code),
@@ -422,6 +499,7 @@ async fn cvv_cw_cy_differential() -> anyhow::Result<()> {
         let oracle_cvv = oracle.validation_data().to_string();
 
         if proxy_cvv != oracle_cvv {
+            eprintln!("{}", replay_hint("cvv_cw_cy_differential", LABEL, case_idx));
             result = Err(anyhow::anyhow!(
                 "case={case_idx} CW differential mismatch: proxy={proxy_cvv} oracle={oracle_cvv} \
                  PAN={pan} expiry={expiry} svc={service_code}"
@@ -435,6 +513,7 @@ async fn cvv_cw_cy_differential() -> anyhow::Result<()> {
         let cy_wire = encode_cy(&cvk_label, &proxy_cvv, &pan, &expiry, service_code);
         let proxy_cy = cy_handler.handle(b"CY", &cy_wire, &state).await;
         if &proxy_cy.error_code != b"00" {
+            eprintln!("{}", replay_hint("cvv_cw_cy_differential", LABEL, case_idx));
             result = Err(anyhow::anyhow!(
                 "case={case_idx} CY round-trip rejected proxy CW output: \
                  error_code={} CVV={proxy_cvv} PAN={pan} expiry={expiry} svc={service_code}",
@@ -531,25 +610,31 @@ async fn mac_m6_m8_differential() -> anyhow::Result<()> {
     let m6_handler = registry.get(b"M6").expect("M6 handler registered");
     let m8_handler = registry.get(b"M8").expect("M8 handler registered");
 
-    let mut rng = StdRng::seed_from_u64(rng_seed());
-    let cases = case_count();
+    const LABEL: &str = "mac_m6_m8";
+    let run = cases_to_run();
     eprintln!(
-        "mac_m6_m8_differential: seed=0x{:016X} cases={cases}",
-        rng_seed()
+        "mac_m6_m8_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
     );
 
     let mut result: anyhow::Result<()> = Ok(());
 
-    for case_idx in 0..cases {
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
         // Randomise message length (whole bytes) to surface fixed-offset bugs.
         let msg_bytes = rng.random_range(1..=32_usize);
         let msg_hex = gen_hex_message(&mut rng, msg_bytes);
 
-        // 1) M6 generate via proxy. algo '3' = ISO9797 ALG3; MAC size '1' = the
-        //    full 8-byte (16H) MAC so the M8 verify path sees a complete MAC.
-        let m6_wire = encode_m6(&mak_label, b'3', b'1', &msg_hex);
+        // 1) M6 generate via proxy. algo '3' = ISO9797 ALG3; MAC size '0' = a
+        //    4-byte (8H) MAC. APC's generate_mac returns a 4-byte MAC for
+        //    ISO9797_ALGORITHM3 (verified live), so '0' is the faithful size;
+        //    '1' (8-byte) would have the proxy truncate APC's 4-byte output and
+        //    is a separate, unsupported-by-APC case.
+        let m6_wire = encode_m6(&mak_label, b'3', b'0', &msg_hex);
         let proxy_m6 = m6_handler.handle(b"M6", &m6_wire, &state).await;
         if &proxy_m6.error_code != b"00" {
+            eprintln!("{}", replay_hint("mac_m6_m8_differential", LABEL, case_idx));
             result = Err(anyhow::anyhow!(
                 "case={case_idx} M6 error_code={} (msg_bytes={msg_bytes})",
                 String::from_utf8_lossy(&proxy_m6.error_code),
@@ -569,6 +654,7 @@ async fn mac_m6_m8_differential() -> anyhow::Result<()> {
         let oracle_mac = oracle.mac().to_string();
 
         if !proxy_mac.eq_ignore_ascii_case(&oracle_mac) {
+            eprintln!("{}", replay_hint("mac_m6_m8_differential", LABEL, case_idx));
             result = Err(anyhow::anyhow!(
                 "case={case_idx} M6 differential mismatch: proxy={proxy_mac} oracle={oracle_mac} \
                  msg_bytes={msg_bytes} msg={msg_hex}"
@@ -577,9 +663,10 @@ async fn mac_m6_m8_differential() -> anyhow::Result<()> {
         }
 
         // 3) M8 round-trip: the proxy's own M8 verifier must accept the MAC M6 made.
-        let m8_wire = encode_m8(&mak_label, b'3', b'1', &msg_hex, &proxy_mac);
+        let m8_wire = encode_m8(&mak_label, b'3', b'0', &msg_hex, &proxy_mac);
         let proxy_m8 = m8_handler.handle(b"M8", &m8_wire, &state).await;
         if &proxy_m8.error_code != b"00" {
+            eprintln!("{}", replay_hint("mac_m6_m8_differential", LABEL, case_idx));
             result = Err(anyhow::anyhow!(
                 "case={case_idx} M8 round-trip rejected proxy M6 MAC: error_code={} mac={proxy_mac}",
                 String::from_utf8_lossy(&proxy_m8.error_code),
