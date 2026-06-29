@@ -124,9 +124,11 @@ for _ in 0..N {
 ```
 
 Notes:
-- Use a **seeded** RNG (reproducible), a small fixed case count per run, and *not*
-  proptest shrinking for the live tier (shrinking re-runs cases → cost). Proptest
-  fits Tier 2's fast local oracle.
+- Use a **seeded** RNG (reproducible) and *not* proptest shrinking for the live
+  tier (shrinking re-runs cases → cost). Proptest fits Tier 2's fast local oracle.
+- Case count (`APC_LIVE_CASES`, default 32) is a cheap knob: keys are created
+  once per test, not per case, so each extra case is only a few data-plane calls
+  (~60 ms; measured 64 cases × 2 tests in ~8 s). Crank it for thorough runs.
 - **Many cases per run + single-case replay.** Each test runs `APC_LIVE_CASES`
   randomized cases (the sweep). Each case is seeded *independently* from
   `(base seed, command label, case index)` via SplitMix64, so cases don't couple

@@ -14,7 +14,9 @@
 //! Optional env vars:
 //!   `AWS_REGION` (default `us-east-1`)
 //!   `APC_LIVE_SEED` (u64, default `0xA5C3F00C0FFEE_u64`) — reproducible base seed
-//!   `APC_LIVE_CASES` (usize, default `8`) — cases per command per run
+//!   `APC_LIVE_CASES` (usize, default `32`) — cases per command per run; cost is
+//!     ~linear and cheap (keys are per-test, not per-case), so crank it for
+//!     thorough runs (e.g. `256`) or lower it for a quick smoke check
 //!   `APC_LIVE_REPLAY` (e.g. `5` or `3,5,7`) — run only these case indices
 //!
 //! Each test runs many randomized cases per invocation (the sweep). Every case
@@ -68,11 +70,15 @@ fn rng_seed() -> u64 {
         .unwrap_or(0x000A_5C3F_00C0_FFEE_u64)
 }
 
+/// Cases per command per run. Default 32. Cost is ~linear and cheap: keys are
+/// created once per test (setup), not per case, so each extra case is only a few
+/// data-plane calls (~60 ms). Crank it for a thorough run — e.g.
+/// `APC_LIVE_CASES=256` (~30 s) — or drop it for a quick smoke check.
 fn case_count() -> usize {
     std::env::var("APC_LIVE_CASES")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(8)
+        .unwrap_or(32)
 }
 
 // ── Case selection & deterministic replay ─────────────────────────────────────
