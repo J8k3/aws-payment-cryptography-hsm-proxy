@@ -149,6 +149,26 @@ impl Handler for DukptMacHandler {
         &["GW"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[
+            Evidence {
+                decision: "GW generate/verify a DUKPT MAC (Alg1/Alg3/CMAC, MAC size '0'=4 bytes / '1'=2 bytes). Half MACs (size '1') verify by regenerating the full MAC and comparing the leading bytes, because APC verify_mac only accepts an 8H or 16H MAC.",
+                because: "PUGD0538. Verified live across every algorithm×size combo: proxy MAC == APC generate_mac (Dukpt Alg1/Alg3/CMAC, 3DES), plus the verify round-trip. The live differential caught a bug: GW verify of a 2-byte half MAC was passed straight to APC verify_mac, which rejects it ('valid length of 8 or 16') — fixed with the regenerate-and-compare-prefix path (mirrors M6 CMAC). APC constraints (verified live): DUKPT MAC needs message ≥8 bytes; the CBC-MAC variants (Alg1/Alg3) require a block-aligned (×8 byte) message — APC does not pad — while CMAC accepts any length.",
+                wire: WireGrounding::DiffXprov,
+                crypto: CryptoGrounding::Apc,
+                proof: Proof::LiveTest("dukpt_mac_gw_differential"),
+            },
+            Evidence {
+                decision: "The APC DukptKeyVariant is hardcoded to Request (terminal MAC direction).",
+                because: "payShield GW carries no direction field, so the variant is a documented assumption. The differential proves proxy == APC under Request; it does NOT verify Request is what a real payShield derives. Host-response MACs (Response variant) are a known gap.",
+                wire: WireGrounding::Cited,
+                crypto: CryptoGrounding::Apc,
+                proof: Proof::ManualCite("PUGD0538; direction not in the wire — assumption, not HSM-verified"),
+            },
+        ]
+    }
+
     async fn handle(
         &self,
         _command_code: &[u8],
@@ -201,26 +221,57 @@ impl Handler for DukptMacHandler {
 
         if fields.is_verify {
             let mac_val = fields.mac_to_verify.expect("is_verify guarantees Some");
-            match state
-                .data
-                .verify_mac()
-                .key_identifier(&bdk_arn)
-                .message_data(&fields.message_hex)
-                .mac(&mac_val)
-                .verification_attributes(mac_attrs)
-                .send()
-                .await
-            {
-                Ok(_) => HandlerResult::success(vec![]),
-                Err(e) => {
-                    if e.as_service_error()
-                        .is_some_and(aws_sdk_paymentcryptographydata::operation::verify_mac::VerifyMacError::is_verification_failed_exception)
-                    {
-                        warn!("GW: MAC mismatch");
-                        return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
+            // APC verify_mac only accepts a full 8H or 16H MAC. A Thales half MAC
+            // (MAC size '1' = 2 bytes = 4H) is shorter, so for it we regenerate the
+            // full MAC and compare the leading bytes (same approach as the M6 CMAC
+            // verify path). Full MACs go through verify_mac directly.
+            if mac_val.len() < 8 {
+                match state
+                    .data
+                    .generate_mac()
+                    .key_identifier(&bdk_arn)
+                    .message_data(&fields.message_hex)
+                    .generation_attributes(mac_attrs)
+                    .send()
+                    .await
+                {
+                    Ok(resp) => {
+                        let full = resp.mac();
+                        let expected = &full[..mac_val.len().min(full.len())];
+                        if mac_val.eq_ignore_ascii_case(expected) {
+                            HandlerResult::success(vec![])
+                        } else {
+                            warn!("GW: half-MAC prefix mismatch");
+                            HandlerResult::from_proxy_error(&ProxyError::VerificationFailed)
+                        }
                     }
-                    warn!(?e, "GW: verify_mac failed");
-                    HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
+                    Err(e) => {
+                        warn!(?e, "GW: generate_mac for half-MAC verify failed");
+                        HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
+                    }
+                }
+            } else {
+                match state
+                    .data
+                    .verify_mac()
+                    .key_identifier(&bdk_arn)
+                    .message_data(&fields.message_hex)
+                    .mac(&mac_val)
+                    .verification_attributes(mac_attrs)
+                    .send()
+                    .await
+                {
+                    Ok(_) => HandlerResult::success(vec![]),
+                    Err(e) => {
+                        if e.as_service_error()
+                            .is_some_and(aws_sdk_paymentcryptographydata::operation::verify_mac::VerifyMacError::is_verification_failed_exception)
+                        {
+                            warn!("GW: MAC mismatch");
+                            return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
+                        }
+                        warn!(?e, "GW: verify_mac failed");
+                        HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
+                    }
                 }
             }
         } else {
