@@ -48,9 +48,10 @@ use aws_sdk_paymentcryptography::types::{
 };
 use aws_sdk_paymentcryptographydata::types::{
     CardGenerationAttributes, CardVerificationValue1, DukptAttributes, DukptDerivationType,
-    DukptKeyVariant, Ibm3624NaturalPin, Ibm3624PinVerification, MacAlgorithm, MacAlgorithmDukpt,
-    MacAttributes, PinBlockFormatForPinData, PinGenerationAttributes, PinVerificationAttributes,
-    TranslationIsoFormats, TranslationPinDataIsoFormat034, VisaPin,
+    DukptKeyVariant, EncryptionDecryptionAttributes, EncryptionMode, Ibm3624NaturalPin,
+    Ibm3624PinVerification, MacAlgorithm, MacAlgorithmDukpt, MacAttributes,
+    PinBlockFormatForPinData, PinGenerationAttributes, PinVerificationAttributes,
+    SymmetricEncryptionAttributes, TranslationIsoFormats, TranslationPinDataIsoFormat034, VisaPin,
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
@@ -1894,6 +1895,150 @@ async fn mac_translate_my_differential() -> anyhow::Result<()> {
             "case={case_idx:02} OK in_size={} out_size={} msg_bytes={msg_bytes} out={proxy_out}",
             in_size_byte as char, out_size_byte as char,
         );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+// ── Legacy data encrypt/decrypt HE/HG (live differential + round-trip) ────────
+//
+// Un-audited handler (PUGD0538). HE encrypts and HG decrypts a single 64-bit
+// block (16H) under a data key (TR31_D0), TDES-ECB. ECB is deterministic, so the
+// HE differential is exact; HE→HG must recover the plaintext.
+
+const HEHG_DEK_LABEL: &str = "U000000000000000000000000000000D5";
+
+fn encode_he_hg(key_label: &str, data_hex: &str) -> Vec<u8> {
+    let mut v = key_label.as_bytes().to_vec();
+    v.extend_from_slice(data_hex.as_bytes());
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn encrypt_decrypt_he_hg_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!("encrypt_decrypt_he_hg_differential: grounding crypto=apc wire=diff-xprov(TDES-ECB 64-bit block)");
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "DEK",
+        wire_label: HEHG_DEK_LABEL,
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31D0SymmetricDataEncryptionKey,
+        // APC rejects encrypt+decrypt alone for a D0 key; NoRestrictions allows
+        // both HE (encrypt) and HG (decrypt) under the one key.
+        modes: KeyModesOfUse::builder().no_restrictions(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let dek_arn = keys.arn("DEK").to_string();
+    let dek_label = keys.wire_label("DEK").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let he = registry.get(b"HE").expect("HE registered");
+    let hg = registry.get(b"HG").expect("HG registered");
+
+    const LABEL: &str = "encrypt_decrypt_he_hg";
+    let run = cases_to_run();
+    eprintln!(
+        "encrypt_decrypt_he_hg_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+    let ecb = || {
+        EncryptionDecryptionAttributes::Symmetric(
+            SymmetricEncryptionAttributes::builder()
+                .mode(EncryptionMode::Ecb)
+                .build()
+                .expect("ecb attrs"),
+        )
+    };
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        // One 64-bit block (8 bytes = 16 hex). Include all-zero / all-F edges.
+        let plain = match rng.random_range(0..4_u8) {
+            0 => "0000000000000000".to_string(),
+            1 => "FFFFFFFFFFFFFFFF".to_string(),
+            _ => gen_hex_message(&mut rng, 8),
+        };
+
+        // 1) HE encrypt via proxy
+        let proxy_he = he
+            .handle(b"HE", &encode_he_hg(&dek_label, &plain), &state)
+            .await;
+        if &proxy_he.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("encrypt_decrypt_he_hg_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} HE error_code={} (plain={plain})",
+                String::from_utf8_lossy(&proxy_he.error_code),
+            ));
+            break;
+        }
+        let proxy_cipher = String::from_utf8(proxy_he.payload.to_vec())?;
+
+        // 2) oracle: APC encrypt_data TDES-ECB (deterministic)
+        let oracle = data
+            .encrypt_data()
+            .key_identifier(&dek_arn)
+            .plain_text(&plain)
+            .encryption_attributes(ecb())
+            .send()
+            .await?;
+        let oracle_cipher = oracle.cipher_text().to_string();
+        if !proxy_cipher.eq_ignore_ascii_case(&oracle_cipher) {
+            eprintln!(
+                "{}",
+                replay_hint("encrypt_decrypt_he_hg_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} HE mismatch: proxy={proxy_cipher} oracle={oracle_cipher} plain={plain}"
+            ));
+            break;
+        }
+
+        // 3) HG decrypt round-trip → must recover the plaintext
+        let proxy_hg = hg
+            .handle(b"HG", &encode_he_hg(&dek_label, &proxy_cipher), &state)
+            .await;
+        if &proxy_hg.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("encrypt_decrypt_he_hg_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} HG error_code={} (cipher={proxy_cipher})",
+                String::from_utf8_lossy(&proxy_hg.error_code),
+            ));
+            break;
+        }
+        let recovered = String::from_utf8(proxy_hg.payload.to_vec())?;
+        if !recovered.eq_ignore_ascii_case(&plain) {
+            eprintln!(
+                "{}",
+                replay_hint("encrypt_decrypt_he_hg_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} HE→HG round-trip mismatch: plain={plain} recovered={recovered}"
+            ));
+            break;
+        }
+
+        eprintln!("case={case_idx:02} OK plain={plain} cipher={proxy_cipher}");
     }
 
     let teardown_result = keys.teardown().await;

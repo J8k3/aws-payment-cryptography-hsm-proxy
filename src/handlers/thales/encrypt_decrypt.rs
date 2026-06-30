@@ -38,6 +38,17 @@ impl Handler for EncryptDecryptHandler {
         &["HE", "HG"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[Evidence {
+            decision: "HE encrypts / HG decrypts a single 64-bit block (16H) under a data key (TR31_D0), TDES-ECB. Wire: key then 16H data.",
+            because: "PUGD0538. Verified live: proxy HE ciphertext == APC encrypt_data (TDES-ECB, deterministic), and the HE→HG round-trip recovers the plaintext, over random plus all-zero / all-F blocks. Operational note (verified live): APC rejects encrypt+decrypt alone for a D0 key — the mapped key must use NoRestrictions (or encrypt+decrypt+wrap+unwrap) for both HE and HG to work.",
+            wire: WireGrounding::DiffXprov,
+            crypto: CryptoGrounding::Apc,
+            proof: Proof::LiveTest("encrypt_decrypt_he_hg_differential"),
+        }]
+    }
+
     async fn handle(
         &self,
         command_code: &[u8],

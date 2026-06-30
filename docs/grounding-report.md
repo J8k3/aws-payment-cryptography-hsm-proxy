@@ -5,7 +5,7 @@
 
 Evidence for *why* each handler behaves as it does and *how* it was verified. Generated from `Handler::grounding()` — do not edit by hand. Grounding labels: wire `vec-thru` > `diff-xprov` > `cited` > `none`; crypto `vec` > `2impl` > `apc` > `none`.
 
-**Coverage:** 7 of 26 handlers carry grounding; 19 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
+**Coverage:** 8 of 26 handlers carry grounding; 18 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
 
 ## `C2`, `C4`, `M6`, `M8`
 
@@ -55,6 +55,12 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
   - wire `cited` · crypto `apc` · manual: PUGD0538; direction not in the wire — assumption, not HSM-verified
   - payShield GW carries no direction field, so the variant is a documented assumption. The differential proves proxy == APC under Request; it does NOT verify Request is what a real payShield derives. Host-response MACs (Response variant) are a known gap.
 
+## `HE`, `HG`
+
+- **HE encrypts / HG decrypts a single 64-bit block (16H) under a data key (TR31_D0), TDES-ECB. Wire: key then 16H data.**
+  - wire `diff-xprov` · crypto `apc` · live test `encrypt_decrypt_he_hg_differential`
+  - PUGD0538. Verified live: proxy HE ciphertext == APC encrypt_data (TDES-ECB, deterministic), and the HE→HG round-trip recovers the plaintext, over random plus all-zero / all-F blocks. Operational note (verified live): APC rejects encrypt+decrypt alone for a D0 key — the mapped key must use NoRestrictions (or encrypt+decrypt+wrap+unwrap) for both HE and HG to work.
+
 ## `MA`, `MC`, `ME`, `MK`, `MM`, `MO`, `MU`, `MW`, `MQ`, `MS`
 
 - **MA/MC ('~'-terminated) and MK/MM (3H-length-prefixed) generate/verify an ISO 9797-1 Alg1 MAC under a TAK. APC's Alg1 MAC is truncated to the 8H (4-byte) wire width.**
@@ -84,7 +90,6 @@ These handlers have no `grounding()` yet — the open documentation/testing gap.
 - `CU`, `DU`
 - `DA`, `DC`, `EA`, `EC`
 - `ECHO`
-- `HE`, `HG`
 - `JA`
 - `JS`
 - `JU`, `KU`, `KY`
