@@ -5,7 +5,7 @@
 
 Evidence for *why* each handler behaves as it does and *how* it was verified. Generated from `Handler::grounding()` — do not edit by hand. Grounding labels: wire `vec-thru` > `diff-xprov` > `cited` > `none`; crypto `vec` > `2impl` > `apc` > `none`.
 
-**Coverage:** 5 of 26 handlers carry grounding; 21 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
+**Coverage:** 6 of 26 handlers carry grounding; 20 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
 
 ## `C2`, `C4`, `M6`, `M8`
 
@@ -46,6 +46,15 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
   - wire `none` · crypto `none` · gated (68): no APC equivalent (Diebold table / LMK-compare)
   - Diebold indexes a conversion table in HSM user storage and GU compares against an LMK-encrypted reference PIN — neither has an APC equivalent (APC verify_pin_data does IBM3624 offset / Visa PVV only). PUGD0537-004 p.355/358.
 
+## `GW`
+
+- **GW generate/verify a DUKPT MAC (Alg1/Alg3/CMAC, MAC size '0'=4 bytes / '1'=2 bytes). Half MACs (size '1') verify by regenerating the full MAC and comparing the leading bytes, because APC verify_mac only accepts an 8H or 16H MAC.**
+  - wire `diff-xprov` · crypto `apc` · live test `dukpt_mac_gw_differential`
+  - PUGD0538. Verified live across every algorithm×size combo: proxy MAC == APC generate_mac (Dukpt Alg1/Alg3/CMAC, 3DES), plus the verify round-trip. The live differential caught a bug: GW verify of a 2-byte half MAC was passed straight to APC verify_mac, which rejects it ('valid length of 8 or 16') — fixed with the regenerate-and-compare-prefix path (mirrors M6 CMAC). APC constraints (verified live): DUKPT MAC needs message ≥8 bytes; the CBC-MAC variants (Alg1/Alg3) require a block-aligned (×8 byte) message — APC does not pad — while CMAC accepts any length.
+- **The APC DukptKeyVariant is hardcoded to Request (terminal MAC direction).**
+  - wire `cited` · crypto `apc` · manual: PUGD0538; direction not in the wire — assumption, not HSM-verified
+  - payShield GW carries no direction field, so the variant is a documented assumption. The differential proves proxy == APC under Request; it does NOT verify Request is what a real payShield derives. Host-response MACs (Response variant) are a known gap.
+
 ## `MA`, `MC`, `ME`, `MK`, `MM`, `MO`, `MU`, `MW`, `MQ`, `MS`
 
 - **MA/MC ('~'-terminated) and MK/MM (3H-length-prefixed) generate/verify an ISO 9797-1 Alg1 MAC under a TAK. APC's Alg1 MAC is truncated to the 8H (4-byte) wire width.**
@@ -66,7 +75,6 @@ These handlers have no `grounding()` yet — the open documentation/testing gap.
 - `CU`, `DU`
 - `DA`, `DC`, `EA`, `EC`
 - `ECHO`
-- `GW`
 - `HE`, `HG`
 - `JA`
 - `JS`

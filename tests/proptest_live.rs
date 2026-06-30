@@ -48,8 +48,8 @@ use aws_sdk_paymentcryptography::types::{
 };
 use aws_sdk_paymentcryptographydata::types::{
     CardGenerationAttributes, CardVerificationValue1, DukptAttributes, DukptDerivationType,
-    Ibm3624NaturalPin, Ibm3624PinVerification, MacAlgorithm, MacAttributes,
-    PinBlockFormatForPinData, PinGenerationAttributes, PinVerificationAttributes,
+    DukptKeyVariant, Ibm3624NaturalPin, Ibm3624PinVerification, MacAlgorithm, MacAlgorithmDukpt,
+    MacAttributes, PinBlockFormatForPinData, PinGenerationAttributes, PinVerificationAttributes,
     TranslationIsoFormats, TranslationPinDataIsoFormat034, VisaPin,
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -1548,6 +1548,188 @@ async fn legacy_mac_ma_mc_mk_mm_differential() -> anyhow::Result<()> {
 
         eprintln!(
             "case={case_idx:02} OK style={style} len={len} MAC={proxy_mac} apc_full={oracle_mac}"
+        );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+// ── DUKPT MAC GW (live differential + verify round-trip) ──────────────────────
+//
+// Un-audited handler (PUGD0538). GW generate/verify a DUKPT MAC. Header: Mode +
+// InFmt + MACSize + MACAlgo + PadMethod (5×1N), then BDK + KSN-descriptor+KSN +
+// MsgLen(4H) + message. MAC size '0'=4 bytes, '1'=2 bytes (half). Algorithm:
+// '1'=Alg1, '3'=Alg3, '6'=CMAC. The handler hardcodes APC DukptKeyVariant=Request
+// (payShield GW does not carry direction — a documented assumption); the oracle
+// uses the same variant, so this proves proxy==APC under that assumption, not that
+// Request is what a real payShield would derive.
+
+const GW_BDK_LABEL: &str = "U000000000000000000000000000000B7";
+
+fn encode_gw(
+    mode: u8,
+    mac_size: u8,
+    algo: u8,
+    bdk_label: &str,
+    ksn: &str,
+    msg_hex: &str,
+    mac_hex: Option<&str>,
+) -> Vec<u8> {
+    let mut v = vec![mode, b'1', mac_size, algo, b'1']; // pad method '1', consumed
+    v.extend_from_slice(bdk_label.as_bytes());
+    v.extend_from_slice(b"014"); // KSN descriptor: 0x14 = 20 nibbles (3DES)
+    v.extend_from_slice(ksn.as_bytes());
+    v.extend_from_slice(format!("{:04X}", msg_hex.len() / 2).as_bytes());
+    v.extend_from_slice(msg_hex.as_bytes());
+    if let Some(m) = mac_hex {
+        v.extend_from_slice(m.as_bytes());
+    }
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn dukpt_mac_gw_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!("dukpt_mac_gw_differential: grounding crypto=apc wire=diff-xprov(algo+size+length-randomised)");
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "BDK",
+        wire_label: GW_BDK_LABEL,
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31B0BaseDerivationKey,
+        modes: KeyModesOfUse::builder().derive_key(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let bdk_arn = keys.arn("BDK").to_string();
+    let bdk_label = keys.wire_label("BDK").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let gw = registry.get(b"GW").expect("GW registered");
+
+    const LABEL: &str = "dukpt_mac_gw";
+    let ksn = "FFFF9876543210E00001"; // 3DES DUKPT, 20H
+    let run = cases_to_run();
+    eprintln!(
+        "dukpt_mac_gw_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        // Algorithm: '1'=Alg1, '3'=Alg3, '6'=CMAC.
+        let (algo_byte, oracle_algo): (u8, fn(MacAlgorithmDukpt) -> MacAttributes) =
+            match rng.random_range(0..3_u8) {
+                0 => (b'1', MacAttributes::DukptIso9797Algorithm1),
+                1 => (b'3', MacAttributes::DukptIso9797Algorithm3),
+                _ => (b'6', MacAttributes::DukptCmac),
+            };
+        let mac_size_byte = if rng.random_bool(0.5) { b'0' } else { b'1' }; // 4 or 2 bytes
+        let mac_size_chars = if mac_size_byte == b'0' { 8 } else { 4 };
+        // APC DUKPT generate_mac requires message length 8..4096 bytes. The CBC-MAC
+        // variants (ALG1, ALG3) additionally require a multiple of 8 bytes
+        // (block-aligned — APC does not pad for them); CMAC accepts any length.
+        let msg_bytes = if algo_byte == b'6' {
+            edge_biased(&mut rng, 8, 64, &[8, 9, 16, 32, 64])
+        } else {
+            8 * edge_biased(&mut rng, 1, 8, &[1, 2, 4, 8])
+        };
+        let msg_hex = gen_hex_message(&mut rng, msg_bytes);
+
+        let dukpt = MacAlgorithmDukpt::builder()
+            .key_serial_number(ksn)
+            .dukpt_key_variant(DukptKeyVariant::Request)
+            .dukpt_derivation_type(DukptDerivationType::Tdes2Key)
+            .build()?;
+
+        // 1) proxy generate
+        let gen_wire = encode_gw(
+            b'0',
+            mac_size_byte,
+            algo_byte,
+            &bdk_label,
+            ksn,
+            &msg_hex,
+            None,
+        );
+        let proxy_gen = gw.handle(b"GW", &gen_wire, &state).await;
+        if &proxy_gen.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("dukpt_mac_gw_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} GW generate error_code={} (algo={} size={} msg_bytes={msg_bytes})",
+                String::from_utf8_lossy(&proxy_gen.error_code),
+                algo_byte as char,
+                mac_size_byte as char,
+            ));
+            break;
+        }
+        let proxy_mac = String::from_utf8(proxy_gen.payload.to_vec())?;
+
+        // 2) oracle: APC generate_mac with matching DUKPT algorithm + variant
+        let oracle = data
+            .generate_mac()
+            .key_identifier(&bdk_arn)
+            .message_data(&msg_hex)
+            .generation_attributes(oracle_algo(dukpt.clone()))
+            .send()
+            .await?;
+        let oracle_mac = oracle.mac().to_string();
+        let oracle_prefix = &oracle_mac[..mac_size_chars.min(oracle_mac.len())];
+        if !proxy_mac.eq_ignore_ascii_case(oracle_prefix) {
+            eprintln!(
+                "{}",
+                replay_hint("dukpt_mac_gw_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} GW MAC mismatch (algo={} size={}): proxy={proxy_mac} apc_prefix={oracle_prefix} (apc_full={oracle_mac})",
+                algo_byte as char,
+                mac_size_byte as char,
+            ));
+            break;
+        }
+
+        // 3) verify round-trip
+        let ver_wire = encode_gw(
+            b'1',
+            mac_size_byte,
+            algo_byte,
+            &bdk_label,
+            ksn,
+            &msg_hex,
+            Some(&proxy_mac),
+        );
+        let proxy_ver = gw.handle(b"GW", &ver_wire, &state).await;
+        if &proxy_ver.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("dukpt_mac_gw_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} GW verify round-trip rejected proxy MAC: error_code={} mac={proxy_mac} (apc_full={oracle_mac})",
+                String::from_utf8_lossy(&proxy_ver.error_code),
+            ));
+            break;
+        }
+
+        eprintln!(
+            "case={case_idx:02} OK algo={} size={} msg_bytes={msg_bytes} MAC={proxy_mac}",
+            algo_byte as char, mac_size_byte as char,
         );
     }
 
