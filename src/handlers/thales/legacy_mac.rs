@@ -86,6 +86,26 @@ impl Handler for LegacyMacHandler {
         &["MA", "MC", "ME", "MK", "MM", "MO", "MU", "MW", "MQ", "MS"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[
+            Evidence {
+                decision: "MA/MC ('~'-terminated) and MK/MM (3H-length-prefixed) generate/verify an ISO 9797-1 Alg1 MAC under a TAK. APC's Alg1 MAC is truncated to the 8H (4-byte) wire width.",
+                because: "PUGD0538 pp.89-104. Verified live across both wire styles and randomized data lengths: proxy MAC == APC generate_mac (Iso9797Algorithm1), and the MC/MM verify round-trip accepts the proxy's MAC. Note: APC returns a 4-byte Alg1 MAC (verified live), so the handler's 8H truncation is a no-op — correcting an earlier comment that claimed APC returns 16H.",
+                wire: WireGrounding::DiffXprov,
+                crypto: CryptoGrounding::Apc,
+                proof: Proof::LiveTest("legacy_mac_ma_mc_mk_mm_differential"),
+            },
+            Evidence {
+                decision: "ME/MO (verify-then-re-MAC), MU/MW (mode-prefixed Alg1), MQ (ZAK Alg1), MS (Alg3 X9.19) share the same generate/verify paths but are not yet covered by a live differential.",
+                because: "PUGD0538 pp.89-104 — manual-cited layout and the same ISO9797 Alg1/Alg3 APC mapping as the live-verified commands; a live differential for these is the tracked next step.",
+                wire: WireGrounding::Cited,
+                crypto: CryptoGrounding::None,
+                proof: Proof::ManualCite("PUGD0538 pp.89-104; not yet live-differentialed"),
+            },
+        ]
+    }
+
     async fn handle(
         &self,
         command_code: &[u8],
@@ -385,8 +405,9 @@ async fn generate_alg1_mac(key_arn: &str, data_hex: &str, state: &Arc<AppState>)
         .await
     {
         Ok(resp) => {
-            // Thales legacy MAC commands return 4 bytes (8 hex chars); APC returns 8 bytes (16H).
-            // Truncate to match the wire protocol so a round-trip MA→MC works correctly.
+            // Thales legacy MAC is 4 bytes (8 hex chars). APC's ISO9797 Alg1 MAC is
+            // also 4 bytes (verified live), so this truncation is a defensive no-op —
+            // it bounds the output to the wire width rather than being required.
             let mac = resp.mac();
             HandlerResult::success(mac.as_bytes()[..MAC_HEX_LEN.min(mac.len())].to_vec())
         }

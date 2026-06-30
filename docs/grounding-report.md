@@ -5,7 +5,7 @@
 
 Evidence for *why* each handler behaves as it does and *how* it was verified. Generated from `Handler::grounding()` — do not edit by hand. Grounding labels: wire `vec-thru` > `diff-xprov` > `cited` > `none`; crypto `vec` > `2impl` > `apc` > `none`.
 
-**Coverage:** 4 of 26 handlers carry grounding; 22 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
+**Coverage:** 5 of 26 handlers carry grounding; 21 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
 
 ## `C2`, `C4`, `M6`, `M8`
 
@@ -46,6 +46,15 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
   - wire `none` · crypto `none` · gated (68): no APC equivalent (Diebold table / LMK-compare)
   - Diebold indexes a conversion table in HSM user storage and GU compares against an LMK-encrypted reference PIN — neither has an APC equivalent (APC verify_pin_data does IBM3624 offset / Visa PVV only). PUGD0537-004 p.355/358.
 
+## `MA`, `MC`, `ME`, `MK`, `MM`, `MO`, `MU`, `MW`, `MQ`, `MS`
+
+- **MA/MC ('~'-terminated) and MK/MM (3H-length-prefixed) generate/verify an ISO 9797-1 Alg1 MAC under a TAK. APC's Alg1 MAC is truncated to the 8H (4-byte) wire width.**
+  - wire `diff-xprov` · crypto `apc` · live test `legacy_mac_ma_mc_mk_mm_differential`
+  - PUGD0538 pp.89-104. Verified live across both wire styles and randomized data lengths: proxy MAC == APC generate_mac (Iso9797Algorithm1), and the MC/MM verify round-trip accepts the proxy's MAC. Note: APC returns a 4-byte Alg1 MAC (verified live), so the handler's 8H truncation is a no-op — correcting an earlier comment that claimed APC returns 16H.
+- **ME/MO (verify-then-re-MAC), MU/MW (mode-prefixed Alg1), MQ (ZAK Alg1), MS (Alg3 X9.19) share the same generate/verify paths but are not yet covered by a live differential.**
+  - wire `cited` · crypto `none` · manual: PUGD0538 pp.89-104; not yet live-differentialed
+  - PUGD0538 pp.89-104 — manual-cited layout and the same ISO9797 Alg1/Alg3 APC mapping as the live-verified commands; a live differential for these is the tracked next step.
+
 ## Not yet grounded
 
 These handlers have no `grounding()` yet — the open documentation/testing gap. Grounding them is the ongoing work (documentation + test added together).
@@ -68,7 +77,6 @@ These handlers have no `grounding()` yet — the open documentation/testing gap.
 - `KW`
 - `LQ`, `LS`
 - `M0`, `M2`, `M4`
-- `MA`, `MC`, `ME`, `MK`, `MM`, `MO`, `MU`, `MW`, `MQ`, `MS`
 - `MY`
 - `QY`, `PM`
 - `TPIN`
