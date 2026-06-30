@@ -5,7 +5,7 @@
 
 Evidence for *why* each handler behaves as it does and *how* it was verified. Generated from `Handler::grounding()` — do not edit by hand. Grounding labels: wire `vec-thru` > `diff-xprov` > `cited` > `none`; crypto `vec` > `2impl` > `apc` > `none`.
 
-**Coverage:** 6 of 26 handlers carry grounding; 20 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
+**Coverage:** 7 of 26 handlers carry grounding; 19 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
 
 ## `C2`, `C4`, `M6`, `M8`
 
@@ -64,6 +64,15 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
   - wire `cited` · crypto `none` · manual: PUGD0538 pp.89-104; not yet live-differentialed
   - PUGD0538 pp.89-104 — manual-cited layout and the same ISO9797 Alg1/Alg3 APC mapping as the live-verified commands; a live differential for these is the tracked next step.
 
+## `MY`
+
+- **MY verifies an inbound MAC under one key, then generates an outbound MAC under a second key for the same message (per-direction MAC size/algorithm). A half inbound MAC (size '1' = 2 bytes) is verified by regenerating the full MAC and comparing the leading bytes.**
+  - wire `diff-xprov` · crypto `apc` · live test `mac_translate_my_differential`
+  - PUGD0537-004 p.371. Verified live (ISO9797 Alg1) across all inbound×outbound MAC-size combos: proxy outbound MAC == APC generate_mac under the outbound key. The live differential caught the same half-MAC verify bug as GW — the inbound half MAC was handed to APC verify_mac, which rejects it — fixed with the regenerate-and-compare-prefix path.
+- **ALG3 and CMAC directions, and differing inbound/outbound algorithms, are parsed but not yet covered by a live differential (only ALG1 is).**
+  - wire `cited` · crypto `none` · manual: PUGD0537-004 p.371; ALG3/CMAC not yet live-differentialed
+  - PUGD0537-004 p.371 — same per-direction generate/verify mapping as the live-verified ALG1 path; broadening the differential is the tracked next step.
+
 ## Not yet grounded
 
 These handlers have no `grounding()` yet — the open documentation/testing gap. Grounding them is the ongoing work (documentation + test added together).
@@ -85,6 +94,5 @@ These handlers have no `grounding()` yet — the open documentation/testing gap.
 - `KW`
 - `LQ`, `LS`
 - `M0`, `M2`, `M4`
-- `MY`
 - `QY`, `PM`
 - `TPIN`

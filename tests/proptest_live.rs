@@ -1740,3 +1740,166 @@ async fn dukpt_mac_gw_differential() -> anyhow::Result<()> {
     survivor_result?;
     Ok(())
 }
+
+// ── MAC translate MY (live differential: verify inbound + generate outbound) ──
+//
+// Un-audited handler (PUGD0537-004 p.371). MY verifies an inbound MAC under one
+// key, then generates a new MAC under a second key for the same message. Header:
+// per-direction MAC size + algorithm. Like GW, the inbound-verify step hands the
+// (possibly truncated half) MAC straight to APC verify_mac.
+
+const MY_IN_M1_LABEL: &str = "U000000000000000000000000000000C1";
+const MY_OUT_M1_LABEL: &str = "U000000000000000000000000000000C2";
+
+#[allow(clippy::too_many_arguments)]
+fn encode_my(
+    in_size: u8,
+    out_size: u8,
+    in_label: &str,
+    out_label: &str,
+    msg_hex: &str,
+    inbound_mac: &str,
+) -> Vec<u8> {
+    // ALG1 ('1') for both directions in this test.
+    let mut v = vec![b'0', b'1', in_size, b'1', b'1']; // mode, infmt, in size, in algo, in pad
+    v.extend_from_slice(b"003"); // in key type (consumed)
+    v.extend_from_slice(in_label.as_bytes());
+    v.extend_from_slice(&[out_size, b'1', b'1']); // out size, out algo, out pad
+    v.extend_from_slice(b"003"); // out key type (consumed)
+    v.extend_from_slice(out_label.as_bytes());
+    v.extend_from_slice(format!("{:04X}", msg_hex.len() / 2).as_bytes());
+    v.extend_from_slice(msg_hex.as_bytes());
+    v.extend_from_slice(inbound_mac.as_bytes());
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn mac_translate_my_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!("mac_translate_my_differential: grounding crypto=apc wire=diff-xprov(size+length-randomised, ALG1)");
+
+    let (cpc, data) = aws_clients().await;
+    let m1 = || KeyModesOfUse::builder().generate(true).verify(true).build();
+    let specs = [
+        KeySpec {
+            role: "IN",
+            wire_label: MY_IN_M1_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31M1Iso97971MacKey,
+            modes: m1(),
+        },
+        KeySpec {
+            role: "OUT",
+            wire_label: MY_OUT_M1_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31M1Iso97971MacKey,
+            modes: m1(),
+        },
+    ];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let in_arn = keys.arn("IN").to_string();
+    let out_arn = keys.arn("OUT").to_string();
+    let in_label = keys.wire_label("IN").to_string();
+    let out_label = keys.wire_label("OUT").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let my = registry.get(b"MY").expect("MY registered");
+
+    const LABEL: &str = "mac_translate_my";
+    let run = cases_to_run();
+    eprintln!(
+        "mac_translate_my_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let in_size_byte = if rng.random_bool(0.5) { b'0' } else { b'1' };
+        let out_size_byte = if rng.random_bool(0.5) { b'0' } else { b'1' };
+        let in_chars = if in_size_byte == b'0' { 8 } else { 4 };
+        let out_chars = if out_size_byte == b'0' { 8 } else { 4 };
+        let msg_bytes = edge_biased(&mut rng, 1, 32, &[1, 7, 8, 16, 32]);
+        let msg_hex = gen_hex_message(&mut rng, msg_bytes);
+
+        // Setup: a valid inbound MAC under the IN key (truncated to in size).
+        let in_full = data
+            .generate_mac()
+            .key_identifier(&in_arn)
+            .message_data(&msg_hex)
+            .generation_attributes(MacAttributes::Algorithm(MacAlgorithm::Iso9797Algorithm1))
+            .send()
+            .await?
+            .mac()
+            .to_string();
+        let inbound_mac = in_full[..in_chars.min(in_full.len())].to_string();
+
+        // Proxy MY: verify inbound + generate outbound.
+        let wire = encode_my(
+            in_size_byte,
+            out_size_byte,
+            &in_label,
+            &out_label,
+            &msg_hex,
+            &inbound_mac,
+        );
+        let proxy = my.handle(b"MY", &wire, &state).await;
+        if &proxy.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("mac_translate_my_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} MY error_code={} (in_size={} out_size={} msg_bytes={msg_bytes})",
+                String::from_utf8_lossy(&proxy.error_code),
+                in_size_byte as char,
+                out_size_byte as char,
+            ));
+            break;
+        }
+        let proxy_out = String::from_utf8(proxy.payload.to_vec())?;
+
+        // Oracle: APC generate_mac under the OUT key, truncated to out size.
+        let out_full = data
+            .generate_mac()
+            .key_identifier(&out_arn)
+            .message_data(&msg_hex)
+            .generation_attributes(MacAttributes::Algorithm(MacAlgorithm::Iso9797Algorithm1))
+            .send()
+            .await?
+            .mac()
+            .to_string();
+        let oracle_out = &out_full[..out_chars.min(out_full.len())];
+        if !proxy_out.eq_ignore_ascii_case(oracle_out) {
+            eprintln!(
+                "{}",
+                replay_hint("mac_translate_my_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} MY outbound mismatch: proxy={proxy_out} oracle={oracle_out} (in_size={} out_size={})",
+                in_size_byte as char,
+                out_size_byte as char,
+            ));
+            break;
+        }
+
+        eprintln!(
+            "case={case_idx:02} OK in_size={} out_size={} msg_bytes={msg_bytes} out={proxy_out}",
+            in_size_byte as char, out_size_byte as char,
+        );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
