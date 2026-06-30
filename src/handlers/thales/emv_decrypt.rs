@@ -30,6 +30,8 @@ use crate::key_map::KeyDescriptor;
 /// K1 response:
 ///   [2H] error code
 ///   [nH] decrypted plaintext hex
+///
+/// Evidence for the wire layout and APC mapping: see `Handler::grounding()`.
 pub struct EmvDecryptHandler;
 
 struct K0Fields {
@@ -102,6 +104,26 @@ fn parse_k0(payload: &[u8]) -> Result<K0Fields, ProxyError> {
 impl Handler for EmvDecryptHandler {
     fn command_codes(&self) -> &'static [&'static str] {
         &["K0"]
+    }
+
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[Evidence {
+            decision: "K0 decrypts EMV-encrypted counters / application data under an IMK-ENC (E1) \
+                       master key. APC derives an EMV session key (Option A) from the master key + \
+                       PAN/PSN + ATC, then CBC-decrypts. Wire PAN+Seq is 8B BCD (Option-A \
+                       pre-format); ATC and DataLen are 2B binary; ciphertext is binary and \
+                       hex-encoded before the APC call. SessionDerivationData = ATC(4H) + 12 zero \
+                       hex chars.",
+            because: "PUGD0537-004. Verified live via round-trip: APC encrypt_data (EMV-CBC, built \
+                      from the same field values) mints the ciphertext, and the proxy's K0 recovers \
+                      the original plaintext across randomized PAN/PSN/ATC and 1..4 cipher blocks. \
+                      A wrong PAN/PSN/ATC offset derives a different session key, so the round-trip \
+                      would not close.",
+            wire: WireGrounding::DiffXprov,
+            crypto: CryptoGrounding::Apc,
+            proof: Proof::LiveTest("emv_decrypt_k0_differential"),
+        }]
     }
 
     async fn handle(

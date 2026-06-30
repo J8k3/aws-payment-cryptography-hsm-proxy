@@ -5,7 +5,7 @@
 
 Evidence for *why* each handler behaves as it does and *how* it was verified. Generated from `Handler::grounding()` — do not edit by hand. Grounding labels: wire `vec-thru` > `diff-xprov` > `cited` > `none`; crypto `vec` > `2impl` > `apc` > `none`.
 
-**Coverage:** 8 of 26 handlers carry grounding; 18 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
+**Coverage:** 10 of 26 handlers carry grounding; 16 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
 
 ## `C2`, `C4`, `M6`, `M8`
 
@@ -24,6 +24,18 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 - **G0 (BDK DUKPT translate) and BQ (Translate PIN Algorithm) return Unsupported (68).**
   - wire `none` · crypto `none` · gated (68): G0 needs DUKPT validation; BQ has no APC equivalent
   - G0 carries optional source/destination KSNs needing DUKPT validation against APC; BQ is the proprietary Visa→Racal LMK-PIN algorithm with no APC equivalent (PUGD0537-004 p.294). Gated rather than parsed from an unverified layout.
+
+## `CK`, `CM`, `CO`, `CQ`
+
+- **CK verifies a DUKPT-encrypted PIN against an IBM 3624 offset (original single-length DUKPT, Tdes2Key). The 12H wire offset is F-padded; the padding is stripped before the APC call.**
+  - wire `diff-xprov` · crypto `apc` · live test `dukpt_pin_verify_ck_differential`
+  - PUGD0538. Verified live: proxy CK verdict == APC verify_pin_data verdict (IBM3624 + DUKPT) for valid PINs across randomized PAN/KSN. CK had the same offset F-padding bug as GO (APC pin_offset is ^[0-9]+$) — fixed the same way.
+- **CM (Visa PVV DUKPT verify) returns Unsupported (68).**
+  - wire `none` · crypto `none` · gated (68): same APC single-call DUKPT+VisaPin 500 as GQ
+  - CM makes the byte-identical verify_pin_data + DukptAttributes + VisaPin call as GQ, which APC answers with InternalServerException (verified live for GQ, us-east-1 + us-west-2). Gated on that basis; the CM wire parser was removed. Workaround: translate the DUKPT PIN block to a ZPK, then verify the PVV non-DUKPT.
+- **CO (Diebold) and CQ (Encrypted PIN) DUKPT verify return Unsupported (68).**
+  - wire `none` · crypto `none` · gated (68): no APC equivalent (Diebold table / LMK-compare)
+  - Diebold indexes a conversion table in HSM user storage and CQ compares against an LMK-encrypted reference PIN — neither has an APC equivalent (APC verify_pin_data does IBM3624 offset / Visa PVV only).
 
 ## `CW`, `CY`, `NY`, `RY`
 
@@ -61,6 +73,12 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
   - wire `diff-xprov` · crypto `apc` · live test `encrypt_decrypt_he_hg_differential`
   - PUGD0538. Verified live: proxy HE ciphertext == APC encrypt_data (TDES-ECB, deterministic), and the HE→HG round-trip recovers the plaintext, over random plus all-zero / all-F blocks. Operational note (verified live): APC rejects encrypt+decrypt alone for a D0 key — the mapped key must use NoRestrictions (or encrypt+decrypt+wrap+unwrap) for both HE and HG to work.
 
+## `K0`
+
+- **K0 decrypts EMV-encrypted counters / application data under an IMK-ENC (E1) master key. APC derives an EMV session key (Option A) from the master key + PAN/PSN + ATC, then CBC-decrypts. Wire PAN+Seq is 8B BCD (Option-A pre-format); ATC and DataLen are 2B binary; ciphertext is binary and hex-encoded before the APC call. SessionDerivationData = ATC(4H) + 12 zero hex chars.**
+  - wire `diff-xprov` · crypto `apc` · live test `emv_decrypt_k0_differential`
+  - PUGD0537-004. Verified live via round-trip: APC encrypt_data (EMV-CBC, built from the same field values) mints the ciphertext, and the proxy's K0 recovers the original plaintext across randomized PAN/PSN/ATC and 1..4 cipher blocks. A wrong PAN/PSN/ATC offset derives a different session key, so the round-trip would not close.
+
 ## `MA`, `MC`, `ME`, `MK`, `MM`, `MO`, `MU`, `MW`, `MQ`, `MS`
 
 - **MA/MC ('~'-terminated) and MK/MM (3H-length-prefixed) generate/verify an ISO 9797-1 Alg1 MAC under a TAK. APC's Alg1 MAC is truncated to the 8H (4-byte) wire width.**
@@ -86,14 +104,12 @@ These handlers have no `grounding()` yet — the open documentation/testing gap.
 - `AQ`, `BA`, `BC`, `BE`, `BK`, `CG`, `DE`, `DG`, `EE`, `EG`, `FW`, `JC`, `JE`, `JG`, `LE`, `LG`, `LO`, `NG`, `EM`, `EU`, `EW`, `EY`, `GM`, `A0`, `A4`, `A6`, `A8`, `AA`, `AC`, `AE`, `AG`, `AK`, `AM`, `AS`, `AU`, `AW`, `BI`, `B0`, `B8`, `BG`, `BU`, `BW`, `BS`, `BY`, `CS`, `DW`, `DY`, `FA`, `FC`, `FE`, `FG`, `FK`, `GC`, `GE`, `GG`, `GK`, `GY`, `HA`, `HC`, `HY`, `IA`, `J6`, `J8`, `JK`, `K8`, `KA`, `KC`, `KG`, `KI`, `L0`, `LU`, `LW`, `MG`, `MI`, `N0`, `NC`, `NI`, `NO`, `Q0`, `Q6`, `Q8`, `QH`, `RA`, `SE`, `TG`, `TY`, `UI`, `VW`, `VY`, `WC`, `WQ`, `WW`, `WY`
 - `B2`
 - `CE`, `GA`
-- `CK`, `CM`, `CO`, `CQ`
 - `CU`, `DU`
 - `DA`, `DC`, `EA`, `EC`
 - `ECHO`
 - `JA`
 - `JS`
 - `JU`, `KU`, `KY`
-- `K0`
 - `K2`, `KS`
 - `KQ`
 - `KW`

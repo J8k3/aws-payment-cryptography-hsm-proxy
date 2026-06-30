@@ -2048,3 +2048,388 @@ async fn encrypt_decrypt_he_hg_differential() -> anyhow::Result<()> {
     survivor_result?;
     Ok(())
 }
+
+// ── Legacy single-length DUKPT PIN verify CK (live differential) ──────────────
+//
+// Un-audited handler (PUGD0538). CK verifies a DUKPT-encrypted PIN against an IBM
+// 3624 offset (original single-length DUKPT, Tdes2Key). Wire: BDK + PVK + KSN
+// descriptor(3H) + KSN(20H) + PIN block(16H) + check len(2N) + PAN(12N) + decim
+// table(16H) + PIN validation data(12A) + offset(12H, F-padded). Verdict
+// differential, like GO. (CM, the Visa-PVV sibling, is gated — same APC 500 as GQ.)
+
+const CK_BDK_LABEL: &str = "U00000000000000000000000000000C10";
+const CK_PVK_LABEL: &str = "U00000000000000000000000000000C11";
+
+#[allow(clippy::too_many_arguments)]
+fn encode_ck(
+    bdk_label: &str,
+    pvk_label: &str,
+    ksn: &str,
+    pin_block16: &str,
+    pan: &str,
+    decim: &str,
+    pvid: &str,
+    offset12: &str,
+) -> Vec<u8> {
+    let mut v = bdk_label.as_bytes().to_vec();
+    v.extend_from_slice(pvk_label.as_bytes());
+    v.extend_from_slice(b"000"); // KSN descriptor (3H, consumed)
+    v.extend_from_slice(ksn.as_bytes()); // 20H
+    v.extend_from_slice(pin_block16.as_bytes()); // 16H
+    v.extend_from_slice(b"04"); // check length
+    v.extend_from_slice(pan.as_bytes()); // 12N
+    v.extend_from_slice(decim.as_bytes()); // 16H decimalization table
+    v.extend_from_slice(pvid.as_bytes()); // 12A PIN validation data
+    v.extend_from_slice(offset12.as_bytes()); // 12H offset
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn dukpt_pin_verify_ck_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!("dukpt_pin_verify_ck_differential: grounding crypto=apc wire=diff-xprov(IBM3624 single-length DUKPT; verdict)");
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [
+        KeySpec {
+            role: "BDK",
+            wire_label: CK_BDK_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31B0BaseDerivationKey,
+            modes: KeyModesOfUse::builder().derive_key(true).build(),
+        },
+        KeySpec {
+            role: "PVK",
+            wire_label: CK_PVK_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31V1Ibm3624PinVerificationKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+        KeySpec {
+            role: "ZPK",
+            wire_label: "ZPK_UNUSED_IN_WIRE_CK",
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31P0PinEncryptionKey,
+            modes: KeyModesOfUse::builder()
+                .encrypt(true)
+                .decrypt(true)
+                .wrap(true)
+                .unwrap(true)
+                .build(),
+        },
+    ];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let bdk_arn = keys.arn("BDK").to_string();
+    let pvk_arn = keys.arn("PVK").to_string();
+    let zpk_arn = keys.arn("ZPK").to_string();
+    let bdk_label = keys.wire_label("BDK").to_string();
+    let pvk_label = keys.wire_label("PVK").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let ck = registry.get(b"CK").expect("CK registered");
+
+    const LABEL: &str = "dukpt_pin_verify_ck";
+    let ksn = "FFFF9876543210E00001"; // 3DES single-length DUKPT, 20H
+    let run = cases_to_run();
+    eprintln!(
+        "dukpt_pin_verify_ck_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let pvid = pan.clone();
+
+        // 1) IBM3624 natural-PIN block under the ZPK (offset 0).
+        let zblk = data
+            .generate_pin_data()
+            .generation_key_identifier(&pvk_arn)
+            .encryption_key_identifier(&zpk_arn)
+            .primary_account_number(&pan)
+            .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+            .generation_attributes(PinGenerationAttributes::Ibm3624NaturalPin(
+                Ibm3624NaturalPin::builder()
+                    .decimalization_table(GO_DECIM_TABLE)
+                    .pin_validation_data(&pvid)
+                    .pin_validation_data_pad_character("F")
+                    .build()?,
+            ))
+            .send()
+            .await?
+            .encrypted_pin_block()
+            .to_string();
+
+        // 2) Translate ZPK -> BDK DUKPT at this KSN.
+        let dblk = data
+            .translate_pin_data()
+            .incoming_key_identifier(&zpk_arn)
+            .outgoing_key_identifier(&bdk_arn)
+            .encrypted_pin_block(&zblk)
+            .incoming_translation_attributes(translate_iso(0, &pan)?)
+            .outgoing_translation_attributes(translate_iso(0, &pan)?)
+            .outgoing_dukpt_attributes(
+                aws_sdk_paymentcryptographydata::types::DukptDerivationAttributes::builder()
+                    .key_serial_number(ksn)
+                    .dukpt_key_derivation_type(DukptDerivationType::Tdes2Key)
+                    .build()?,
+            )
+            .send()
+            .await?
+            .pin_block()
+            .to_string();
+
+        let offset_wire = "0000FFFFFFFF"; // natural-PIN offset, F-padded to 12H
+
+        // 3) Proxy CK verdict.
+        let wire = encode_ck(
+            &bdk_label,
+            &pvk_label,
+            ksn,
+            &dblk,
+            &pan,
+            GO_DECIM_TABLE,
+            &pvid,
+            offset_wire,
+        );
+        let proxy = ck.handle(b"CK", &wire, &state).await;
+        let proxy_pass = &proxy.error_code == b"00";
+
+        // 4) Oracle verdict: direct APC verify_pin_data (IBM3624 + DUKPT).
+        let oracle = data
+            .verify_pin_data()
+            .verification_key_identifier(&pvk_arn)
+            .encryption_key_identifier(&bdk_arn)
+            .encrypted_pin_block(&dblk)
+            .primary_account_number(&pan)
+            .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+            .verification_attributes(PinVerificationAttributes::Ibm3624Pin(
+                Ibm3624PinVerification::builder()
+                    .decimalization_table(GO_DECIM_TABLE)
+                    .pin_validation_data(&pvid)
+                    .pin_validation_data_pad_character("F")
+                    .pin_offset("0000")
+                    .build()?,
+            ))
+            .dukpt_attributes(
+                DukptAttributes::builder()
+                    .key_serial_number(ksn)
+                    .dukpt_derivation_type(DukptDerivationType::Tdes2Key)
+                    .build()?,
+            )
+            .send()
+            .await;
+        let oracle_pass = oracle.is_ok();
+
+        if proxy_pass != oracle_pass {
+            eprintln!(
+                "{}",
+                replay_hint("dukpt_pin_verify_ck_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} CK verdict mismatch: proxy_pass={proxy_pass} (error_code={}) oracle_pass={oracle_pass} pan={pan}",
+                String::from_utf8_lossy(&proxy.error_code),
+            ));
+            break;
+        }
+        if !oracle_pass {
+            eprintln!(
+                "{}",
+                replay_hint("dukpt_pin_verify_ck_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} CK: constructed PIN should verify but both rejected it (pan={pan})"
+            ));
+            break;
+        }
+
+        eprintln!("case={case_idx:02} OK pan={pan} verdict=pass");
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+// ── EMV decrypt K0 (live differential, EMV-CBC round-trip) ────────────────────
+//
+// Un-audited handler (PUGD0537-004). K0 decrypts EMV-encrypted counters / app
+// data under an IMK-ENC (E1) master key: APC derives an EMV session key from the
+// master key + PAN/PSN + ATC, then CBC-decrypts. Wire (binary fields):
+//   KeyType(3H ASCII) || Key || PAN+Seq(8B BCD) || ATC(2B) || DataLen(2B BE) ||
+//   EncData(nB).
+//
+// Decrypt has a deterministic output, but a direct decrypt_data oracle would be
+// the *same call* the handler makes — trivially equal, proving nothing about the
+// wire parse. Instead the differential is a round-trip: APC encrypt_data (EMV-CBC,
+// built from the field values) mints the ciphertext; the proxy's K0 must recover
+// the original plaintext. A wrong field offset (PAN/PSN/ATC) derives a different
+// session key, so K0 yields garbage or errors — proxy ≠ plaintext.
+
+const K0_E1_WIRE_LABEL: &str = "U0000000000000000000000000000K0E1";
+
+/// 16 BCD hex digits → 8 bytes. EMV Option A pre-format = "00" ‖ PAN(12) ‖ PSN(2)
+/// (rightmost-16 of PAN‖PSN, left zero-padded), matching `decode_bcd_pan_seq`.
+fn pan_seq_bcd(pan12: &str, seq2: &str) -> Vec<u8> {
+    let hex = format!("00{pan12}{seq2}");
+    assert_eq!(hex.len(), 16, "pan_seq_bcd: expected 16 BCD digits");
+    hex_str_to_bytes(&hex)
+}
+
+/// Parse an even-length uppercase/lowercase hex string into bytes. Test-only.
+fn hex_str_to_bytes(hex: &str) -> Vec<u8> {
+    assert!(hex.len().is_multiple_of(2), "hex_str_to_bytes: odd length");
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("valid hex"))
+        .collect()
+}
+
+/// Encode a K0 wire frame per PUGD0537-004. Binary PAN/ATC/len/data fields.
+fn encode_k0(key_label: &str, pan_seq: &[u8], atc: [u8; 2], cipher_bytes: &[u8]) -> Vec<u8> {
+    let mut v = b"00E".to_vec(); // key type 3H ASCII — consumed
+    v.extend_from_slice(key_label.as_bytes());
+    v.extend_from_slice(pan_seq); // 8B BCD
+    v.extend_from_slice(&atc); // 2B ATC
+    let len = u16::try_from(cipher_bytes.len()).expect("ciphertext < 64KiB");
+    v.extend_from_slice(&len.to_be_bytes()); // 2B BE DataLen
+    v.extend_from_slice(cipher_bytes); // nB ciphertext
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn emv_decrypt_k0_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "emv_decrypt_k0_differential: grounding crypto=apc \
+         wire=diff-xprov(EMV-CBC encrypt→K0-decrypt round-trip)"
+    );
+
+    use aws_sdk_paymentcryptographydata::types::{
+        EmvEncryptionAttributes, EmvEncryptionMode, EmvMajorKeyDerivationMode,
+        EncryptionDecryptionAttributes,
+    };
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "E1",
+        wire_label: K0_E1_WIRE_LABEL,
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31E1EmvMkeyConfidentiality,
+        modes: KeyModesOfUse::builder().derive_key(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let e1_arn = keys.arn("E1").to_string();
+    let e1_label = keys.wire_label("E1").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let k0 = registry.get(b"K0").expect("K0 handler registered");
+
+    const LABEL: &str = "emv_decrypt_k0";
+    let run = cases_to_run();
+    eprintln!(
+        "emv_decrypt_k0_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let seq = format!("{:02}", edge_biased(&mut rng, 0, 99, &[0, 1, 99]));
+        // ATC (2B). Edge-biased over the 16-bit counter range.
+        let atc_val = edge_biased(&mut rng, 0, 0xFFFF, &[1, 0x2A, 0xFFFF]) as u16;
+        let atc = atc_val.to_be_bytes();
+        let atc_hex = hex_upper(&atc); // 4 hex chars
+
+        // CBC plaintext: whole TDES blocks (8B). Edge-biased over 1..4 blocks.
+        let blocks = edge_biased(&mut rng, 1, 4, &[1, 2, 4]);
+        let plain_hex = gen_hex_message(&mut rng, blocks * 8);
+
+        // EMV-CBC attributes shared by the encrypt oracle and (rebuilt) the K0
+        // handler: same PAN/PSN/ATC ⇒ same session key ⇒ round-trip recovers plain.
+        let sdd = format!("{atc_hex}000000000000"); // ATC(4H) + 12 zero hex = 16H
+        let emv = || -> anyhow::Result<EmvEncryptionAttributes> {
+            Ok(EmvEncryptionAttributes::builder()
+                .major_key_derivation_mode(EmvMajorKeyDerivationMode::EmvOptionA)
+                .primary_account_number(&pan)
+                .pan_sequence_number(&seq)
+                .session_derivation_data(&sdd)
+                .mode(EmvEncryptionMode::Cbc)
+                .build()?)
+        };
+
+        // 1) Oracle encrypt → ciphertext (hex).
+        let cipher_hex = data
+            .encrypt_data()
+            .key_identifier(&e1_arn)
+            .plain_text(&plain_hex)
+            .encryption_attributes(EncryptionDecryptionAttributes::Emv(emv()?))
+            .send()
+            .await?
+            .cipher_text()
+            .to_string();
+
+        // 2) Proxy K0 decrypt. Wire carries the ciphertext as raw bytes; the
+        //    handler hex-encodes it back before calling APC.
+        let wire = encode_k0(
+            &e1_label,
+            &pan_seq_bcd(&pan, &seq),
+            atc,
+            &hex_str_to_bytes(&cipher_hex),
+        );
+        let proxy = k0.handle(b"K0", &wire, &state).await;
+        if &proxy.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("emv_decrypt_k0_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} K0 error_code={} (pan={pan} seq={seq} atc={atc_hex} blocks={blocks})",
+                String::from_utf8_lossy(&proxy.error_code),
+            ));
+            break;
+        }
+        let proxy_plain = String::from_utf8(proxy.payload.to_vec())?;
+
+        if !proxy_plain.eq_ignore_ascii_case(&plain_hex) {
+            eprintln!(
+                "{}",
+                replay_hint("emv_decrypt_k0_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} K0 round-trip mismatch: proxy={proxy_plain} expected={plain_hex} \
+                 (pan={pan} seq={seq} atc={atc_hex} blocks={blocks})"
+            ));
+            break;
+        }
+
+        eprintln!("case={case_idx:02} OK pan={pan} seq={seq} atc={atc_hex} blocks={blocks}");
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}

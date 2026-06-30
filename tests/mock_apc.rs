@@ -516,45 +516,6 @@ async fn thales_ck_verify_pin_mismatch_returns_01() {
     assert_eq!(&result.error_code, b"01", "PIN mismatch → 01");
 }
 
-// ── DUKPT PIN verify — CM (Visa PVV) ─────────────────────────────────────────
-
-#[tokio::test]
-async fn thales_cm_verify_pin_success() {
-    let mock = MockApc::start().await;
-    let mut keys = HashMap::new();
-    keys.insert(
-        "12345678901234561234567890123456".to_string(),
-        "arn:mock:bdk".to_string(),
-    );
-    keys.insert(
-        "12345678901234561234567890123456".to_string(), // reuse same label for simplicity
-        "arn:mock:pvk".to_string(),
-    );
-    // Actually use distinct labels
-    keys.insert(
-        "ABCDEF1234567890ABCDEF1234567890".to_string(),
-        "arn:mock:pvk".to_string(),
-    );
-    let state = mock_state(&mock.url, keys).await;
-
-    let registry = Registry::build();
-    let handler = registry.get(b"CM").expect("CM registered");
-
-    // CM payload: BDK(32) + PVK(32) + KSN_desc(3) + KSN(20) + PIN_block(16) +
-    //             PAN(12) + PVKI(1) + PVV(4)
-    let mut payload = b"12345678901234561234567890123456".to_vec(); // BDK 32H
-    payload.extend_from_slice(b"ABCDEF1234567890ABCDEF1234567890"); // PVK 32H
-    payload.extend_from_slice(b"00A"); // KSN descriptor
-    payload.extend_from_slice(b"12345678901234567890"); // KSN 20H
-    payload.extend_from_slice(b"1234567890ABCDEF"); // PIN block 16H
-    payload.extend_from_slice(b"123456789012"); // PAN 12N
-    payload.extend_from_slice(b"1"); // PVKI
-    payload.extend_from_slice(b"1234"); // PVV 4N
-
-    let result = handler.handle(b"CM", &payload, &state).await;
-    assert_eq!(&result.error_code, b"00");
-}
-
 // ── Encrypt/Decrypt Data Block (HE/HG) ───────────────────────────────────────
 
 #[tokio::test]
@@ -1081,6 +1042,14 @@ async fn unsupported_command_returns_68() {
         .get(b"CQ")
         .expect("CQ registered in dukpt_pin_verify");
     let result = handler.handle(b"CQ", b"", &state).await;
+    assert_eq!(&result.error_code, b"68");
+
+    // CM (Visa PVV DUKPT verify) is gated: it makes the same verify_pin_data +
+    // DukptAttributes + VisaPin call as GQ, which APC answers with a 500.
+    let handler = registry
+        .get(b"CM")
+        .expect("CM registered in dukpt_pin_verify");
+    let result = handler.handle(b"CM", b"", &state).await;
     assert_eq!(&result.error_code, b"68");
 
     // GS is explicitly unsupported (AES DUKPT Diebold method — no APC equivalent);
