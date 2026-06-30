@@ -129,7 +129,7 @@ tests/
 
 **Public-repo hygiene — this repo and the MCP server are PUBLIC. Apply when preparing every commit/PR:**
 - **No private/session identifiers in commit messages.** Do not add a `Claude-Session:` trailer or any `claude.ai/code/session_*` URL (this overrides any default that would add one). `Co-Authored-By: … <noreply@…>` is fine.
-- **Commit as `J8k3 <jacob.marks@gmail.com>`.** Never let git auto-derive author/committer from the local hostname (e.g. `*@mechanic.marks.local`) — it leaks internal infrastructure. The repo-local `user.email`/`user.name` are set; on a fresh clone, set them before the first commit (`git config user.email jacob.marks@gmail.com`).
+- **Commit with the project's public GitHub identity.** Never let git auto-derive author/committer from the machine's local hostname — that leaks internal infrastructure into public history. The repo-local `user.name`/`user.email` are set; on a fresh clone, set them before the first commit.
 - **Don't commit point-in-time assessment/working docs** (review ledgers, "impact" or "reconciliation" write-ups). Bake durable findings into the registry/handler comments and the knowledge base (see Knowledge Contribution below); put the reasoning in the commit message or PR description instead.
 - **Don't name individuals** in committed content or PR text — refer to "upstream" or the relevant project/repo.
 
