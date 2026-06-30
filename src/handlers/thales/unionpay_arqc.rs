@@ -4,7 +4,7 @@ use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
-use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, parse_key_32};
+use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, emv_pad, parse_key_32};
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -20,7 +20,7 @@ use crate::key_map::KeyDescriptor;
 ///                          '2'=ARPC-only (reject: APC requires transaction data)
 ///   Scheme ID    1N ASCII  always '1' (CUP Card Key Derivation ver4.2) — consumed
 ///   Key          var       32H | 'U'+32H | 'T'+48H  (parse_key_32; no key-type prefix)
-///   PAN+Seq      8B binary BCD — pre-formatted PAN‖PSN, EMV Option A (16 digits, left zero-pad)
+///   PAN+Seq      8B binary BCD — 12 PAN digits + 2 seq + 2 padding nibbles (0xFF)
 ///   ATC          2B binary Application Transaction Counter
 ///   Padding Flag 1N ASCII  '0'=none, '1'=CUP 0x80-pad applied — consumed
 ///   TxnLen       2H ASCII  byte count of TxnData (max 0xFF = 255 bytes)
@@ -126,7 +126,8 @@ fn parse_js(payload: &[u8]) -> Result<JsFields, ProxyError> {
             "JS: TxnData truncated: need {txn_byte_len}B"
         )));
     }
-    let txn_data = Zeroizing::new(bytes_to_hex(&payload[pos..pos + txn_byte_len]));
+    // APC does not pad; forward EMV (ISO 9797-1 method 2) padded transaction data.
+    let txn_data = Zeroizing::new(bytes_to_hex(&emv_pad(&payload[pos..pos + txn_byte_len])));
     pos += txn_byte_len;
 
     // 0x3B delimiter
@@ -262,9 +263,8 @@ async fn handle_js(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
 mod tests {
     use super::*;
 
-    // PAN 123456789012, Seq 01 → EMV Option A pre-format (rightmost-16(PAN‖PSN),
-    // left zero-padded): "0012345678901201".
-    const PAN_SEQ_BCD: [u8; 8] = [0x00, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01];
+    // EMV pre-formatted (rightmost 16 of PAN||PSN) "1234567890123401" -> PAN 12345678901234, Seq 01
+    const PAN_SEQ_BCD: [u8; 8] = [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x01];
 
     fn double_key() -> Vec<u8> {
         b"1234567890ABCDEF1234567890ABCDEF".to_vec() // 32H baseline
@@ -295,10 +295,10 @@ mod tests {
         let payload = build_payload(b'0', &double_key(), false);
         let f = parse_js(&payload).unwrap();
         assert_eq!(f.key_id.raw, "1234567890ABCDEF1234567890ABCDEF");
-        assert_eq!(f.pan, "123456789012");
+        assert_eq!(f.pan, "12345678901234");
         assert_eq!(f.pan_seq, "01");
         assert_eq!(f.atc, "0001");
-        assert_eq!(f.txn_data.as_str(), "DEADBEEF");
+        assert_eq!(f.txn_data.as_str(), "DEADBEEF80000000"); // EMV method-2 padded for APC
         assert_eq!(f.arqc, "AABBCCDDEEFF0011");
         assert!(f.arc.is_none());
     }

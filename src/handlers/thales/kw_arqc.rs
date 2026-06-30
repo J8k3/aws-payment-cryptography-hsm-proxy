@@ -4,7 +4,9 @@ use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
-use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, parse_legacy_key};
+use crate::handlers::thales::common::{
+    build_session_key, bytes_to_hex, decode_bcd_pan_seq, emv_pad, parse_legacy_key, EmvSession,
+};
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -16,12 +18,15 @@ use crate::key_map::KeyDescriptor;
 ///                              '1'=verify + ARPC Method 1 (ARC)
 ///                              '2'=verify + ARPC Method 2 (CSU)
 ///                              '3'/'4'=skip-verify ARPC (not supported by APC)
-///   Scheme ID        1N ASCII  '0'=Visa/Amex → EmvOptionA
-///                              '1'=Mastercard → EmvOptionB
-///   Derivation Method 1A ASCII 'A'=EMV_OPTION_A, 'B'=EMV_OPTION_B (used for session key)
+///   Scheme ID        1A ASCII  selects major mode + session-key method (p.471):
+///                              '0'=Option A + EMV2000   '1'=Option B + EMV2000
+///                              '2'=Option A + EMV Common '3'=Option B + EMV Common
+///                              '5'=MC cloud: Option A + EMV Common
+///                              (Option C '9', JCB, UnionPay, cloud/LUK: no APC map)
+///   Derivation Method 1A ASCII 'A'/'B' (consumed; see note below)
 ///   Key Type         3H ASCII  consumed
 ///   Key              var       16H | 'U'+32H | 'T'+48H
-///   PAN+Seq          8B binary BCD — pre-formatted PAN‖PSN, EMV Option A (16 digits, left zero-pad)
+///   PAN+Seq          8B binary BCD — EMV pre-formatted: rightmost 16 of (PAN||PSN), left 0-padded
 ///   ATC              2B binary Application Transaction Counter
 ///   UN               4B binary Unpredictable Number
 ///   TxnLen           2B binary big-endian byte count of transaction data
@@ -33,10 +38,10 @@ use crate::key_map::KeyDescriptor;
 ///            PAD_len 1B binary byte count of proprietary auth data
 ///            PAD     nB binary
 ///
-/// KW extends KQ with Visa CVN14/CVN18/CVN22 and Mastercard M/Chip SKD variants.
-/// The Derivation Method byte ('A'/'B') selects the session key derivation algorithm;
-/// it maps to the same MajorKeyDerivationMode as Scheme ID in KQ, so the proxy
-/// uses Scheme ID for the APC parameter and consumes Derivation Method.
+/// KW covers the EMV / Cloud-Based SKD methods (EMV2000 and EMV Common Session
+/// Key). Unlike KQ, the Scheme ID encodes the major derivation mode too (Option A
+/// for even codes, Option B for odd), so both are taken from Scheme ID. The
+/// Derivation Method byte is still consumed for wire compatibility.
 pub struct KwArqcHandler;
 
 #[derive(Debug)]
@@ -60,9 +65,11 @@ struct KwFields {
     key_id: KeyDescriptor,
     mode: KwMode,
     deriv_mode_a: bool,
+    session: EmvSession,
     pan: String,
     pan_seq: String,
     atc: String,
+    un: String,
     txn_data: Zeroizing<String>,
     arqc: String,
     arpc_params: Option<ArpcParams>,
@@ -97,19 +104,29 @@ fn parse_kw(payload: &[u8]) -> Result<KwFields, ProxyError> {
     if payload.len() < pos + 1 {
         return Err(ProxyError::MalformedPayload("KW: scheme ID missing".into()));
     }
-    let deriv_mode_a = match payload[pos] {
-        b'0' => true,  // Visa/Amex → EmvOptionA
-        b'1' => false, // Mastercard → EmvOptionB
+    // Scheme ID selects BOTH major mode and session method (PUGD0537-004 p.471).
+    let (deriv_mode_a, session) = match payload[pos] {
+        b'0' => (true, EmvSession::Emv2000),  // Option A + EMV2000
+        b'1' => (false, EmvSession::Emv2000), // Option B + EMV2000
+        // '2' = Option A + EMV Common; '5' = Mastercard cloud (also Option A + EMV Common)
+        b'2' | b'5' => (true, EmvSession::EmvCommon),
+        b'3' => (false, EmvSession::EmvCommon), // Option B + EMV Common
+        b'4' | b'6' | b'7' | b'8' | b'9' | b'A' | b'B' | b'C' => {
+            return Err(ProxyError::Unsupported(format!(
+                "KW scheme '{}' (cloud/LUK/Option-C/JCB/UnionPay SKD) has no APC equivalent",
+                payload[pos] as char
+            )))
+        }
         other => {
             return Err(ProxyError::MalformedPayload(format!(
-                "KW: invalid scheme ID '{}' (0=Visa/Amex, 1=MC)",
+                "KW: invalid scheme ID '{}'",
                 other as char
             )))
         }
     };
     pos += 1;
 
-    // Derivation Method (1A ASCII) — consumed; redundant with Scheme ID for APC
+    // Derivation Method (1A ASCII) — consumed for wire compatibility
     if payload.len() < pos + 1 {
         return Err(ProxyError::MalformedPayload(
             "KW: derivation method missing".into(),
@@ -152,11 +169,12 @@ fn parse_kw(payload: &[u8]) -> Result<KwFields, ProxyError> {
     let atc = bytes_to_hex(&payload[pos..pos + 2]);
     pos += 2;
 
-    // UN (4B binary)
+    // UN (4B binary) — forwarded; required by the Mastercard proprietary SKD
     if payload.len() < pos + 4 {
         return Err(ProxyError::MalformedPayload("KW: UN missing".into()));
     }
-    pos += 4; // UN: parsed for position only; not forwarded (see KNOWN GAP in EmvCommon comment)
+    let un = bytes_to_hex(&payload[pos..pos + 4]);
+    pos += 4;
 
     // TxnLen (2B binary big-endian)
     if payload.len() < pos + 2 {
@@ -173,7 +191,8 @@ fn parse_kw(payload: &[u8]) -> Result<KwFields, ProxyError> {
             "KW: transaction data too short: need {txn_byte_len} bytes"
         )));
     }
-    let txn_data = Zeroizing::new(bytes_to_hex(&payload[pos..pos + txn_byte_len]));
+    // APC does not pad; forward EMV (ISO 9797-1 method 2) padded data.
+    let txn_data = Zeroizing::new(bytes_to_hex(&emv_pad(&payload[pos..pos + txn_byte_len])));
     pos += txn_byte_len;
 
     // Delimiter 0x3B
@@ -237,9 +256,11 @@ fn parse_kw(payload: &[u8]) -> Result<KwFields, ProxyError> {
         key_id,
         mode,
         deriv_mode_a,
+        session,
         pan,
         pan_seq,
         atc,
+        un,
         txn_data,
         arqc,
         arpc_params,
@@ -275,8 +296,7 @@ async fn handle_kw(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
 
     use aws_sdk_paymentcryptographydata::types::{
         CryptogramAuthResponse, CryptogramVerificationArpcMethod1,
-        CryptogramVerificationArpcMethod2, MajorKeyDerivationMode, SessionKeyDerivation,
-        SessionKeyEmvCommon,
+        CryptogramVerificationArpcMethod2, MajorKeyDerivationMode,
     };
 
     let deriv_mode = if fields.deriv_mode_a {
@@ -285,23 +305,16 @@ async fn handle_kw(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         MajorKeyDerivationMode::EmvOptionB
     };
 
-    let emv_common = match SessionKeyEmvCommon::builder()
-        .application_transaction_counter(&fields.atc)
-        .pan_sequence_number(&fields.pan_seq)
-        .primary_account_number(&fields.pan)
-        .build()
-        .map_err(|e: aws_sdk_paymentcryptographydata::error::BuildError| {
-            ProxyError::ApcError(e.to_string())
-        }) {
-        Ok(a) => a,
+    let session_key_attrs = match build_session_key(
+        fields.session,
+        &fields.pan,
+        &fields.pan_seq,
+        &fields.atc,
+        &fields.un,
+    ) {
+        Ok(s) => s,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
-
-    // KNOWN GAP: same EmvCommon limitation as KQ — see kq_arqc.rs for details.
-    // KW adds CVN14/CVN18/CVN22 and M/Chip SKD variants (via the Derivation Method byte),
-    // but the command does not carry enough information to auto-select the correct APC
-    // SessionKeyDerivation variant (Visa, Mastercard, or EmvCommon).
-    let session_key_attrs = SessionKeyDerivation::EmvCommon(emv_common);
 
     let auth_response_attrs: Option<CryptogramAuthResponse> = match fields.arpc_params {
         Some(ArpcParams::Method1 {
@@ -342,6 +355,7 @@ async fn handle_kw(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         key = %key_arn,
         mode = ?fields.mode,
         deriv = if fields.deriv_mode_a { "EmvOptionA" } else { "EmvOptionB" },
+        session = ?fields.session,
         "KW: verify_auth_request_cryptogram"
     );
 
@@ -384,10 +398,9 @@ mod tests {
         b"1234567890ABCDEF".to_vec() // 16H single-length
     }
 
-    // PAN 123456789012, Seq 01 → EMV Option A pre-format (rightmost-16(PAN‖PSN),
-    // left zero-padded): "0012345678901201".
+    // EMV pre-formatted (rightmost 16 of PAN||PSN) "1234567890123401" -> PAN 12345678901234, Seq 01
     fn pan_bcd() -> [u8; 8] {
-        [0x00, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01]
+        [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x01]
     }
 
     fn kw_prefix(mode: u8, scheme: u8, deriv: u8, key: &[u8], txn: &[u8]) -> Vec<u8> {
@@ -410,10 +423,12 @@ mod tests {
         let payload = kw_prefix(b'0', b'0', b'A', &single_key(), &[0xDE, 0xAD]);
         let f = parse_kw(&payload).unwrap();
         assert!(matches!(f.mode, KwMode::VerifyOnly));
-        assert!(f.deriv_mode_a);
-        assert_eq!(f.pan, "123456789012");
+        assert!(f.deriv_mode_a); // scheme '0' = Option A
+        assert_eq!(f.session, EmvSession::Emv2000); // scheme '0' = EMV2000
+        assert_eq!(f.pan, "12345678901234");
         assert_eq!(f.pan_seq, "01");
         assert_eq!(f.atc, "0001");
+        assert_eq!(f.un, "DEADBEEF");
         assert_eq!(f.arqc, "AABBCCDDEEFF0011");
         assert!(f.arpc_params.is_none());
     }
@@ -431,10 +446,33 @@ mod tests {
     }
 
     #[test]
-    fn kw_parse_mastercard_scheme() {
+    fn kw_parse_option_b_emv2000_scheme() {
+        // Scheme '1' = Option B + EMV2000.
         let payload = kw_prefix(b'0', b'1', b'B', &single_key(), &[]);
         let f = parse_kw(&payload).unwrap();
         assert!(!f.deriv_mode_a);
+        assert_eq!(f.session, EmvSession::Emv2000);
+    }
+
+    #[test]
+    fn kw_parse_emv_common_schemes() {
+        // Scheme '2' = Option A + EMV Common; scheme '3' = Option B + EMV Common.
+        let f2 = parse_kw(&kw_prefix(b'0', b'2', b'A', &single_key(), &[])).unwrap();
+        assert!(f2.deriv_mode_a);
+        assert_eq!(f2.session, EmvSession::EmvCommon);
+        let f3 = parse_kw(&kw_prefix(b'0', b'3', b'B', &single_key(), &[])).unwrap();
+        assert!(!f3.deriv_mode_a);
+        assert_eq!(f3.session, EmvSession::EmvCommon);
+    }
+
+    #[test]
+    fn kw_rejects_unsupported_scheme() {
+        // Option C / JCB / UnionPay / cloud-LUK have no APC equivalent.
+        let payload = kw_prefix(b'0', b'9', b'A', &single_key(), &[]);
+        assert!(matches!(
+            parse_kw(&payload),
+            Err(ProxyError::Unsupported(_))
+        ));
     }
 
     #[test]

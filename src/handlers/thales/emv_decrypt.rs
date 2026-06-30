@@ -17,7 +17,7 @@ use crate::key_map::KeyDescriptor;
 /// K0 (→ K1) wire format per PUGD0537-004:
 ///   Key Type    3H ASCII    consumed (E1 — IMK-ENC)
 ///   Key         var         16H | 'U'+32H | 'T'+48H
-///   PAN+Seq     8B binary   BCD — pre-formatted PAN‖PSN, EMV Option A (16 digits, left zero-pad)
+///   PAN+Seq     8B binary   BCD — 12 PAN digits + 2 seq digits, right-padded 0xFF
 ///   ATC         2B binary   Application Transaction Counter
 ///   DataLen     2B binary   big-endian byte count of encrypted data
 ///   EncData     nB binary   ciphertext
@@ -176,10 +176,9 @@ mod tests {
         b"1234567890ABCDEF".to_vec()
     }
 
-    // PAN 123456789012, Seq 01 → EMV Option A pre-format (rightmost-16(PAN‖PSN),
-    // left zero-padded): "0012345678901201".
+    // EMV pre-formatted (rightmost 16 of PAN||PSN) "1234567890123401" -> PAN 12345678901234, Seq 01
     fn pan_bcd() -> [u8; 8] {
-        [0x00, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01]
+        [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x01]
     }
 
     fn k0_payload(key: &[u8], data: &[u8]) -> Vec<u8> {
@@ -199,7 +198,7 @@ mod tests {
         let payload = k0_payload(&single_key(), &data);
         let f = parse_k0(&payload).unwrap();
         assert_eq!(f.key_id.raw, "1234567890ABCDEF");
-        assert_eq!(f.pan, "123456789012");
+        assert_eq!(f.pan, "12345678901234");
         assert_eq!(f.pan_seq, "01");
         assert_eq!(f.atc, "002A");
         assert_eq!(f.cipher_text.as_str(), "DEADBEEFCAFE0001");

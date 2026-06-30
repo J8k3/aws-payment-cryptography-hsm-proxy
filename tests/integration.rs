@@ -1,5 +1,17 @@
 //! Integration tests against real HSM hardware or a simulator.
 //!
+//! !!! STALE — DO NOT TRUST THE VECTORS HERE !!!
+//!
+//! These tests predate the `fix/pin-block-format-mapping` handler audit and
+//! encode the *old fabricated* wire formats (e.g. `C2 [mode][32H key]`, `CW`
+//! with a mode byte, `CA` with `00/01/03/04` format codes, `M6` half-MAC = 2
+//! bytes), and several now reference commands that have been gated (`LQ`/`JU`/
+//! `KU`/`KY`). They also map against a standing test-key pool that has since
+//! been deleted. Correctness coverage is moving to the in-process differential
+//! property harness — see `docs/property-testing-plan.md`. Until rewritten,
+//! treat passing/failing results here as meaningless. The framing helpers
+//! (`make_thales_frame`, `parse_thales_response`) are still reusable.
+//!
 //! All tests here are `#[ignore]` by default. Run them with:
 //!
 //!   cargo test --test integration -- --ignored
@@ -785,11 +797,11 @@ fn thales_gw_dukpt_alg3_mac_roundtrip() {
 fn thales_kq_arqc_verify_reaches_apc() {
     let mut payload = Vec::new();
     payload.push(b'0'); // mode 0 = verify ARQC only
-    payload.push(b'0'); // scheme 0 = Visa/Amex EmvOptionA
+    payload.push(b'1'); // scheme 1 = Mastercard M/Chip (Option A + Mastercard SKD)
     payload.extend_from_slice(b"000"); // key type 3H (consumed)
     payload.extend_from_slice(b"LTEST_E0IMK_0001"); // E0 AES-256 key 16H
-                                                    // PAN+seq BCD: PAN 411111111111 (6 bytes) + seq 01 (1 byte) + 0xFF pad
-    payload.extend_from_slice(&[0x41, 0x11, 0x11, 0x11, 0x11, 0x11, 0x01, 0xFF]);
+                                                    // PAN/PSN: EMV pre-formatted, rightmost 16 of (PAN 4111111111111111 || PSN 01) = 1111111111111101
+    payload.extend_from_slice(&[0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x01]);
     payload.extend_from_slice(&[0x00, 0x01]); // ATC = 0x0001
     payload.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]); // UN
     payload.extend_from_slice(&[0x00, 0x10]); // txn_data length = 16 bytes

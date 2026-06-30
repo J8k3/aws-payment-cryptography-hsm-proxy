@@ -4,100 +4,140 @@ use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
+use crate::handlers::thales::common::parse_legacy_key;
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
-/// payShield PIN translation commands: CA, CC, BQ (static PEK) and CI, G0 (DUKPT).
+/// payShield PIN translation commands.
 ///
-/// All five map to APC TranslatePinData. CI/G0 additionally supply a KSN
-/// for DUKPT key derivation. BQ is PIN block format conversion (same wire layout
-/// as CA/CC; source and destination keys may be the same or different).
+/// CC (→ CD) — Translate a PIN from one ZPK to another        → translate_pin_data
+/// CA (→ CB) — Translate a PIN from TPK to ZPK (3DES DUKPT)    → translate_pin_data
+/// G0 (→ G1) — Translate a PIN from BDK to BDK/ZPK (DUKPT)     → [unsupported, see below]
+/// BQ (→ BR) — Translate PIN Algorithm                        → [unsupported, see below]
 ///
-/// Field layout:
-///   [0]       source key type   1 byte  ('0'=TDES, '1'=AES)
-///   [1]       dest key type     1 byte
-///   [2..34]   source key        32 hex chars (LMK-encrypted key — mapped via key_map)
-///   [34..66]  dest key          32 hex chars
-///   [66..68]  max PIN length    2 decimal chars
-///   [68..70]  source PIN format 2 chars ("00"=ISO0 … "04"=ISO4)
-///   [70..72]  dest PIN format   2 chars
-///   [72..88]  encrypted PIN block 16 hex chars  ← never logged
-///   [88..100] account number    12 chars (rightmost 12 PAN excl check digit)
-///   [100..120] KSN              20 hex chars (CI/G0 only)
+/// CC / CA wire format (PUGD0537-004 Rev A, p.282 / p.285 — AUTHORITATIVE):
+///   Source key        16H | 'U'+32H | 'T'+48H | 'S'+keyblock   (CC: ZPK, CA: TPK)
+///   [CA only] Destination Key Flag  1A  ('*' = BDK-1, '~' = BDK-2) — DUKPT dest
+///   Destination key   16H | 'U'+32H | 'T'+48H | 'S'+keyblock   (ZPK)
+///   Maximum PIN Length  2N
+///   Source PIN Block    16H (DES) | 32H (AES, ISO format 4)
+///   Source PIN Block Format Code       2N
+///   Destination PIN Block Format Code  2N
+///   PAN/Token           12N (rightmost 12 excl. check digit, for formats 01/05/47)
 ///
-/// NOTE: Field offsets sourced from EFTlab community reference. Validate against
-/// the official Thales payShield Host Command Reference Manual before production use.
+/// The PIN block format codes are the standard Thales 2N values:
+///   '01' = ISO 9564-1 Format 0 (ANSI X9.8)
+///   '04' = Plus network format        (no APC equivalent)
+///   '05' = ISO 9564-1 Format 1
+///   '47' = ISO 9564-1 Format 3
+///   '48' = ISO 9564-1 Format 4        (AES, 32H block, variable PAN+delimiter)
 ///
-/// KNOWN GAP: APC TranslatePinData requires the full PAN, but payShield CA/CC
-/// provide only the 12-char account number. The proxy passes this value as-is.
+/// SCOPE: this handler implements the common static 3DES path — CC and CA where
+/// the destination is a ZPK and the source/destination formats are 0/1/3 (DES,
+/// 16H block, 12N PAN). The following are returned as Unsupported (payShield 68)
+/// rather than parsed from an unverified layout:
+///   - Format '04' (Plus): no APC equivalent.
+///   - Format '48' (ISO 4): needs a 32H AES block and the ISO-4 variable
+///     PAN+delimiter encoding, which must be validated against live APC first.
+///   - CA with a '*'/'~' Destination Key Flag (DUKPT destination).
+///   - G0 (source BDK DUKPT) and BQ (Translate PIN Algorithm): distinct layouts
+///     with optional source/destination KSNs that require DUKPT validation.
+///     (The previous handler mapped a non-existent 'CI' command and a fabricated
+///     fixed-width layout with leading key-type bytes and a '00/01/03/04' format
+///     scheme that matches no real Thales message.)
 pub struct PinHandler;
 
-const CA_MIN_LEN: usize = 100;
-const KSN_HEX_LEN: usize = 20;
+const MAX_PIN_LEN_FIELD: usize = 2;
+const PIN_BLOCK_DES: usize = 16;
+const FMT_CODE_LEN: usize = 2;
+const ACCOUNT_LEN: usize = 12;
 
-#[derive(Debug)]
-struct PinFields {
-    source_key_id: String,
-    dest_key_id: String,
-    source_format: String,
-    dest_format: String,
-    pin_block: Zeroizing<String>,
-    account_number: String,
-    ksn: Option<String>,
+/// ISO PIN block format selected by a Thales 2N format code, restricted to the
+/// DES formats this handler translates.
+#[derive(Clone, Copy)]
+enum IsoFmt {
+    F0,
+    F1,
+    F3,
 }
 
-fn parse_ca_cc(payload: &[u8]) -> Result<PinFields, ProxyError> {
-    if payload.len() < CA_MIN_LEN {
-        return Err(ProxyError::MalformedPayload(format!(
-            "CA/CC payload too short: {} < {}",
-            payload.len(),
-            CA_MIN_LEN
-        )));
-    }
-    Ok(PinFields {
-        source_key_id: String::from_utf8_lossy(&payload[2..34]).to_string(),
-        dest_key_id: String::from_utf8_lossy(&payload[34..66]).to_string(),
-        source_format: format_code_to_apc(&payload[68..70])?,
-        dest_format: format_code_to_apc(&payload[70..72])?,
-        pin_block: Zeroizing::new(String::from_utf8_lossy(&payload[72..88]).to_string()),
-        account_number: String::from_utf8_lossy(&payload[88..100]).to_string(),
-        ksn: None,
-    })
-}
-
-fn parse_ci_g0(payload: &[u8]) -> Result<PinFields, ProxyError> {
-    if payload.len() < CA_MIN_LEN + KSN_HEX_LEN {
-        return Err(ProxyError::MalformedPayload(format!(
-            "CI/G0 payload too short: {} < {}",
-            payload.len(),
-            CA_MIN_LEN + KSN_HEX_LEN
-        )));
-    }
-    let mut fields = parse_ca_cc(payload)?;
-    fields.ksn = Some(String::from_utf8_lossy(&payload[100..100 + KSN_HEX_LEN]).to_string());
-    Ok(fields)
-}
-
-fn format_code_to_apc(code: &[u8]) -> Result<String, ProxyError> {
+fn map_translate_format(code: &[u8]) -> Result<IsoFmt, ProxyError> {
     match code {
-        b"00" => Ok("IsoFormat0".to_string()),
-        b"01" => Ok("IsoFormat1".to_string()),
-        // ISO Format 2 uses random padding and is not a network PIN block format;
-        // APC does not support it for translation.
-        b"02" => Err(ProxyError::UnsupportedPinFormat(
-            "02 (ISO Format 2 not supported by APC)".to_string(),
+        b"01" => Ok(IsoFmt::F0),
+        b"05" => Ok(IsoFmt::F1),
+        b"47" => Ok(IsoFmt::F3),
+        b"04" => Err(ProxyError::Unsupported(
+            "PIN block format '04' (Plus) has no APC equivalent".into(),
         )),
-        b"03" => Ok("IsoFormat3".to_string()),
-        b"04" => Ok("IsoFormat4".to_string()),
+        b"48" => Err(ProxyError::Unsupported(
+            "PIN block format '48' (ISO 4) translate is not yet validated against APC".into(),
+        )),
         other => Err(ProxyError::UnsupportedPinFormat(
             String::from_utf8_lossy(other).to_string(),
         )),
     }
 }
 
+struct PinFields {
+    source_key: KeyDescriptor,
+    dest_key: KeyDescriptor,
+    source_format: IsoFmt,
+    dest_format: IsoFmt,
+    pin_block: Zeroizing<String>,
+    account_number: String,
+}
+
+/// Parse CC (`has_dest_flag` = false) or CA (`has_dest_flag` = true) static
+/// translate commands. The DES path: 16H source PIN block, 12N PAN.
+fn parse_translate(payload: &[u8], has_dest_flag: bool) -> Result<PinFields, ProxyError> {
+    let (source_key, src_len) = parse_legacy_key(payload, 0)?;
+    let mut pos = src_len;
+
+    if has_dest_flag {
+        // A '*' or '~' flag means the destination is a BDK (DUKPT) — not handled here.
+        if let Some(&b'*' | &b'~') = payload.get(pos) {
+            return Err(ProxyError::Unsupported(
+                "CA with a DUKPT destination (BDK key flag) is not supported".into(),
+            ));
+        }
+    }
+
+    let (dest_key, dest_len) = parse_legacy_key(payload, pos)?;
+    pos += dest_len;
+
+    let maxlen_end = pos + MAX_PIN_LEN_FIELD;
+    let pin_end = maxlen_end + PIN_BLOCK_DES;
+    let src_fmt_end = pin_end + FMT_CODE_LEN;
+    let dst_fmt_end = src_fmt_end + FMT_CODE_LEN;
+    let acct_end = dst_fmt_end + ACCOUNT_LEN;
+
+    if payload.len() < acct_end {
+        return Err(ProxyError::MalformedPayload(format!(
+            "translate payload too short: {} < {}",
+            payload.len(),
+            acct_end
+        )));
+    }
+
+    let source_format = map_translate_format(&payload[pin_end..src_fmt_end])?;
+    let dest_format = map_translate_format(&payload[src_fmt_end..dst_fmt_end])?;
+
+    Ok(PinFields {
+        source_key,
+        dest_key,
+        source_format,
+        dest_format,
+        pin_block: Zeroizing::new(
+            String::from_utf8_lossy(&payload[maxlen_end..pin_end]).to_string(),
+        ),
+        account_number: String::from_utf8_lossy(&payload[dst_fmt_end..acct_end]).to_string(),
+    })
+}
+
 #[async_trait]
 impl Handler for PinHandler {
     fn command_codes(&self) -> &'static [&'static str] {
-        &["CA", "CC", "BQ", "CI", "G0"]
+        &["CA", "CC", "BQ", "G0"]
     }
 
     async fn handle(
@@ -106,78 +146,66 @@ impl Handler for PinHandler {
         payload: &[u8],
         state: &Arc<AppState>,
     ) -> HandlerResult {
-        let is_dukpt = matches!(command_code, b"CI" | b"G0");
-
-        let fields = if is_dukpt {
-            match parse_ci_g0(payload) {
-                Ok(f) => f,
-                Err(e) => {
-                    warn!(?e, "CI/G0 parse error");
-                    return HandlerResult::from_proxy_error(&e);
-                }
+        let fields = match command_code {
+            b"CC" => parse_translate(payload, false),
+            b"CA" => parse_translate(payload, true),
+            b"G0" => {
+                warn!("G0 (BDK DUKPT translate) not yet validated against APC; returning 68");
+                return HandlerResult::from_proxy_error(&ProxyError::Unsupported(
+                    "G0: BDK-to-BDK/ZPK DUKPT PIN translate carries optional source and destination \
+                     KSNs and needs DUKPT validation against APC before it can be proxied".into(),
+                ));
             }
-        } else {
-            match parse_ca_cc(payload) {
-                Ok(f) => f,
-                Err(e) => {
-                    warn!(?e, "CA/CC parse error");
-                    return HandlerResult::from_proxy_error(&e);
-                }
+            b"BQ" => {
+                warn!("BQ (Translate PIN Algorithm) not supported; returning 68");
+                return HandlerResult::from_proxy_error(&ProxyError::Unsupported(
+                    "BQ: Translate PIN Algorithm is a distinct operation not yet mapped to APC"
+                        .into(),
+                ));
+            }
+            _ => return HandlerResult::err(*b"68"),
+        };
+
+        let fields = match fields {
+            Ok(f) => f,
+            Err(e) => {
+                warn!(?e, cmd = %String::from_utf8_lossy(command_code), "translate parse error");
+                return HandlerResult::from_proxy_error(&e);
             }
         };
 
-        let incoming_arn = match state.key_map.resolve(&fields.source_key_id) {
+        let incoming_arn = match state.key_map.resolve_descriptor(&fields.source_key) {
             Ok(a) => a.to_string(),
             Err(e) => return HandlerResult::from_proxy_error(&e),
         };
-        let outgoing_arn = match state.key_map.resolve(&fields.dest_key_id) {
+        let outgoing_arn = match state.key_map.resolve_descriptor(&fields.dest_key) {
             Ok(a) => a.to_string(),
             Err(e) => return HandlerResult::from_proxy_error(&e),
         };
 
-        debug!(
-            incoming = %incoming_arn,
-            outgoing = %outgoing_arn,
-            src_fmt = %fields.source_format,
-            dst_fmt = %fields.dest_format,
-            "translate_pin_data"
-        );
-
-        let incoming_attrs = build_translation_attrs(&fields.source_format, &fields.account_number);
-        let outgoing_attrs = build_translation_attrs(&fields.dest_format, &fields.account_number);
+        let incoming_attrs = build_translation_attrs(fields.source_format, &fields.account_number);
+        let outgoing_attrs = build_translation_attrs(fields.dest_format, &fields.account_number);
         let (incoming_attrs, outgoing_attrs) = match (incoming_attrs, outgoing_attrs) {
             (Ok(i), Ok(o)) => (i, o),
             (Err(e), _) | (_, Err(e)) => return HandlerResult::from_proxy_error(&e),
         };
 
-        let mut req = state
+        debug!(incoming = %incoming_arn, outgoing = %outgoing_arn, "translate_pin_data");
+
+        match state
             .data
             .translate_pin_data()
             .incoming_key_identifier(&incoming_arn)
             .outgoing_key_identifier(&outgoing_arn)
             .encrypted_pin_block(fields.pin_block.as_str())
             .incoming_translation_attributes(incoming_attrs)
-            .outgoing_translation_attributes(outgoing_attrs);
-
-        if let Some(ksn) = &fields.ksn {
-            use aws_sdk_paymentcryptographydata::types::DukptDerivationAttributes;
-            let dukpt_attrs = match DukptDerivationAttributes::builder()
-                .key_serial_number(ksn)
-                .build()
-                .map_err(|e| ProxyError::ApcError(e.to_string()))
-            {
-                Ok(a) => a,
-                Err(e) => return HandlerResult::from_proxy_error(&e),
-            };
-            req = req.incoming_dukpt_attributes(dukpt_attrs);
-        }
-
-        match req.send().await {
+            .outgoing_translation_attributes(outgoing_attrs)
+            .send()
+            .await
+        {
             Ok(resp) => {
                 let pin_block_out = Zeroizing::new(resp.pin_block().to_string());
-                let mut payload_out = pin_block_out.as_bytes().to_vec();
-                payload_out.push(b'0');
-                HandlerResult::success(payload_out)
+                HandlerResult::success(pin_block_out.as_bytes().to_vec())
             }
             Err(e) => {
                 warn!(?e, "translate_pin_data failed");
@@ -188,34 +216,126 @@ impl Handler for PinHandler {
 }
 
 fn build_translation_attrs(
-    format: &str,
+    format: IsoFmt,
     account_number: &str,
 ) -> Result<aws_sdk_paymentcryptographydata::types::TranslationIsoFormats, ProxyError> {
     use aws_sdk_paymentcryptographydata::types::{
         TranslationIsoFormats, TranslationPinDataIsoFormat034, TranslationPinDataIsoFormat1,
     };
     match format {
-        "IsoFormat0" => Ok(TranslationIsoFormats::IsoFormat0(
+        IsoFmt::F0 => Ok(TranslationIsoFormats::IsoFormat0(
             TranslationPinDataIsoFormat034::builder()
                 .primary_account_number(account_number)
                 .build()
                 .map_err(|e| ProxyError::ApcError(e.to_string()))?,
         )),
-        "IsoFormat1" => Ok(TranslationIsoFormats::IsoFormat1(
+        IsoFmt::F1 => Ok(TranslationIsoFormats::IsoFormat1(
             TranslationPinDataIsoFormat1::builder().build(),
         )),
-        "IsoFormat3" => Ok(TranslationIsoFormats::IsoFormat3(
+        IsoFmt::F3 => Ok(TranslationIsoFormats::IsoFormat3(
             TranslationPinDataIsoFormat034::builder()
                 .primary_account_number(account_number)
                 .build()
                 .map_err(|e| ProxyError::ApcError(e.to_string()))?,
         )),
-        "IsoFormat4" => Ok(TranslationIsoFormats::IsoFormat4(
-            TranslationPinDataIsoFormat034::builder()
-                .primary_account_number(account_number)
-                .build()
-                .map_err(|e| ProxyError::ApcError(e.to_string()))?,
-        )),
-        other => Err(ProxyError::UnsupportedPinFormat(other.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key16() -> Vec<u8> {
+        b"1234567890ABCDEF".to_vec()
+    }
+
+    // CC: source ZPK + dest ZPK + max pin len + pin block + src fmt + dst fmt + PAN
+    fn build_cc(src: &[u8], dst: &[u8], src_fmt: &[u8], dst_fmt: &[u8]) -> Vec<u8> {
+        let mut v = src.to_vec();
+        v.extend_from_slice(dst);
+        v.extend_from_slice(b"12"); // max PIN length
+        v.extend_from_slice(b"1234567890ABCDEF"); // 16H PIN block
+        v.extend_from_slice(src_fmt);
+        v.extend_from_slice(dst_fmt);
+        v.extend_from_slice(b"432109876543"); // 12N PAN
+        v
+    }
+
+    #[test]
+    fn cc_parses_iso0_to_iso0() {
+        let p = build_cc(&key16(), &key16(), b"01", b"01");
+        let f = parse_translate(&p, false).unwrap();
+        assert_eq!(f.source_key.raw, "1234567890ABCDEF");
+        assert_eq!(f.dest_key.raw, "1234567890ABCDEF");
+        assert!(matches!(f.source_format, IsoFmt::F0));
+        assert!(matches!(f.dest_format, IsoFmt::F0));
+        assert_eq!(f.pin_block.as_str(), "1234567890ABCDEF");
+        assert_eq!(f.account_number, "432109876543");
+    }
+
+    #[test]
+    fn cc_parses_format_codes_05_and_47() {
+        let p = build_cc(&key16(), &key16(), b"05", b"47");
+        let f = parse_translate(&p, false).unwrap();
+        assert!(matches!(f.source_format, IsoFmt::F1));
+        assert!(matches!(f.dest_format, IsoFmt::F3));
+    }
+
+    #[test]
+    fn cc_parses_u_prefixed_keys() {
+        let mut src = vec![b'U'];
+        src.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
+        let p = build_cc(&src, &key16(), b"01", b"01");
+        let f = parse_translate(&p, false).unwrap();
+        assert_eq!(f.source_key.raw, "U1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.dest_key.raw, "1234567890ABCDEF");
+    }
+
+    #[test]
+    fn rejects_plus_format() {
+        let p = build_cc(&key16(), &key16(), b"04", b"01");
+        assert!(matches!(
+            parse_translate(&p, false),
+            Err(ProxyError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_iso4_format_pending_validation() {
+        let p = build_cc(&key16(), &key16(), b"48", b"01");
+        assert!(matches!(
+            parse_translate(&p, false),
+            Err(ProxyError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_format() {
+        let p = build_cc(&key16(), &key16(), b"99", b"01");
+        assert!(matches!(
+            parse_translate(&p, false),
+            Err(ProxyError::UnsupportedPinFormat(_))
+        ));
+    }
+
+    #[test]
+    fn ca_rejects_dukpt_dest_flag() {
+        let mut v = key16(); // source TPK
+        v.push(b'*'); // BDK-1 destination flag
+        v.extend_from_slice(&key16());
+        v.extend_from_slice(b"121234567890ABCDEF0101432109876543");
+        assert!(matches!(
+            parse_translate(&v, true),
+            Err(ProxyError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn ca_parses_zpk_dest_no_flag() {
+        // CA with a ZPK destination (no flag) parses like CC.
+        let p = build_cc(&key16(), &key16(), b"01", b"47");
+        let f = parse_translate(&p, true).unwrap();
+        assert!(matches!(f.source_format, IsoFmt::F0));
+        assert!(matches!(f.dest_format, IsoFmt::F3));
     }
 }

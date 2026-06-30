@@ -3,108 +3,127 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 use crate::error::ProxyError;
+use crate::handlers::thales::common::parse_key_32;
 use crate::handlers::{AppState, Handler, HandlerResult};
+use crate::key_map::KeyDescriptor;
 
 /// payShield card verification commands.
 ///
-/// CW (→ CX) — Generate CVV/CVV2/iCVV → APC GenerateCardValidationData
-/// CY (→ CZ) — Verify  CVV/CVV2/iCVV → APC VerifyCardValidationData
+/// CW (→ CX) — Generate a Card Verification Code/Value → generate_card_validation_data
+/// CY (→ CZ) — Verify a Card Verification Code/Value   → verify_card_validation_data
+/// NY (→ NZ) — Generate Static CVC3 / IVCVC3 (Mastercard PayPass)        [unsupported]
+/// RY (→ RZ) — Calculate / Verify American Express Card Security Codes   [unsupported]
 ///
-/// CW field layout:
-///   [0]        mode         1 byte  ('0'=CVV1/CAVV, '1'=CVV2, '2'=iCVV)
-///   [1..33]    CVK          32 hex chars
-///   [33..49]   PAN          16 decimal chars
-///   [49..53]   expiry       4 chars (MMYY)
-///   [53..56]   service code 3 chars
+/// CW / CY wire format (PUGD0537-004 Rev A, pp.250, 303 — AUTHORITATIVE).
+/// Neither command carries a "mode" selector: the Visa/Mastercard product
+/// (CVV1/CVC1, CVV2/CVC2, iCVV/Chip-CVC, CAVV/AAV) is chosen entirely by the
+/// 3-digit service code value. Magnetic-stripe CVV1/CVC1 uses the card's real
+/// service code (e.g. "201"); CVV2/CVC2 (signature panel) uses "000"; iCVV /
+/// Chip CVC (EMV) uses "999"; CAVV/AAV (3-D Secure) replaces the expiry with an
+/// unpredictable number and the service code with the auth-results codes.
+/// Because all of these use the single Visa CVV algorithm parameterised by the
+/// service code, both commands map to APC's CardVerificationValue1 with the
+/// service code taken straight from the wire (CardVerificationValue2 is merely
+/// CardVerificationValue1 with service code "000").
 ///
-/// CY field layout:
-///   [0]        mode         1 byte
-///   [1..33]    CVK          32 hex chars
-///   [33..36]   CVV value    3 chars
-///   [36..52]   PAN          16 decimal chars
-///   [52..56]   expiry       4 chars
-///   [56..59]   service code 3 chars
+///   CW:  CVK (32H | 'U'+32H | 'S'+TR-31)
+///        PAN (nN, max 19) ';' expiry (4N) service code (3N)
+///   CY:  CVK
+///        CVV (3N) PAN (nN, max 19) ';' expiry (4N) service code (3N)
 ///
-/// NY (→ NZ) — Generate Static CVC3 and/or IVCVC3 (Mastercard contactless)
-///              → APC GenerateCardValidationData
+/// The CVK is always double length; the PAN is variable length and terminated
+/// by a ';' delimiter, not a fixed 16-digit field.
 ///
-/// Source: PUGD0537-004 Rev A, p.493 — AUTHORITATIVE.
-/// Wire format inferred from QY (dCVV) and CW (static CVV) patterns:
-///   [0]        mode         1 byte  ('1'=Static CVC3, '2'=IVCVC3, '3'=both)
-///   [1..33]    CVK          32 hex chars (double-length C0 key)
-///   [33..49]   PAN          16 decimal chars
-///   [49..53]   expiry       4 chars (MMYY)
-///   [53..56]   service code 3 chars
-///   [56..60]   ATC          4 hex chars (used for IVCVC3, modes 2/3)
-///   [60..62]   PAN seq      2 decimal chars (used for IVCVC3, modes 2/3)
-///
-/// NZ response:
-///   [2H]       error code
-///   [3N]       Static CVC3  — modes '1' and '3'
-///   [3N]       IVCVC3       — modes '2' and '3'
-///
-/// RY (→ RZ) — Calculate or Verify Card Security Codes (CVV2/CVC2)
-///              → APC GenerateCardValidationData or VerifyCardValidationData
-///
-/// Source: PUGD0537-004 Rev A, p.315-316 — AUTHORITATIVE.
-/// Wire format inferred (generate vs verify selected by mode byte):
-///
-/// Generate (mode '0'):
-///   [0]        mode         '0'
-///   [1..33]    CVK          32 hex chars
-///   [33..49]   PAN          16 decimal chars
-///   [49..53]   expiry       4 chars (MMYY)
-///
-/// Verify (mode '1'):
-///   [0]        mode         '1'
-///   [1..33]    CVK          32 hex chars
-///   [33..36]   CVV2 value   3 decimal chars
-///   [36..52]   PAN          16 decimal chars
-///   [52..56]   expiry       4 chars (MMYY)
-///
-/// KNOWN LIMITATION: RY covers Mastercard CVC2, Visa CVV2, and Amex CID.
-/// This handler maps to CardVerificationValue2 (CVV2/CVC2 algorithm). Amex CID
-/// requires AmexCardSecurityCodeVersion1 and is not distinguished from CVV2 by
-/// the wire format alone; if the key_map routes an Amex CVK here the APC call
-/// will fail with error 41 (key usage mismatch).
+/// NY and RY are intentionally rejected — see `handle_ny` / `handle_ry`.
 pub struct CvvHandler;
 
-const CVK_START: usize = 1;
-const CVK_END: usize = 33;
-const CW_PAN_START: usize = 33;
-const CW_PAN_END: usize = 49;
-const CW_EXPIRY_START: usize = 49;
-const CW_EXPIRY_END: usize = 53;
-const CW_SVC_START: usize = 53;
-const CW_SVC_END: usize = 56;
-const CW_MIN_LEN: usize = 56;
-const CY_CVV_START: usize = 33;
-const CY_CVV_END: usize = 36;
-const CY_PAN_START: usize = 36;
-const CY_PAN_END: usize = 52;
-const CY_EXPIRY_START: usize = 52;
-const CY_EXPIRY_END: usize = 56;
-const CY_SVC_START: usize = 56;
-const CY_SVC_END: usize = 59;
-const CY_MIN_LEN: usize = 59;
+const EXPIRY_LEN: usize = 4;
+const SERVICE_LEN: usize = 3;
+const CVV_LEN: usize = 3;
+const PAN_MAX: usize = 19;
+const PAN_DELIM: u8 = b';';
 
-// NY field offsets (inferred wire format)
-const NY_CVK_LEN: usize = 32;
-const NY_PAN_LEN: usize = 16;
-const NY_EXPIRY_LEN: usize = 4;
-const NY_SVC_LEN: usize = 3;
-const NY_ATC_LEN: usize = 4;
-const NY_PANSEQ_LEN: usize = 2;
-const NY_MIN_LEN: usize =
-    1 + NY_CVK_LEN + NY_PAN_LEN + NY_EXPIRY_LEN + NY_SVC_LEN + NY_ATC_LEN + NY_PANSEQ_LEN; // 62
+struct CwFields {
+    cvk: KeyDescriptor,
+    pan: String,
+    expiry: String,
+    service_code: String,
+}
 
-// RY field sizes (inferred wire format)
-const RY_CVK_LEN: usize = 32;
-const RY_PAN_LEN: usize = 16;
-const RY_EXPIRY_LEN: usize = 4;
-const RY_CVV_LEN: usize = 3;
-const RY_GEN_MIN_LEN: usize = 1 + RY_CVK_LEN + RY_PAN_LEN + RY_EXPIRY_LEN; // 53
-const RY_VER_MIN_LEN: usize = 1 + RY_CVK_LEN + RY_CVV_LEN + RY_PAN_LEN + RY_EXPIRY_LEN; // 56
+struct CyFields {
+    cvk: KeyDescriptor,
+    cvv: String,
+    pan: String,
+    expiry: String,
+    service_code: String,
+}
+
+/// Read a variable-length PAN (1..=19 digits) terminated by a ';' delimiter.
+/// Returns the PAN and the offset of the first byte *after* the delimiter.
+fn read_pan(buf: &[u8], pos: usize) -> Result<(String, usize), ProxyError> {
+    let rest = buf.get(pos..).unwrap_or(&[]);
+    let delim = rest
+        .iter()
+        .position(|&b| b == PAN_DELIM)
+        .ok_or_else(|| ProxyError::MalformedPayload("CVV: missing ';' PAN delimiter".into()))?;
+    if delim == 0 || delim > PAN_MAX {
+        return Err(ProxyError::MalformedPayload(format!(
+            "CVV: PAN length {delim} out of range (1..={PAN_MAX})"
+        )));
+    }
+    let pan = String::from_utf8_lossy(&rest[..delim]).to_string();
+    Ok((pan, pos + delim + 1))
+}
+
+/// Read the trailing `expiry (4N) service code (3N)` pair at `pos`.
+fn read_expiry_service(buf: &[u8], pos: usize) -> Result<(String, String), ProxyError> {
+    let exp_end = pos + EXPIRY_LEN;
+    let svc_end = exp_end + SERVICE_LEN;
+    if buf.len() < svc_end {
+        return Err(ProxyError::MalformedPayload(format!(
+            "CVV: payload too short for expiry+service: {} < {}",
+            buf.len(),
+            svc_end
+        )));
+    }
+    let expiry = String::from_utf8_lossy(&buf[pos..exp_end]).to_string();
+    let service_code = String::from_utf8_lossy(&buf[exp_end..svc_end]).to_string();
+    Ok((expiry, service_code))
+}
+
+fn parse_cw(body: &[u8]) -> Result<CwFields, ProxyError> {
+    let (cvk, n) = parse_key_32(body, 0)?;
+    let (pan, pos) = read_pan(body, n)?;
+    let (expiry, service_code) = read_expiry_service(body, pos)?;
+    Ok(CwFields {
+        cvk,
+        pan,
+        expiry,
+        service_code,
+    })
+}
+
+fn parse_cy(body: &[u8]) -> Result<CyFields, ProxyError> {
+    let (cvk, n) = parse_key_32(body, 0)?;
+    let cvv_end = n + CVV_LEN;
+    if body.len() < cvv_end {
+        return Err(ProxyError::MalformedPayload(format!(
+            "CY: payload too short for CVV: {} < {}",
+            body.len(),
+            cvv_end
+        )));
+    }
+    let cvv = String::from_utf8_lossy(&body[n..cvv_end]).to_string();
+    let (pan, pos) = read_pan(body, cvv_end)?;
+    let (expiry, service_code) = read_expiry_service(body, pos)?;
+    Ok(CyFields {
+        cvk,
+        cvv,
+        pan,
+        expiry,
+        service_code,
+    })
+}
 
 #[async_trait]
 impl Handler for CvvHandler {
@@ -120,151 +139,97 @@ impl Handler for CvvHandler {
     ) -> HandlerResult {
         match command_code {
             b"CY" => handle_cy(payload, state).await,
-            b"NY" => handle_ny(payload, state).await,
-            b"RY" => handle_ry(payload, state).await,
+            b"NY" => handle_ny(),
+            b"RY" => handle_ry(),
             _ => handle_cw(payload, state).await,
         }
     }
 }
 
 async fn handle_cw(body: &[u8], state: &Arc<AppState>) -> HandlerResult {
-    if body.len() < CW_MIN_LEN {
-        return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(format!(
-            "CW payload too short: {} < {}",
-            body.len(),
-            CW_MIN_LEN
-        )));
-    }
-    let mode = body[0];
-    let cvk_id = String::from_utf8_lossy(&body[CVK_START..CVK_END]).to_string();
-    let pan = String::from_utf8_lossy(&body[CW_PAN_START..CW_PAN_END]).to_string();
-    let expiry = String::from_utf8_lossy(&body[CW_EXPIRY_START..CW_EXPIRY_END]).to_string();
-    let service_code = String::from_utf8_lossy(&body[CW_SVC_START..CW_SVC_END]).to_string();
+    let fields = match parse_cw(body) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!(?e, "CW parse error");
+            return HandlerResult::from_proxy_error(&e);
+        }
+    };
 
-    let cvk_arn = match state.key_map.resolve(&cvk_id) {
+    let cvk_arn = match state.key_map.resolve_descriptor(&fields.cvk) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    debug!(cvk = %cvk_arn, mode = %(mode as char), "generate_card_validation_data");
-
     use aws_sdk_paymentcryptographydata::types::{
-        CardGenerationAttributes, CardVerificationValue1, CardVerificationValue2,
+        CardGenerationAttributes, CardVerificationValue1,
     };
 
-    let attrs: CardGenerationAttributes = match mode {
-        b'0' => match CardVerificationValue1::builder()
-            .card_expiry_date(&expiry)
-            .service_code(&service_code)
-            .build()
-            .map_err(|e| ProxyError::ApcError(e.to_string()))
-        {
-            Ok(a) => CardGenerationAttributes::CardVerificationValue1(a),
-            Err(e) => return HandlerResult::from_proxy_error(&e),
-        },
-        b'1' => match CardVerificationValue2::builder()
-            .card_expiry_date(&expiry)
-            .build()
-            .map_err(|e| ProxyError::ApcError(e.to_string()))
-        {
-            Ok(a) => CardGenerationAttributes::CardVerificationValue2(a),
-            Err(e) => return HandlerResult::from_proxy_error(&e),
-        },
-        b'2' => match CardVerificationValue1::builder()
-            .card_expiry_date(&expiry)
-            .service_code("999")
-            .build()
-            .map_err(|e| ProxyError::ApcError(e.to_string()))
-        {
-            // iCVV uses CVV1 algorithm with service code 999
-            Ok(a) => CardGenerationAttributes::CardVerificationValue1(a),
-            Err(e) => return HandlerResult::from_proxy_error(&e),
-        },
-        other => {
-            return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(format!(
-                "unknown CW mode: {}",
-                other as char
-            )))
-        }
+    let attrs = match CardVerificationValue1::builder()
+        .card_expiry_date(&fields.expiry)
+        .service_code(&fields.service_code)
+        .build()
+        .map_err(|e| ProxyError::ApcError(e.to_string()))
+    {
+        Ok(a) => CardGenerationAttributes::CardVerificationValue1(a),
+        Err(e) => return HandlerResult::from_proxy_error(&e),
     };
+
+    debug!(cvk = %cvk_arn, service = %fields.service_code, "CW: generate_card_validation_data");
 
     match state
         .data
         .generate_card_validation_data()
         .key_identifier(&cvk_arn)
-        .primary_account_number(&pan)
+        .primary_account_number(&fields.pan)
         .generation_attributes(attrs)
         .send()
         .await
     {
         Ok(resp) => HandlerResult::success(resp.validation_data().as_bytes().to_vec()),
         Err(e) => {
-            warn!(?e, "generate_card_validation_data failed");
+            warn!(?e, "CW: generate_card_validation_data failed");
             HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
         }
     }
 }
 
 async fn handle_cy(body: &[u8], state: &Arc<AppState>) -> HandlerResult {
-    if body.len() < CY_MIN_LEN {
-        return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(format!(
-            "CY payload too short: {} < {}",
-            body.len(),
-            CY_MIN_LEN
-        )));
-    }
-    let mode = body[0];
-    let cvk_id = String::from_utf8_lossy(&body[CVK_START..CVK_END]).to_string();
-    let cvv_value = String::from_utf8_lossy(&body[CY_CVV_START..CY_CVV_END]).to_string();
-    let pan = String::from_utf8_lossy(&body[CY_PAN_START..CY_PAN_END]).to_string();
-    let expiry = String::from_utf8_lossy(&body[CY_EXPIRY_START..CY_EXPIRY_END]).to_string();
-    let service_code = String::from_utf8_lossy(&body[CY_SVC_START..CY_SVC_END]).to_string();
+    let fields = match parse_cy(body) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!(?e, "CY parse error");
+            return HandlerResult::from_proxy_error(&e);
+        }
+    };
 
-    let cvk_arn = match state.key_map.resolve(&cvk_id) {
+    let cvk_arn = match state.key_map.resolve_descriptor(&fields.cvk) {
         Ok(a) => a.to_string(),
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    debug!(cvk = %cvk_arn, mode = %(mode as char), "verify_card_validation_data");
-
     use aws_sdk_paymentcryptographydata::types::{
-        CardVerificationAttributes, CardVerificationValue1, CardVerificationValue2,
+        CardVerificationAttributes, CardVerificationValue1,
     };
 
-    let attrs_result: Result<CardVerificationAttributes, ProxyError> = match mode {
-        b'0' => CardVerificationValue1::builder()
-            .card_expiry_date(&expiry)
-            .service_code(&service_code)
-            .build()
-            .map(CardVerificationAttributes::CardVerificationValue1)
-            .map_err(|e| ProxyError::ApcError(e.to_string())),
-        b'1' => CardVerificationValue2::builder()
-            .card_expiry_date(&expiry)
-            .build()
-            .map(CardVerificationAttributes::CardVerificationValue2)
-            .map_err(|e| ProxyError::ApcError(e.to_string())),
-        b'2' => CardVerificationValue1::builder()
-            .card_expiry_date(&expiry)
-            .service_code("999")
-            .build()
-            .map(CardVerificationAttributes::CardVerificationValue1)
-            .map_err(|e| ProxyError::ApcError(e.to_string())),
-        other => Err(ProxyError::MalformedPayload(format!(
-            "unknown CY mode: {}",
-            other as char
-        ))),
-    };
-    let attrs = match attrs_result {
+    let attrs = match CardVerificationValue1::builder()
+        .card_expiry_date(&fields.expiry)
+        .service_code(&fields.service_code)
+        .build()
+        .map(CardVerificationAttributes::CardVerificationValue1)
+        .map_err(|e| ProxyError::ApcError(e.to_string()))
+    {
         Ok(a) => a,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
+
+    debug!(cvk = %cvk_arn, service = %fields.service_code, "CY: verify_card_validation_data");
 
     match state
         .data
         .verify_card_validation_data()
         .key_identifier(&cvk_arn)
-        .primary_account_number(&pan)
-        .validation_data(&cvv_value)
+        .primary_account_number(&fields.pan)
+        .validation_data(&fields.cvv)
         .verification_attributes(attrs)
         .send()
         .await
@@ -272,246 +237,156 @@ async fn handle_cy(body: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Ok(_) => HandlerResult::success(vec![]),
         Err(e) => {
             if e.as_service_error().is_some_and(aws_sdk_paymentcryptographydata::operation::verify_card_validation_data::VerifyCardValidationDataError::is_verification_failed_exception) {
-                warn!("verify_card_validation_data: CVV mismatch");
+                warn!("CY: CVV mismatch");
                 return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
             }
-            warn!(?e, "verify_card_validation_data failed");
+            warn!(?e, "CY: verify_card_validation_data failed");
             HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
         }
     }
 }
 
-// ── NY: Generate Static CVC3 and/or IVCVC3 ──────────────────────────────────
-
-async fn handle_ny(body: &[u8], state: &Arc<AppState>) -> HandlerResult {
-    if body.len() < NY_MIN_LEN {
-        return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(format!(
-            "NY payload too short: {} < {}",
-            body.len(),
-            NY_MIN_LEN
-        )));
-    }
-    let mode = body[0];
-    if !matches!(mode, b'1' | b'2' | b'3') {
-        return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(format!(
-            "NY: invalid mode '{}' (1=Static, 2=IVCVC3, 3=both)",
-            mode as char
-        )));
-    }
-
-    let mut pos = 1;
-    let cvk_id = String::from_utf8_lossy(&body[pos..pos + NY_CVK_LEN]).to_string();
-    pos += NY_CVK_LEN;
-    let pan = String::from_utf8_lossy(&body[pos..pos + NY_PAN_LEN]).to_string();
-    pos += NY_PAN_LEN;
-    let expiry = String::from_utf8_lossy(&body[pos..pos + NY_EXPIRY_LEN]).to_string();
-    pos += NY_EXPIRY_LEN;
-    let service_code = String::from_utf8_lossy(&body[pos..pos + NY_SVC_LEN]).to_string();
-    pos += NY_SVC_LEN;
-    let atc = String::from_utf8_lossy(&body[pos..pos + NY_ATC_LEN]).to_string();
-    pos += NY_ATC_LEN;
-    let pan_seq = String::from_utf8_lossy(&body[pos..pos + NY_PANSEQ_LEN]).to_string();
-
-    let cvk_arn = match state.key_map.resolve(&cvk_id) {
-        Ok(a) => a.to_string(),
-        Err(e) => return HandlerResult::from_proxy_error(&e),
-    };
-
-    use aws_sdk_paymentcryptographydata::types::{
-        CardGenerationAttributes, CardVerificationValue1, DynamicCardVerificationValue,
-    };
-
-    let mut response_payload: Vec<u8> = Vec::new();
-
-    // Static CVC3 (modes 1 and 3): CVV1 algorithm with the card's actual service code
-    if matches!(mode, b'1' | b'3') {
-        let static_attrs = match CardVerificationValue1::builder()
-            .card_expiry_date(&expiry)
-            .service_code(&service_code)
-            .build()
-            .map_err(|e| ProxyError::ApcError(e.to_string()))
-        {
-            Ok(a) => CardGenerationAttributes::CardVerificationValue1(a),
-            Err(e) => return HandlerResult::from_proxy_error(&e),
-        };
-        debug!(cvk = %cvk_arn, "NY: generate Static CVC3");
-        match state
-            .data
-            .generate_card_validation_data()
-            .key_identifier(&cvk_arn)
-            .primary_account_number(&pan)
-            .generation_attributes(static_attrs)
-            .send()
-            .await
-        {
-            Ok(resp) => response_payload.extend_from_slice(resp.validation_data().as_bytes()),
-            Err(e) => {
-                warn!(?e, "NY: generate Static CVC3 failed");
-                return HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()));
-            }
-        }
-    }
-
-    // IVCVC3 (modes 2 and 3): dynamic card verification value with ATC
-    if matches!(mode, b'2' | b'3') {
-        let ivcvc3_attrs = match DynamicCardVerificationValue::builder()
-            .pan_sequence_number(&pan_seq)
-            .card_expiry_date(&expiry)
-            .service_code(&service_code)
-            .application_transaction_counter(&atc)
-            .build()
-            .map_err(|e| ProxyError::ApcError(e.to_string()))
-        {
-            Ok(a) => CardGenerationAttributes::DynamicCardVerificationValue(a),
-            Err(e) => return HandlerResult::from_proxy_error(&e),
-        };
-        debug!(cvk = %cvk_arn, atc = %atc, "NY: generate IVCVC3");
-        match state
-            .data
-            .generate_card_validation_data()
-            .key_identifier(&cvk_arn)
-            .primary_account_number(&pan)
-            .generation_attributes(ivcvc3_attrs)
-            .send()
-            .await
-        {
-            Ok(resp) => response_payload.extend_from_slice(resp.validation_data().as_bytes()),
-            Err(e) => {
-                warn!(?e, "NY: generate IVCVC3 failed");
-                return HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()));
-            }
-        }
-    }
-
-    HandlerResult::success(response_payload)
+/// NY — Generate Static CVC3 / IVCVC3 for Mastercard PayPass.
+///
+/// NOT SUPPORTED ON APC. NY derives a CVC3 session key from an issuer master key
+/// (MK-CVC3) and returns *two* values in NZ: the IVCVC3 (5N) and the static
+/// CVC3/PINCVC3 (5N). APC's generate_card_validation_data produces a single
+/// validation value and exposes no way to emit the intermediate IVCVC3, and the
+/// PINIVCVC3/PINCVC3 scheme (Scheme ID '2') and explicit Option A/B derivation
+/// selector have no APC equivalent. A wire-compatible NZ therefore cannot be
+/// produced. (The previous implementation parsed a fabricated fixed-width layout
+/// and mapped to CardVerificationValue1 + DynamicCardVerificationValue, which is
+/// the wrong algorithm and the wrong response shape.)
+fn handle_ny() -> HandlerResult {
+    warn!(
+        "NY rejected: PayPass CVC3 returns IVCVC3+CVC3, which APC's single-value API cannot model"
+    );
+    HandlerResult::from_proxy_error(&ProxyError::Unsupported(
+        "NY: Mastercard PayPass CVC3 generation returns both an IVCVC3 and a CVC3; AWS Payment \
+         Cryptography returns a single card-validation value and cannot reproduce the NZ response"
+            .into(),
+    ))
 }
 
-// ── RY: Calculate or Verify Card Security Codes (CVV2/CVC2) ─────────────────
-
-async fn handle_ry(body: &[u8], state: &Arc<AppState>) -> HandlerResult {
-    if body.is_empty() {
-        return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(
-            "RY: empty payload".into(),
-        ));
-    }
-    let mode = body[0];
-    match mode {
-        b'0' => handle_ry_generate(body, state).await,
-        b'1' => handle_ry_verify(body, state).await,
-        other => HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(format!(
-            "RY: invalid mode '{}' (0=generate, 1=verify)",
-            other as char
-        ))),
-    }
+/// RY — Calculate/Verify American Express Card Security Codes.
+///
+/// NOT SUPPORTED ON APC. Despite the name, RY is the Amex CSC command (Mode '3'
+/// calculate / '4' verify, with a Flag selecting Classic CSC v1.0, Enhanced CSC
+/// v2.0, or AEVV) — not the Visa CVV2 algorithm the previous code mapped it to.
+/// Its response carries up to three independently-validated codes (5-digit,
+/// 4-digit and 3-digit CSC), and the AEVV (3-D Secure) variant has no APC
+/// equivalent. APC's Amex card-security-code support is a single-value
+/// generate/verify (AmexCardSecurityCodeVersion1/2) that cannot reproduce RY's
+/// multi-length CSC response or the AEVV path, so RY is not wire-translatable.
+fn handle_ry() -> HandlerResult {
+    warn!("RY rejected: Amex multi-length CSC / AEVV response cannot be modeled on APC");
+    HandlerResult::from_proxy_error(&ProxyError::Unsupported(
+        "RY: American Express CSC (Classic/Enhanced/AEVV) returns multiple CSC lengths and an AEVV \
+         variant that AWS Payment Cryptography's single-value Amex CSC API cannot reproduce"
+            .into(),
+    ))
 }
 
-async fn handle_ry_generate(body: &[u8], state: &Arc<AppState>) -> HandlerResult {
-    if body.len() < RY_GEN_MIN_LEN {
-        return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(format!(
-            "RY generate: payload too short: {} < {}",
-            body.len(),
-            RY_GEN_MIN_LEN
-        )));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Double-length CVK, no prefix: 32 hex chars.
+    fn cvk32() -> Vec<u8> {
+        b"0123456789ABCDEF0123456789ABCDEF".to_vec()
     }
-    let mut pos = 1;
-    let cvk_id = String::from_utf8_lossy(&body[pos..pos + RY_CVK_LEN]).to_string();
-    pos += RY_CVK_LEN;
-    let pan = String::from_utf8_lossy(&body[pos..pos + RY_PAN_LEN]).to_string();
-    pos += RY_PAN_LEN;
-    let expiry = String::from_utf8_lossy(&body[pos..pos + RY_EXPIRY_LEN]).to_string();
 
-    let cvk_arn = match state.key_map.resolve(&cvk_id) {
-        Ok(a) => a.to_string(),
-        Err(e) => return HandlerResult::from_proxy_error(&e),
-    };
-
-    use aws_sdk_paymentcryptographydata::types::{
-        CardGenerationAttributes, CardVerificationValue2,
-    };
-
-    let attrs = match CardVerificationValue2::builder()
-        .card_expiry_date(&expiry)
-        .build()
-        .map_err(|e| ProxyError::ApcError(e.to_string()))
-    {
-        Ok(a) => CardGenerationAttributes::CardVerificationValue2(a),
-        Err(e) => return HandlerResult::from_proxy_error(&e),
-    };
-
-    debug!(cvk = %cvk_arn, "RY: generate_card_validation_data CVV2");
-    match state
-        .data
-        .generate_card_validation_data()
-        .key_identifier(&cvk_arn)
-        .primary_account_number(&pan)
-        .generation_attributes(attrs)
-        .send()
-        .await
-    {
-        Ok(resp) => HandlerResult::success(resp.validation_data().as_bytes().to_vec()),
-        Err(e) => {
-            warn!(?e, "RY: generate_card_validation_data failed");
-            HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
-        }
+    fn build_cw(cvk: &[u8], pan: &[u8]) -> Vec<u8> {
+        let mut v = cvk.to_vec();
+        v.extend_from_slice(pan);
+        v.push(b';');
+        v.extend_from_slice(b"2512"); // expiry
+        v.extend_from_slice(b"201"); // service code
+        v
     }
-}
 
-async fn handle_ry_verify(body: &[u8], state: &Arc<AppState>) -> HandlerResult {
-    if body.len() < RY_VER_MIN_LEN {
-        return HandlerResult::from_proxy_error(&ProxyError::MalformedPayload(format!(
-            "RY verify: payload too short: {} < {}",
-            body.len(),
-            RY_VER_MIN_LEN
-        )));
+    fn build_cy(cvk: &[u8], cvv: &[u8], pan: &[u8]) -> Vec<u8> {
+        let mut v = cvk.to_vec();
+        v.extend_from_slice(cvv);
+        v.extend_from_slice(pan);
+        v.push(b';');
+        v.extend_from_slice(b"2512");
+        v.extend_from_slice(b"000");
+        v
     }
-    let mut pos = 1;
-    let cvk_id = String::from_utf8_lossy(&body[pos..pos + RY_CVK_LEN]).to_string();
-    pos += RY_CVK_LEN;
-    let cvv_value = String::from_utf8_lossy(&body[pos..pos + RY_CVV_LEN]).to_string();
-    pos += RY_CVV_LEN;
-    let pan = String::from_utf8_lossy(&body[pos..pos + RY_PAN_LEN]).to_string();
-    pos += RY_PAN_LEN;
-    let expiry = String::from_utf8_lossy(&body[pos..pos + RY_EXPIRY_LEN]).to_string();
 
-    let cvk_arn = match state.key_map.resolve(&cvk_id) {
-        Ok(a) => a.to_string(),
-        Err(e) => return HandlerResult::from_proxy_error(&e),
-    };
+    #[test]
+    fn cw_parses_16_digit_pan() {
+        let f = parse_cw(&build_cw(&cvk32(), b"4111111111111111")).unwrap();
+        assert_eq!(f.cvk.raw, "0123456789ABCDEF0123456789ABCDEF");
+        assert_eq!(f.pan, "4111111111111111");
+        assert_eq!(f.expiry, "2512");
+        assert_eq!(f.service_code, "201");
+    }
 
-    use aws_sdk_paymentcryptographydata::types::{
-        CardVerificationAttributes, CardVerificationValue2,
-    };
+    #[test]
+    fn cw_parses_15_digit_amex_pan() {
+        // 15-digit PAN would be silently corrupted by a fixed 16-char field.
+        let f = parse_cw(&build_cw(&cvk32(), b"371449635398431")).unwrap();
+        assert_eq!(f.pan, "371449635398431");
+        assert_eq!(f.expiry, "2512");
+        assert_eq!(f.service_code, "201");
+    }
 
-    let attrs = match CardVerificationValue2::builder()
-        .card_expiry_date(&expiry)
-        .build()
-        .map_err(|e| ProxyError::ApcError(e.to_string()))
-    {
-        Ok(a) => CardVerificationAttributes::CardVerificationValue2(a),
-        Err(e) => return HandlerResult::from_proxy_error(&e),
-    };
+    #[test]
+    fn cw_parses_19_digit_pan() {
+        let f = parse_cw(&build_cw(&cvk32(), b"4111111111111111234")).unwrap();
+        assert_eq!(f.pan, "4111111111111111234");
+    }
 
-    debug!(cvk = %cvk_arn, "RY: verify_card_validation_data CVV2");
-    match state
-        .data
-        .verify_card_validation_data()
-        .key_identifier(&cvk_arn)
-        .primary_account_number(&pan)
-        .validation_data(&cvv_value)
-        .verification_attributes(attrs)
-        .send()
-        .await
-    {
-        Ok(_) => HandlerResult::success(vec![]),
-        Err(e) => {
-            if e.as_service_error().is_some_and(
-                aws_sdk_paymentcryptographydata::operation::verify_card_validation_data::VerifyCardValidationDataError::is_verification_failed_exception,
-            ) {
-                warn!("RY: CVV2 mismatch");
-                return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
-            }
-            warn!(?e, "RY: verify_card_validation_data failed");
-            HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
-        }
+    #[test]
+    fn cw_parses_u_prefixed_key() {
+        let mut cvk = vec![b'U'];
+        cvk.extend_from_slice(&cvk32());
+        let f = parse_cw(&build_cw(&cvk, b"4111111111111111")).unwrap();
+        assert_eq!(f.cvk.raw, "U0123456789ABCDEF0123456789ABCDEF");
+        assert_eq!(f.pan, "4111111111111111");
+    }
+
+    #[test]
+    fn cw_rejects_missing_delimiter() {
+        let mut v = cvk32();
+        v.extend_from_slice(b"4111111111111111"); // no ';'
+        assert!(matches!(parse_cw(&v), Err(ProxyError::MalformedPayload(_))));
+    }
+
+    #[test]
+    fn cw_rejects_overlong_pan() {
+        let mut v = cvk32();
+        v.extend_from_slice(b"12345678901234567890"); // 20 digits
+        v.push(b';');
+        v.extend_from_slice(b"2512201");
+        assert!(matches!(parse_cw(&v), Err(ProxyError::MalformedPayload(_))));
+    }
+
+    #[test]
+    fn cy_parses_cvv_then_variable_pan() {
+        let f = parse_cy(&build_cy(&cvk32(), b"123", b"4111111111111111")).unwrap();
+        assert_eq!(f.cvv, "123");
+        assert_eq!(f.pan, "4111111111111111");
+        assert_eq!(f.expiry, "2512");
+        assert_eq!(f.service_code, "000");
+    }
+
+    #[test]
+    fn cy_parses_15_digit_pan() {
+        let f = parse_cy(&build_cy(&cvk32(), b"999", b"371449635398431")).unwrap();
+        assert_eq!(f.cvv, "999");
+        assert_eq!(f.pan, "371449635398431");
+    }
+
+    #[test]
+    fn ny_unsupported() {
+        assert_eq!(handle_ny().error_code, *b"68");
+    }
+
+    #[test]
+    fn ry_unsupported() {
+        assert_eq!(handle_ry().error_code, *b"68");
     }
 }

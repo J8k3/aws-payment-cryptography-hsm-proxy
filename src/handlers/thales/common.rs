@@ -1,6 +1,123 @@
 use crate::error::ProxyError;
 use crate::key_map::{KeyBlockMeta, KeyDescriptor};
 
+use aws_sdk_paymentcryptographydata::types::{
+    SessionKeyAmex, SessionKeyDerivation, SessionKeyEmv2000, SessionKeyEmvCommon,
+    SessionKeyMastercard,
+};
+
+/// Apply EMV (ISO 9797-1 method 2) padding to ARQC MAC input: append a single
+/// `0x80`, then `0x00` up to the next 8-byte boundary (always at least one byte).
+///
+/// APC's `verify_auth_request_cryptogram` MACs the transaction data exactly as
+/// supplied and does not pad, whereas the card (and a real payShield) MAC the
+/// method-2-padded data. The proxy receives unpadded host data, so it must pad
+/// before forwarding — verified against live APC.
+pub fn emv_pad(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() + 8);
+    out.extend_from_slice(data);
+    out.push(0x80);
+    while out.len() % 8 != 0 {
+        out.push(0x00);
+    }
+    out
+}
+
+/// Map a Thales 2-digit PIN Block Format Code to the APC `PinBlockFormatForPinData`.
+///
+/// Source: PUGD0537-004 ("Only these Thales PIN Block formats are supported"):
+///   '01' = ISO 9564-1 & ANSI X9.8 Format 0  -> IsoFormat0
+///   '05' = ISO 9564-1 Format 1              -> IsoFormat1
+///   '47' = ISO 9564-1 & ANSI X9.8 Format 3  -> IsoFormat3
+///   '48' = ISO 9564-1 Format 4 (AES)        -> IsoFormat4
+///
+/// Docutel ('02'), Diebold/IBM ('03'), PLUS ('04') and EMV-1996 / ISO Format 2 ('34')
+/// have no APC equivalent and return an error (payShield 23) rather than silently
+/// mis-decoding the PIN block. APC does not default this; the caller must map it.
+pub fn map_pin_block_format(
+    code: &str,
+) -> Result<aws_sdk_paymentcryptographydata::types::PinBlockFormatForPinData, ProxyError> {
+    use aws_sdk_paymentcryptographydata::types::PinBlockFormatForPinData;
+    match code {
+        "01" => Ok(PinBlockFormatForPinData::IsoFormat0),
+        "05" => Ok(PinBlockFormatForPinData::IsoFormat1),
+        "47" => Ok(PinBlockFormatForPinData::IsoFormat3),
+        "48" => Ok(PinBlockFormatForPinData::IsoFormat4),
+        other => Err(ProxyError::UnsupportedPinFormat(format!(
+            "Thales PIN block format code '{other}' has no APC equivalent (supported: 01/05/47/48)"
+        ))),
+    }
+}
+
+/// EMV session-key derivation method selected by a Thales KQ/KW Scheme ID.
+///
+/// Mapping verified against PUGD0537-004 Core Host Commands (KQ p.468, KW p.471)
+/// and confirmed end-to-end against live AWS Payment Cryptography: the session
+/// method materially changes the derived key, so an incorrect choice causes APC
+/// to reject a valid cryptogram (error 01).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmvSession {
+    /// EMV Common Session Key derivation (PAN + PAN seq + ATC).
+    EmvCommon,
+    /// EMV2000 session key derivation (PAN + PAN seq + ATC).
+    Emv2000,
+    /// Mastercard proprietary session key derivation (PAN + PAN seq + ATC + UN).
+    Mastercard,
+    /// American Express AEIPS (PAN + PAN seq).
+    Amex,
+}
+
+/// Build the APC `SessionKeyDerivation` for `method`.
+///
+/// `un` (unpredictable number) is consumed only by the Mastercard method; `atc`
+/// is consumed by every method except Amex. Other arguments unused by a given
+/// method are ignored.
+pub fn build_session_key(
+    method: EmvSession,
+    pan: &str,
+    pan_seq: &str,
+    atc: &str,
+    un: &str,
+) -> Result<SessionKeyDerivation, ProxyError> {
+    // Non-capturing closure: Copy, so it can be reused across the arms' map_err.
+    let be =
+        |e: aws_sdk_paymentcryptographydata::error::BuildError| ProxyError::ApcError(e.to_string());
+    Ok(match method {
+        EmvSession::EmvCommon => SessionKeyDerivation::EmvCommon(
+            SessionKeyEmvCommon::builder()
+                .primary_account_number(pan)
+                .pan_sequence_number(pan_seq)
+                .application_transaction_counter(atc)
+                .build()
+                .map_err(be)?,
+        ),
+        EmvSession::Emv2000 => SessionKeyDerivation::Emv2000(
+            SessionKeyEmv2000::builder()
+                .primary_account_number(pan)
+                .pan_sequence_number(pan_seq)
+                .application_transaction_counter(atc)
+                .build()
+                .map_err(be)?,
+        ),
+        EmvSession::Mastercard => SessionKeyDerivation::Mastercard(
+            SessionKeyMastercard::builder()
+                .primary_account_number(pan)
+                .pan_sequence_number(pan_seq)
+                .application_transaction_counter(atc)
+                .unpredictable_number(un)
+                .build()
+                .map_err(be)?,
+        ),
+        EmvSession::Amex => SessionKeyDerivation::Amex(
+            SessionKeyAmex::builder()
+                .primary_account_number(pan)
+                .pan_sequence_number(pan_seq)
+                .build()
+                .map_err(be)?,
+        ),
+    })
+}
+
 /// Parse a TR-31 key block introduced by an 'S' prefix in the wire frame.
 ///
 /// payShield "Key Block LMK" form: a leading 'S' byte followed by an ASCII
@@ -318,29 +435,20 @@ pub fn bytes_to_hex(bytes: &[u8]) -> String {
         })
 }
 
-/// Decode the Thales 8-byte pre-formatted PAN/PSN field → `(pan_digits, pan_seq_2_digits)`.
+/// Decode the EMV "pre-formatted" PAN/PAN-Sequence field (8 BCD bytes = 16
+/// digits) into `(pan, pan_seq)` for APC.
 ///
-/// Per payShield Core Host Commands (PUGD0537-004 — KU p.481, K2 p.485, K0 p.490),
-/// the fixed 8-byte field holds the *pre-formatted PAN ‖ PAN-sequence-number,
-/// padded to 8 bytes according to EMV Option A*: the 16 rightmost digits of
-/// `PAN ‖ PSN`, BCD, **left-padded with zeros** when shorter than 16 digits
-/// (EMV Book 2, Annex A1.4.1). There is no `0xF` padding — that only appears in
-/// other (non-EMV) Thales fields.
-///
-/// The last two digits are the PAN sequence number; the preceding 14 are the
-/// rightmost PAN digits (Option A left zero-padding). APC re-applies Option A —
-/// `rightmost-16(PAN ‖ PSN)` — internally, so returning those 14 digits (with the
-/// Option A zero-padding stripped) and the 2-digit PSN reproduces the exact
-/// derivation value for any PAN length.
-///
-/// The previous implementation read the first 12 digits as the PAN, digits 13–14
-/// as the PSN, and discarded digits 15–16 — corrupting both the PAN and the PSN
-/// for any fully-populated (16-digit-PAN) field and guaranteeing an ARQC mismatch.
+/// Per EMV Book 2 Annex A1.4.1 this field carries the RIGHTMOST 16 digits of
+/// (PAN || 2-digit PAN sequence number), left zero-padded — NOT a left-justified
+/// PAN with 0xF padding. The last two digits are the PAN sequence number; the
+/// preceding 14 are the rightmost PAN digits. The EMV Option A left zero-padding
+/// is stripped so APC receives a conventional PAN — the derivation value is
+/// unchanged because APC re-applies `rightmost16(PAN || PSN)` internally.
+/// Verified against live APC: a 16-digit-PAN ARQC verifies (error 00) with this
+/// split (16-digit PANs have no leading zero, so the strip is a no-op there).
 pub fn decode_bcd_pan_seq(bytes: [u8; 8]) -> (String, String) {
     let hex = bytes_to_hex(&bytes); // exactly 16 BCD digits
     let pan_seq = hex[14..16].to_string();
-    // Strip the EMV Option A left zero-padding to hand APC a conventional PAN;
-    // the derivation value is unchanged since APC re-takes rightmost-16(PAN‖PSN).
     let pan = hex[..14].trim_start_matches('0').to_string();
     (pan, pan_seq)
 }
@@ -356,21 +464,8 @@ mod tests {
     }
 
     #[test]
-    fn decode_bcd_pan_and_seq_short_pan() {
-        // 12-digit PAN 123456789012, PSN 01 → EMV Option A pre-format =
-        // rightmost-16(PAN‖PSN) left zero-padded: "0012345678901201".
-        let bytes = [0x00, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01];
-        let (pan, seq) = decode_bcd_pan_seq(bytes);
-        assert_eq!(pan, "123456789012");
-        assert_eq!(seq, "01");
-    }
-
-    #[test]
-    fn decode_bcd_pan_seq_16_digit_pan() {
-        // 16-digit-PAN issuer: the field is a full 16 digits, no padding.
-        // Option A keeps rightmost-16(PAN‖PSN) = 14 PAN digits + 2 PSN digits.
-        // The old fixed 12-digit split read pan="12345678901234"[..12] and seq="34",
-        // discarding the real PSN "01" → guaranteed ARQC mismatch.
+    fn decode_bcd_pan_and_seq() {
+        // EMV pre-formatted (rightmost 16 of PAN||PSN): "1234567890123401" -> first 14 / last 2.
         let bytes = [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x01];
         let (pan, seq) = decode_bcd_pan_seq(bytes);
         assert_eq!(pan, "12345678901234");
@@ -378,12 +473,14 @@ mod tests {
     }
 
     #[test]
-    fn decode_bcd_pan_seq_strips_option_a_zero_pad() {
-        // Heavily zero-padded short value still yields the significant PAN digits.
-        let bytes = [0x00, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78, 0x05];
+    fn decode_bcd_pan_seq_strips_option_a_padding() {
+        // 12-digit PAN 123456789012, PSN 01 → EMV Option A pre-format =
+        // rightmost-16(PAN‖PSN) left zero-padded: "0012345678901201". The Option A
+        // padding is stripped to recover the conventional PAN.
+        let bytes = [0x00, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01];
         let (pan, seq) = decode_bcd_pan_seq(bytes);
-        assert_eq!(pan, "12345678");
-        assert_eq!(seq, "05");
+        assert_eq!(pan, "123456789012");
+        assert_eq!(seq, "01");
     }
 
     #[test]

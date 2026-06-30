@@ -15,11 +15,14 @@ use crate::key_map::KeyDescriptor;
 /// All four map to APC GenerateMac / VerifyMac.
 pub struct MacHandler;
 
-// ── C2/C4 layout (fixed offsets) ─────────────────────────────────────────────
-//   [0]       mode        1N  '0'=ISO9797_ALG1, '1'=ISO9797_ALG3, '2'/'3'=AS2805_4_1
-//   [1..33]   key        32H  MAC key under LMK
-//   [33..37]  msg_len    4H   byte count of message
-//   [37..]    message    var  hex-encoded message
+// ── C2/C4 layout (PUGD0537-004 p.583) ────────────────────────────────────────
+//   [0]       Block Number 1N  '0'=only block (continuation 1-3 unsupported)
+//   [1]       Key Type     1N  '0'=TAK,'1'=ZAK,'2'=TAKs,'3'=ZAKs (consumed)
+//   [2]       MAC Mode     1N  '0'=X9.9(ALG1), '1'=X9.19(ALG3), '2'/'3'=AS2805_4_1
+//   [3]       Message Type 1N  '0'=binary, '1'=expanded hex (only '1' supported)
+//   [4..]     Key          var (16H | U+32H | T+48H) via parse_legacy_key
+//   after key: Msg Len     4H   byte count of message
+//   after len: Message     var  hex-encoded message
 //   (C4 appends 8H MAC to verify after message)
 
 fn algorithm_from_mode_c2(mode: u8) -> Result<String, ProxyError> {
@@ -32,26 +35,55 @@ fn algorithm_from_mode_c2(mode: u8) -> Result<String, ProxyError> {
 }
 
 fn parse_c2_payload(payload: &[u8], is_verify: bool) -> Result<MacFields, ProxyError> {
-    const KEY_START: usize = 1;
-    const KEY_END: usize = 33;
-    const LEN_START: usize = 33;
-    const LEN_END: usize = 37;
-    const MSG_START: usize = 37;
+    // Real C2 layout (PUGD0537-004 p.583):
+    //   [0] Message Block Number 1N ('0' only / '1'-'3' continuation)
+    //   [1] Key Type             1N ('0' TAK, '1' ZAK, '2' TAKs, '3' ZAKs — consumed)
+    //   [2] MAC generation Mode  1N ('0' X9.9, '1' X9.19, '2'/'3' AS2805.4.1)
+    //   [3] Message Type         1N ('0' binary, '1' expanded hex)
+    //   [4..] Key                16H | 'U'+32H | 'T'+48H
+    //   [IV  16H/32H if block number is 2 or 3]
+    //   Message Length 4H, then the hex message; C4 appends an 8H MAC to verify.
+    const HEADER_LEN: usize = 4;
+    const MSG_LEN_FIELD: usize = 4;
     const MAC_HEX: usize = 8;
 
-    if payload.len() < MSG_START {
+    if payload.len() < HEADER_LEN {
         return Err(ProxyError::MalformedPayload(format!(
             "C2/C4 payload too short: {}",
             payload.len()
         )));
     }
-    let algorithm = algorithm_from_mode_c2(payload[0])?;
-    let key_id =
-        KeyDescriptor::label(String::from_utf8_lossy(&payload[KEY_START..KEY_END]).to_string());
-    let msg_len_hex = String::from_utf8_lossy(&payload[LEN_START..LEN_END]);
+    // Only single-block messages: continuation modes need an inter-block IV and
+    // session state that APC's single-call generate_mac cannot carry.
+    if payload[0] != b'0' {
+        return Err(ProxyError::UnsupportedMacMode(format!(
+            "C2/C4: message block number '{}' (continuation) not supported; use '0' (only block)",
+            payload[0] as char
+        )));
+    }
+    // payload[1] Key Type is consumed — the key_map resolves the actual key.
+    let algorithm = algorithm_from_mode_c2(payload[2])?;
+    if payload[3] != b'1' {
+        return Err(ProxyError::MalformedPayload(format!(
+            "C2/C4: message type '{}' not supported; only '1' (expanded hex) is accepted",
+            payload[3] as char
+        )));
+    }
+
+    let (key_id, key_consumed) = parse_legacy_key(payload, HEADER_LEN)?;
+    let mut pos = HEADER_LEN + key_consumed;
+
+    if payload.len() < pos + MSG_LEN_FIELD {
+        return Err(ProxyError::MalformedPayload(
+            "C2/C4: message length field missing".into(),
+        ));
+    }
+    let msg_len_hex = String::from_utf8_lossy(&payload[pos..pos + MSG_LEN_FIELD]);
     let msg_byte_len = usize::from_str_radix(msg_len_hex.trim(), 16)
         .map_err(|_| ProxyError::MalformedPayload("C2/C4: bad message length hex".into()))?;
-    let msg_end = MSG_START + msg_byte_len * 2;
+    pos += MSG_LEN_FIELD;
+
+    let msg_end = pos + msg_byte_len * 2;
     if payload.len() < msg_end {
         return Err(ProxyError::MalformedPayload(format!(
             "C2/C4: payload shorter than declared message: need {} got {}",
@@ -59,7 +91,7 @@ fn parse_c2_payload(payload: &[u8], is_verify: bool) -> Result<MacFields, ProxyE
             payload.len()
         )));
     }
-    let message_hex = String::from_utf8_lossy(&payload[MSG_START..msg_end]).to_string();
+    let message_hex = String::from_utf8_lossy(&payload[pos..msg_end]).to_string();
     let mac_to_verify = if is_verify {
         if payload.len() < msg_end + MAC_HEX {
             return Err(ProxyError::MalformedPayload("C4: missing MAC".into()));
@@ -80,7 +112,7 @@ fn parse_c2_payload(payload: &[u8], is_verify: bool) -> Result<MacFields, ProxyE
 // ── M6/M8 layout (PUGD0537-004 p.363/368) ────────────────────────────────────
 //   [0]        Mode Flag    1N  '0'=complete message (only '0' supported)
 //   [1]        Input Format 1N  '1'=hex-encoded input (only '1' supported)
-//   [2]        MAC Size     1N  '0'=full (4 bytes), '1'=half (2 bytes from left)
+//   [2]        MAC Size     1N  '0'=8 hex digits (4 bytes), '1'=16 hex digits (8 bytes)
 //   [3]        MAC Algo     1N  '1'=ISO9797_ALG1, '3'=ISO9797_ALG3, '6'=CMAC
 //   [4]        Pad Method   1N  consumed; 1-char padding selector
 //   [5..8]     Key Type     3H  consumed
@@ -126,9 +158,11 @@ fn parse_m6_payload(payload: &[u8], is_verify: bool) -> Result<MacFields, ProxyE
         )));
     }
 
+    // Per PUGD0537-004 p.365: MAC Size '0' = 8 hex digits (4 bytes),
+    // '1' = 16 hex digits (8 bytes). The larger size is the full double-length MAC.
     let mac_size_bytes: usize = match payload[2] {
         b'0' => 4,
-        b'1' => 2,
+        b'1' => 8,
         other => {
             return Err(ProxyError::MalformedPayload(format!(
                 "M6/M8: unsupported MAC size byte '{}'",
@@ -325,33 +359,57 @@ impl Handler for MacHandler {
 mod tests {
     use super::*;
 
+    // C2/C4 header: block number + key type + MAC mode + message type.
+    fn c2_payload(mac_mode: u8, key: &[u8], msg_hex: &[u8]) -> Vec<u8> {
+        let mut p = vec![b'0', b'1', mac_mode, b'1']; // block '0', key type ZAK, mode, hex
+        p.extend_from_slice(key);
+        let byte_count = msg_hex.len() / 2;
+        p.extend_from_slice(format!("{byte_count:04X}").as_bytes());
+        p.extend_from_slice(msg_hex);
+        p
+    }
+
     #[test]
     fn c2_parse_generate() {
-        let mut p = vec![b'0']; // mode: ALG1
-        p.extend_from_slice(b"1234567890ABCDEF12345678"); // 24H — wait, C2 key is 32H
-                                                          // Build a proper 32-char key
-        let mut p = vec![b'0'];
-        p.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF"); // 32H key
-        p.extend_from_slice(b"0004"); // 4 bytes message
-        p.extend_from_slice(b"DEADBEEF"); // 8 hex chars
+        let key = b"1234567890ABCDEF"; // 16H single-length TAK/ZAK
+        let p = c2_payload(b'0', key, b"DEADBEEF"); // mode '0' = X9.9 / ALG1
         let f = parse_c2_payload(&p, false).unwrap();
         assert_eq!(f.algorithm, "ISO9797_ALGORITHM1");
-        assert_eq!(f.key_id.raw, "1234567890ABCDEF1234567890ABCDEF");
+        assert_eq!(f.key_id.raw, "1234567890ABCDEF");
         assert_eq!(f.message_hex, "DEADBEEF");
         assert!(f.mac_to_verify.is_none());
         assert_eq!(f.mac_size_bytes, 4);
     }
 
     #[test]
+    fn c2_parse_u_prefixed_key() {
+        let mut key = vec![b'U'];
+        key.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
+        let p = c2_payload(b'1', &key, b"AABBCCDD"); // mode '1' = X9.19 / ALG3
+        let f = parse_c2_payload(&p, false).unwrap();
+        assert_eq!(f.algorithm, "ISO9797_ALGORITHM3");
+        assert_eq!(f.key_id.raw, "U1234567890ABCDEF1234567890ABCDEF");
+    }
+
+    #[test]
     fn c4_parse_verify() {
-        let mut p = vec![b'1']; // mode: ALG3
-        p.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF"); // 32H key
-        p.extend_from_slice(b"0004"); // 4 bytes
-        p.extend_from_slice(b"DEADBEEF"); // message
+        let key = b"1234567890ABCDEF";
+        let mut p = c2_payload(b'1', key, b"DEADBEEF");
         p.extend_from_slice(b"AABBCCDD"); // MAC 8H
         let f = parse_c2_payload(&p, true).unwrap();
         assert_eq!(f.algorithm, "ISO9797_ALGORITHM3");
         assert_eq!(f.mac_to_verify, Some("AABBCCDD".to_string()));
+    }
+
+    #[test]
+    fn c2_rejects_continuation_block() {
+        let key = b"1234567890ABCDEF";
+        let mut p = c2_payload(b'0', key, b"DEADBEEF");
+        p[0] = b'1'; // first-block continuation
+        assert!(matches!(
+            parse_c2_payload(&p, false),
+            Err(ProxyError::UnsupportedMacMode(_))
+        ));
     }
 
     fn m6_payload(algo: u8, mac_size: u8, key: &[u8], msg_hex: &[u8]) -> Vec<u8> {
@@ -385,14 +443,14 @@ mod tests {
     }
 
     #[test]
-    fn m8_parse_verify_half_mac() {
+    fn m8_parse_verify_full_double_length_mac() {
         let key = b"1234567890ABCDEF"; // 16H
-        let mut p = m6_payload(b'3', b'1', key, b"DEADBEEF"); // mac_size='1'→2 bytes
-        p.extend_from_slice(b"AABB"); // 4H = 2-byte MAC
+        let mut p = m6_payload(b'3', b'1', key, b"DEADBEEF"); // mac_size='1' → 8 bytes (16 hex)
+        p.extend_from_slice(b"AABBCCDD11223344"); // 16H = 8-byte MAC
         let f = parse_m6_payload(&p, true).unwrap();
         assert_eq!(f.algorithm, "ISO9797_ALGORITHM3");
-        assert_eq!(f.mac_size_bytes, 2);
-        assert_eq!(f.mac_to_verify, Some("AABB".to_string()));
+        assert_eq!(f.mac_size_bytes, 8);
+        assert_eq!(f.mac_to_verify, Some("AABBCCDD11223344".to_string()));
     }
 
     #[test]

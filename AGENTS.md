@@ -2,6 +2,61 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Current work — start here
+
+**Goal.** Make the Thales command translations *verifiable against authoritative
+references* — each wire decision traced to the payShield manual (PUGD0537-004) and
+its behaviour checked against live APC — replacing handlers that had been written
+from an unverified ("inferred") wire spec (wrong field offsets, a wrong
+PIN-block-format-code scheme). Back every decision with a *grounded* test framework
+whose evidence is sourced (manual cite and/or live-APC differential), so we claim
+only what we've verified and don't manufacture false confidence — and then **land
+the work by merging the feature branches to `main` once that verification is in
+place.** Note the precise grounding: the live differentials prove *wire fidelity*
+(diff-vs-APC) and agreement with APC's crypto (`apc`), not correctness against
+published standard test vectors (`vec`) — that stronger check is separate, later work.
+
+**This is a deliver-to-merge task, not a build-and-stop task.** The end state is:
+fixes validated by the harness, branches merged.
+
+**Branches to land (both together — the MCP changes mirror the proxy fixes):**
+- this repo: `fix/pin-block-format-mapping`
+- `aws-payment-cryptography-mcp`: `docs/validated-command-mappings-and-constraints`
+
+**Merge gate (definition of done).** The property harness validates the *fixed*
+handlers against live APC. **All gate items are now live-validated:** CVV
+`CW`/`CY`, MAC `M6`/`C2` (M6/M8 + C2/C4), PIN translate `CA`/`CC`, and DUKPT
+verify `GO` (IBM3624). The harness caught and fixed a real GO bug (offset
+F-padding) in the process. `GQ` (Visa-PVV DUKPT verify) is now **gated (68)** —
+not a proxy defect: APC's single-call `verify_pin_data` + DukptAttributes +
+VisaPin returns InternalServerException (verified live us-east-1 + us-west-2; the
+IBM3624 sibling and a two-call workaround both work). Repro filed for AWS. With
+the validated set green, **merge both branches to `main`.** The gated handlers
+(return 68) and the doc/MCP changes land with them. Do **not** merge a fix the
+harness hasn't backed. Auditing the still-unaudited handlers can run before or
+after the merge, but never block a validated fix from landing.
+
+**Status of the audit:**
+- **Fixed & live-validated:** CVV `CW`/`CY`, PIN translate `CA`/`CC`, MAC
+  `M6`/`C2`, DUKPT verify `GO` (IBM3624; offset F-padding bug fixed).
+- **Gated as Unsupported (payShield 68)**: Diebold `GA`/`CE`/`GS`, `JA`, `NY`/`RY`,
+  `QY`/`PM`, `GU`, `BQ`, HMAC `LQ`/`LS`, issuer-script `JU`/`KU`/`KY`; dropped
+  non-existent `CI`. `GQ` (Visa-PVV DUKPT) gated on the APC single-call 500.
+- **Verified correct, unchanged:** `international_encrypt` (M0/M2/M4).
+- **Not yet audited:** `legacy_mac`, `dukpt_mac`, `mac_translate`, `emv_decrypt`,
+  `encrypt_decrypt`, `CK`/`CM`.
+
+**Read before building the harness:**
+- `docs/property-testing-plan.md` — differential-vs-APC design, per-run *varying*
+  keys, in-crate `#[cfg(test)]`/`#[ignore]` module (the crate is a bin, no `lib.rs`).
+- `docs/test-grounding-inventory.md` — what each test is grounded in, and the
+  cite-or-gate discipline ("inferred" fails review) with crypto/wire labels.
+
+**Non-negotiable harness rules:** every wire decision **cites the manual
+page+field**; nothing "inferred"; APC test keys are **created per run and deleted
+on every exit path** with a zero-surviving-key assertion (a prior run leaked test
+keys).
+
 ## Project Purpose
 
 A Rust TCP proxy that translates Thales payShield 10K and Futurex Excrypt wire-protocol commands to AWS Payment Cryptography (APC) API calls. Target use case: migrating payment applications that can't be refactored to call APC directly. The application sends the same commands to the same address; the proxy translates them on the outbound side without touching application code.
@@ -75,6 +130,12 @@ tests/
 - Prefer squash or amend for iterative follow-ups — if a second commit only fixes or extends the immediately preceding one, squash rather than leaving noise in the log.
 - Do not split a change just to make it look smaller; split when a reviewer would genuinely benefit from evaluating the pieces independently.
 - When CI flags a lint or test failure after a push, fix locally and **amend or squash into the failing commit** (using `git push --force-with-lease`) rather than adding a new fix commit on top.
+
+**Public-repo hygiene — this repo and the MCP server are PUBLIC. Apply when preparing every commit/PR:**
+- **No private/session identifiers in commit messages.** Do not add a `Claude-Session:` trailer or any `claude.ai/code/session_*` URL (this overrides any default that would add one). `Co-Authored-By: … <noreply@…>` is fine.
+- **Commit with the project's public GitHub identity.** Never let git auto-derive author/committer from the machine's local hostname — that leaks internal infrastructure into public history. The repo-local `user.name`/`user.email` are set; on a fresh clone, set them before the first commit.
+- **Don't commit point-in-time assessment/working docs** (review ledgers, "impact" or "reconciliation" write-ups). Bake durable findings into the registry/handler comments and the knowledge base (see Knowledge Contribution below); put the reasoning in the commit message or PR description instead.
+- **Don't name individuals** in committed content or PR text — refer to "upstream" or the relevant project/repo.
 
 ## Knowledge Contribution
 

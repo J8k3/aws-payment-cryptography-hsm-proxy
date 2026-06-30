@@ -4,7 +4,9 @@ use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
-use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, parse_legacy_key};
+use crate::handlers::thales::common::{
+    bytes_to_hex, decode_bcd_pan_seq, emv_pad, parse_legacy_key,
+};
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -113,7 +115,8 @@ fn parse_cap(payload: &[u8], is_k2: bool) -> Result<CapFields, ProxyError> {
             "{cmd}: transaction data too short: need {txn_byte_len} bytes"
         )));
     }
-    let txn_data = Zeroizing::new(bytes_to_hex(&payload[pos..pos + txn_byte_len]));
+    // APC does not pad; forward EMV (ISO 9797-1 method 2) padded transaction data.
+    let txn_data = Zeroizing::new(bytes_to_hex(&emv_pad(&payload[pos..pos + txn_byte_len])));
     pos += txn_byte_len;
 
     // Delimiter 0x3B
@@ -254,10 +257,9 @@ mod tests {
         b"1234567890ABCDEF".to_vec()
     }
 
-    // PAN 123456789012, Seq 01 → EMV Option A pre-format (rightmost-16(PAN‖PSN),
-    // left zero-padded): "0012345678901201".
+    // EMV pre-formatted (rightmost 16 of PAN||PSN) "1234567890123401" -> PAN 12345678901234, Seq 01
     fn pan_bcd() -> [u8; 8] {
-        [0x00, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01]
+        [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x01]
     }
 
     fn k2_payload(key: &[u8], txn: &[u8]) -> Vec<u8> {
@@ -292,11 +294,11 @@ mod tests {
         let payload = k2_payload(&single_key(), &[0xDE, 0xAD]);
         let f = parse_cap(&payload, true).unwrap();
         assert_eq!(f.key_id.raw, "1234567890ABCDEF");
-        assert_eq!(f.pan, "123456789012");
+        assert_eq!(f.pan, "12345678901234");
         assert_eq!(f.pan_seq, "01");
         assert_eq!(f.atc, "0001");
         assert_eq!(f.unpredictable_number, Some("DEADBEEF".to_string()));
-        assert_eq!(f.txn_data.as_str(), "DEAD");
+        assert_eq!(f.txn_data.as_str(), "DEAD800000000000"); // EMV method-2 padded for APC
         assert_eq!(f.cryptogram, "AABBCCDDEEFF0011");
     }
 
@@ -305,10 +307,10 @@ mod tests {
         let payload = ks_payload(&single_key(), &[0xCA, 0xFE]);
         let f = parse_cap(&payload, false).unwrap();
         assert_eq!(f.key_id.raw, "1234567890ABCDEF");
-        assert_eq!(f.pan, "123456789012");
+        assert_eq!(f.pan, "12345678901234");
         assert_eq!(f.atc, "0001");
         assert!(f.unpredictable_number.is_none());
-        assert_eq!(f.txn_data.as_str(), "CAFE");
+        assert_eq!(f.txn_data.as_str(), "CAFE800000000000"); // EMV method-2 padded for APC
         assert_eq!(f.cryptogram, "AABBCCDDEEFF0011");
     }
 

@@ -1,141 +1,55 @@
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::error::ProxyError;
 use crate::handlers::{AppState, Handler, HandlerResult};
 
-/// payShield International Host Commands — Dynamic CVV generation and verification.
+/// payShield dynamic card-verification commands.
 ///
-/// QY (→ QZ): Generate a Dynamic Card Verification Value (dCVV)
-/// PM (→ PN): Verify a Dynamic CVV/CVC
+/// QY (→ QZ) — Generate a Dynamic CVV.
+/// PM (→ PN) — Verify a Dynamic CVV/CVC.
 ///
-/// Source: PUGD0537-004 Rev A, p.306 (QY) and p.308 (PM). AUTHORITATIVE per apc-agent.
-/// Wire format inferred from the CW/CY commands and the APC DynamicCardVerificationValue
-/// structure — treat field positions as reference-quality until PUGD0537 is available.
+/// NOT SUPPORTED ON APC (see reasoning below).
 ///
-/// ## Inferred QY field layout
-///   [32H] CVK — double-length CVK encrypted under LMK pair 14-15
-///   [16N] PAN — 16 decimal digits
-///   [4N]  Expiry — card expiry date as MMYY
-///   [3N]  Service Code
-///   [4H]  ATC — Application Transaction Counter (2 bytes hex)
-///   [2N]  PAN Sequence Number — 2 decimal digits
+/// These are EMV, multi-scheme dynamic-CVV operations, not the static-CVK
+/// CW/CY algorithm. The real wire format (PUGD0537-004 Rev A, p.306 / p.308)
+/// begins with a Scheme ID and derives a *card-unique* key from an issuer
+/// master key:
 ///
-/// QZ response (after header):
-///   [2H] Error Code
-///   [3N] dCVV value (3 decimal digits)
+/// QY (generate):
+///   Scheme ID (1N)            '0' Visa dCVV, '1' Visa AV, '5' Visa dCVV2 time-based
+///   Master Key (MK-AC, E0)    32H | 'U'+32H | 'T'+48H | 'S'+keyblock
+///   Key Derivation Method (1A) 'A'/'B' (EMV 4.1 Book 2 Option A/B)
+///   PAN (nN, max 19) ';'      variable, delimiter-terminated
+///   then scheme-specific fields — for Visa dCVV: expiry (4N),
+///   service code (3N, must be '998'), ATC (6N).
 ///
-/// ## Inferred PM field layout (verify path)
-///   [32H] CVK
-///   [3N]  dCVV to verify
-///   [16N] PAN
-///   [4N]  Expiry
-///   [3N]  Service Code
-///   [4H]  ATC
-///   [2N]  PAN Sequence Number
+/// PM (verify):
+///   Scheme ID (1N)            '0' Visa, '1' Mastercard, '2' Amex, '3' Discover,
+///                             '4' Oberthur, '5' Visa dCVV2, '6' JCB, '7' Gemalto
+///   Version (1N)              scheme-specific (Visa DCVV/LUC, MC CVC3, …)
+///   MK-DCVV master key        MK-AC or MK-CVC3, derivation-method dependent
+///   then scheme/version-specific fields.
 ///
-/// PN response:
-///   [2H] Error Code (00=success, 01=mismatch)
+/// Why this cannot be faithfully proxied to APC today:
+///   - The card key is derived from an EMV master key (E-type) via an explicit
+///     Option A/B method; the previous handler instead resolved a static C0 CVK
+///     and emitted a CardVerificationValue/DynamicCardVerificationValue call from
+///     a fabricated fixed-width layout (32H CVK, fixed 16N PAN, 4H ATC, a
+///     spurious PAN-sequence field) that matches no real QY/PM message.
+///   - Visa dCVV (Scheme '0') is the one scheme that plausibly maps to APC's
+///     generate/verify_card_validation_data with DynamicCardVerificationValue,
+///     but APC requires a PAN sequence number that the Visa-dCVV wire format does
+///     not carry, and the ATC width/encoding and card-key derivation must be
+///     validated against live APC before a mapping can be trusted.
+///   - The remaining schemes (Visa AV, Visa dCVV2 time-based, Mastercard CVC3,
+///     Amex ExpressPay, Discover, Oberthur, JCB, Gemalto) have no APC equivalent.
 ///
-/// ## APC mapping
-///   QY → generate_card_validation_data with DynamicCardVerificationValue + TR31_C0 key
-///   PM → verify_card_validation_data with DynamicCardVerificationValue + TR31_C0 key
+/// Returning "command disabled" (payShield 68) is correct until a Scheme-'0'
+/// mapping is implemented and validated end-to-end against AWS Payment
+/// Cryptography. This avoids emitting a cryptographically wrong dCVV.
 pub struct DynamicCvvHandler;
-
-const CVK_LEN: usize = 32;
-const PAN_LEN: usize = 16;
-const EXPIRY_LEN: usize = 4;
-const SERVICE_CODE_LEN: usize = 3;
-const ATC_LEN: usize = 4;
-const PAN_SEQ_LEN: usize = 2;
-const DCVV_LEN: usize = 3;
-
-const QY_MIN_LEN: usize = CVK_LEN + PAN_LEN + EXPIRY_LEN + SERVICE_CODE_LEN + ATC_LEN + PAN_SEQ_LEN;
-const PM_MIN_LEN: usize =
-    CVK_LEN + DCVV_LEN + PAN_LEN + EXPIRY_LEN + SERVICE_CODE_LEN + ATC_LEN + PAN_SEQ_LEN;
-
-struct QyFields {
-    cvk_id: String,
-    pan: String,
-    expiry: String,
-    service_code: String,
-    atc: String,
-    pan_seq: String,
-}
-
-fn parse_qy_fields(payload: &[u8]) -> Result<QyFields, ProxyError> {
-    if payload.len() < QY_MIN_LEN {
-        return Err(ProxyError::MalformedPayload(format!(
-            "QY payload too short: {} < {}",
-            payload.len(),
-            QY_MIN_LEN
-        )));
-    }
-    let mut pos = 0;
-    let cvk_id = String::from_utf8_lossy(&payload[pos..pos + CVK_LEN]).to_string();
-    pos += CVK_LEN;
-    let pan = String::from_utf8_lossy(&payload[pos..pos + PAN_LEN]).to_string();
-    pos += PAN_LEN;
-    let expiry = String::from_utf8_lossy(&payload[pos..pos + EXPIRY_LEN]).to_string();
-    pos += EXPIRY_LEN;
-    let service_code = String::from_utf8_lossy(&payload[pos..pos + SERVICE_CODE_LEN]).to_string();
-    pos += SERVICE_CODE_LEN;
-    let atc = String::from_utf8_lossy(&payload[pos..pos + ATC_LEN]).to_string();
-    pos += ATC_LEN;
-    let pan_seq = String::from_utf8_lossy(&payload[pos..pos + PAN_SEQ_LEN]).to_string();
-    Ok(QyFields {
-        cvk_id,
-        pan,
-        expiry,
-        service_code,
-        atc,
-        pan_seq,
-    })
-}
-
-struct PmFields {
-    cvk_id: String,
-    dcvv: String,
-    pan: String,
-    expiry: String,
-    service_code: String,
-    atc: String,
-    pan_seq: String,
-}
-
-fn parse_pm_fields(payload: &[u8]) -> Result<PmFields, ProxyError> {
-    if payload.len() < PM_MIN_LEN {
-        return Err(ProxyError::MalformedPayload(format!(
-            "PM payload too short: {} < {}",
-            payload.len(),
-            PM_MIN_LEN
-        )));
-    }
-    let mut pos = 0;
-    let cvk_id = String::from_utf8_lossy(&payload[pos..pos + CVK_LEN]).to_string();
-    pos += CVK_LEN;
-    let dcvv = String::from_utf8_lossy(&payload[pos..pos + DCVV_LEN]).to_string();
-    pos += DCVV_LEN;
-    let pan = String::from_utf8_lossy(&payload[pos..pos + PAN_LEN]).to_string();
-    pos += PAN_LEN;
-    let expiry = String::from_utf8_lossy(&payload[pos..pos + EXPIRY_LEN]).to_string();
-    pos += EXPIRY_LEN;
-    let service_code = String::from_utf8_lossy(&payload[pos..pos + SERVICE_CODE_LEN]).to_string();
-    pos += SERVICE_CODE_LEN;
-    let atc = String::from_utf8_lossy(&payload[pos..pos + ATC_LEN]).to_string();
-    pos += ATC_LEN;
-    let pan_seq = String::from_utf8_lossy(&payload[pos..pos + PAN_SEQ_LEN]).to_string();
-    Ok(PmFields {
-        cvk_id,
-        dcvv,
-        pan,
-        expiry,
-        service_code,
-        atc,
-        pan_seq,
-    })
-}
 
 #[async_trait]
 impl Handler for DynamicCvvHandler {
@@ -146,107 +60,16 @@ impl Handler for DynamicCvvHandler {
     async fn handle(
         &self,
         command_code: &[u8],
-        payload: &[u8],
-        state: &Arc<AppState>,
+        _payload: &[u8],
+        _state: &Arc<AppState>,
     ) -> HandlerResult {
-        match command_code {
-            b"QY" => handle_qy(payload, state).await,
-            b"PM" => handle_pm(payload, state).await,
-            _ => HandlerResult::err(*b"68"),
-        }
-    }
-}
-
-async fn handle_qy(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
-    let f = match parse_qy_fields(payload) {
-        Ok(f) => f,
-        Err(e) => return HandlerResult::from_proxy_error(&e),
-    };
-    let cvk_arn = match state.key_map.resolve(&f.cvk_id) {
-        Ok(a) => a.to_string(),
-        Err(e) => return HandlerResult::from_proxy_error(&e),
-    };
-
-    use aws_sdk_paymentcryptographydata::types::{
-        CardGenerationAttributes, DynamicCardVerificationValue,
-    };
-    let attrs = match DynamicCardVerificationValue::builder()
-        .pan_sequence_number(&f.pan_seq)
-        .card_expiry_date(&f.expiry)
-        .service_code(&f.service_code)
-        .application_transaction_counter(&f.atc)
-        .build()
-        .map_err(|e| ProxyError::ApcError(e.to_string()))
-    {
-        Ok(a) => CardGenerationAttributes::DynamicCardVerificationValue(a),
-        Err(e) => return HandlerResult::from_proxy_error(&e),
-    };
-
-    debug!(cvk = %cvk_arn, "QY: generate_card_validation_data dCVV");
-    match state
-        .data
-        .generate_card_validation_data()
-        .key_identifier(&cvk_arn)
-        .primary_account_number(&f.pan)
-        .generation_attributes(attrs)
-        .send()
-        .await
-    {
-        Ok(resp) => HandlerResult::success(resp.validation_data().as_bytes().to_vec()),
-        Err(e) => {
-            warn!(?e, "QY: generate_card_validation_data failed");
-            HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
-        }
-    }
-}
-
-async fn handle_pm(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
-    let f = match parse_pm_fields(payload) {
-        Ok(f) => f,
-        Err(e) => return HandlerResult::from_proxy_error(&e),
-    };
-    let cvk_arn = match state.key_map.resolve(&f.cvk_id) {
-        Ok(a) => a.to_string(),
-        Err(e) => return HandlerResult::from_proxy_error(&e),
-    };
-
-    use aws_sdk_paymentcryptographydata::types::{
-        CardVerificationAttributes, DynamicCardVerificationValue,
-    };
-    let attrs = match DynamicCardVerificationValue::builder()
-        .pan_sequence_number(&f.pan_seq)
-        .card_expiry_date(&f.expiry)
-        .service_code(&f.service_code)
-        .application_transaction_counter(&f.atc)
-        .build()
-        .map_err(|e| ProxyError::ApcError(e.to_string()))
-    {
-        Ok(a) => CardVerificationAttributes::DynamicCardVerificationValue(a),
-        Err(e) => return HandlerResult::from_proxy_error(&e),
-    };
-
-    debug!(cvk = %cvk_arn, "PM: verify_card_validation_data dCVV");
-    match state
-        .data
-        .verify_card_validation_data()
-        .key_identifier(&cvk_arn)
-        .primary_account_number(&f.pan)
-        .validation_data(&f.dcvv)
-        .verification_attributes(attrs)
-        .send()
-        .await
-    {
-        Ok(_) => HandlerResult::success(vec![]),
-        Err(e) => {
-            if e.as_service_error().is_some_and(
-                aws_sdk_paymentcryptographydata::operation::verify_card_validation_data::VerifyCardValidationDataError::is_verification_failed_exception,
-            ) {
-                warn!("PM: dCVV mismatch");
-                return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
-            }
-            warn!(?e, "PM: verify_card_validation_data failed");
-            HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
-        }
+        let code = String::from_utf8_lossy(command_code);
+        warn!(command = %code, "dynamic CVV command rejected: EMV-derived multi-scheme dCVV not modelable on APC");
+        HandlerResult::from_proxy_error(&ProxyError::Unsupported(format!(
+            "{code}: dynamic CVV (dCVV/dCVV2) derives a card-unique key from an EMV master key across \
+             multiple card schemes; AWS Payment Cryptography cannot reproduce the QY/PM operation as \
+             specified"
+        )))
     }
 }
 
@@ -254,71 +77,18 @@ async fn handle_pm(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
 mod tests {
     use super::*;
 
-    fn qy_payload(atc: &[u8], pan_seq: &[u8]) -> Vec<u8> {
-        let mut v = Vec::new();
-        v.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF"); // CVK 32H
-        v.extend_from_slice(b"4111111111111111"); // PAN
-        v.extend_from_slice(b"1225"); // expiry MMYY
-        v.extend_from_slice(b"101"); // service code
-        v.extend_from_slice(atc); // ATC 4H
-        v.extend_from_slice(pan_seq); // PAN seq 2N
-        v
+    #[test]
+    fn command_codes_registered() {
+        let h = DynamicCvvHandler;
+        assert!(h.command_codes().contains(&"QY"));
+        assert!(h.command_codes().contains(&"PM"));
     }
 
     #[test]
-    fn qy_parses_all_fields() {
-        let payload = qy_payload(b"0012", b"00");
-        let f = parse_qy_fields(&payload).unwrap();
-        assert_eq!(f.cvk_id, "1234567890ABCDEF1234567890ABCDEF");
-        assert_eq!(f.pan, "4111111111111111");
-        assert_eq!(f.expiry, "1225");
-        assert_eq!(f.service_code, "101");
-        assert_eq!(f.atc, "0012");
-        assert_eq!(f.pan_seq, "00");
-    }
-
-    #[test]
-    fn qy_rejects_short_payload() {
-        let payload = b"tooshort";
-        assert!(parse_qy_fields(payload).is_err());
-    }
-
-    #[test]
-    fn pm_parses_all_fields() {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF"); // CVK
-        payload.extend_from_slice(b"123"); // dCVV to verify
-        payload.extend_from_slice(b"4111111111111111"); // PAN
-        payload.extend_from_slice(b"1225"); // expiry
-        payload.extend_from_slice(b"101"); // service code
-        payload.extend_from_slice(b"0012"); // ATC
-        payload.extend_from_slice(b"00"); // PAN seq
-
-        let f = parse_pm_fields(&payload).unwrap();
-        assert_eq!(f.cvk_id, "1234567890ABCDEF1234567890ABCDEF");
-        assert_eq!(f.dcvv, "123");
-        assert_eq!(f.pan, "4111111111111111");
-        assert_eq!(f.expiry, "1225");
-        assert_eq!(f.service_code, "101");
-        assert_eq!(f.atc, "0012");
-        assert_eq!(f.pan_seq, "00");
-    }
-
-    #[test]
-    fn pm_rejects_short_payload() {
-        let payload = b"tooshort";
-        assert!(parse_pm_fields(payload).is_err());
-    }
-
-    #[test]
-    fn qy_min_len_constant_is_correct() {
-        // CVK(32) + PAN(16) + expiry(4) + svc(3) + ATC(4) + panseq(2) = 61
-        assert_eq!(QY_MIN_LEN, 61);
-    }
-
-    #[test]
-    fn pm_min_len_constant_is_correct() {
-        // CVK(32) + dCVV(3) + PAN(16) + expiry(4) + svc(3) + ATC(4) + panseq(2) = 64
-        assert_eq!(PM_MIN_LEN, 64);
+    fn unsupported_maps_to_68() {
+        assert_eq!(
+            ProxyError::Unsupported("QY".into()).payshield_code(),
+            *b"68"
+        );
     }
 }
