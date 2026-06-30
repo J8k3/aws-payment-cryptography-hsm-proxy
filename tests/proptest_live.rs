@@ -1372,3 +1372,216 @@ async fn dukpt_pin_verify_go_differential() -> anyhow::Result<()> {
     survivor_result?;
     Ok(())
 }
+
+// ── Legacy single-length DUKPT PIN verify CK (live differential) ──────────────
+//
+// Un-audited handler (PUGD0538). CK verifies a DUKPT-encrypted PIN against an IBM
+// 3624 offset (original single-length DUKPT, Tdes2Key). Wire: BDK + PVK + KSN
+// descriptor(3H) + KSN(20H) + PIN block(16H) + check len(2N) + PAN(12N) + decim
+// table(16H) + PIN validation data(12A) + offset(12H, F-padded). Verdict
+// differential, like GO. (CM, the Visa-PVV sibling, is gated — same APC 500 as GQ.)
+
+const CK_BDK_LABEL: &str = "U00000000000000000000000000000C10";
+const CK_PVK_LABEL: &str = "U00000000000000000000000000000C11";
+
+#[allow(clippy::too_many_arguments)]
+fn encode_ck(
+    bdk_label: &str,
+    pvk_label: &str,
+    ksn: &str,
+    pin_block16: &str,
+    pan: &str,
+    decim: &str,
+    pvid: &str,
+    offset12: &str,
+) -> Vec<u8> {
+    let mut v = bdk_label.as_bytes().to_vec();
+    v.extend_from_slice(pvk_label.as_bytes());
+    v.extend_from_slice(b"000"); // KSN descriptor (3H, consumed)
+    v.extend_from_slice(ksn.as_bytes()); // 20H
+    v.extend_from_slice(pin_block16.as_bytes()); // 16H
+    v.extend_from_slice(b"04"); // check length
+    v.extend_from_slice(pan.as_bytes()); // 12N
+    v.extend_from_slice(decim.as_bytes()); // 16H decimalization table
+    v.extend_from_slice(pvid.as_bytes()); // 12A PIN validation data
+    v.extend_from_slice(offset12.as_bytes()); // 12H offset
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn dukpt_pin_verify_ck_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!("dukpt_pin_verify_ck_differential: grounding crypto=apc wire=diff-xprov(IBM3624 single-length DUKPT; verdict)");
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [
+        KeySpec {
+            role: "BDK",
+            wire_label: CK_BDK_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31B0BaseDerivationKey,
+            modes: KeyModesOfUse::builder().derive_key(true).build(),
+        },
+        KeySpec {
+            role: "PVK",
+            wire_label: CK_PVK_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31V1Ibm3624PinVerificationKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+        KeySpec {
+            role: "ZPK",
+            wire_label: "ZPK_UNUSED_IN_WIRE_CK",
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31P0PinEncryptionKey,
+            modes: KeyModesOfUse::builder()
+                .encrypt(true)
+                .decrypt(true)
+                .wrap(true)
+                .unwrap(true)
+                .build(),
+        },
+    ];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let bdk_arn = keys.arn("BDK").to_string();
+    let pvk_arn = keys.arn("PVK").to_string();
+    let zpk_arn = keys.arn("ZPK").to_string();
+    let bdk_label = keys.wire_label("BDK").to_string();
+    let pvk_label = keys.wire_label("PVK").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let ck = registry.get(b"CK").expect("CK registered");
+
+    const LABEL: &str = "dukpt_pin_verify_ck";
+    let ksn = "FFFF9876543210E00001"; // 3DES single-length DUKPT, 20H
+    let run = cases_to_run();
+    eprintln!(
+        "dukpt_pin_verify_ck_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let pvid = pan.clone();
+
+        // 1) IBM3624 natural-PIN block under the ZPK (offset 0).
+        let zblk = data
+            .generate_pin_data()
+            .generation_key_identifier(&pvk_arn)
+            .encryption_key_identifier(&zpk_arn)
+            .primary_account_number(&pan)
+            .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+            .generation_attributes(PinGenerationAttributes::Ibm3624NaturalPin(
+                Ibm3624NaturalPin::builder()
+                    .decimalization_table(GO_DECIM_TABLE)
+                    .pin_validation_data(&pvid)
+                    .pin_validation_data_pad_character("F")
+                    .build()?,
+            ))
+            .send()
+            .await?
+            .encrypted_pin_block()
+            .to_string();
+
+        // 2) Translate ZPK -> BDK DUKPT at this KSN.
+        let dblk = data
+            .translate_pin_data()
+            .incoming_key_identifier(&zpk_arn)
+            .outgoing_key_identifier(&bdk_arn)
+            .encrypted_pin_block(&zblk)
+            .incoming_translation_attributes(translate_iso(0, &pan)?)
+            .outgoing_translation_attributes(translate_iso(0, &pan)?)
+            .outgoing_dukpt_attributes(
+                aws_sdk_paymentcryptographydata::types::DukptDerivationAttributes::builder()
+                    .key_serial_number(ksn)
+                    .dukpt_key_derivation_type(DukptDerivationType::Tdes2Key)
+                    .build()?,
+            )
+            .send()
+            .await?
+            .pin_block()
+            .to_string();
+
+        let offset_wire = "0000FFFFFFFF"; // natural-PIN offset, F-padded to 12H
+
+        // 3) Proxy CK verdict.
+        let wire = encode_ck(
+            &bdk_label,
+            &pvk_label,
+            ksn,
+            &dblk,
+            &pan,
+            GO_DECIM_TABLE,
+            &pvid,
+            offset_wire,
+        );
+        let proxy = ck.handle(b"CK", &wire, &state).await;
+        let proxy_pass = &proxy.error_code == b"00";
+
+        // 4) Oracle verdict: direct APC verify_pin_data (IBM3624 + DUKPT).
+        let oracle = data
+            .verify_pin_data()
+            .verification_key_identifier(&pvk_arn)
+            .encryption_key_identifier(&bdk_arn)
+            .encrypted_pin_block(&dblk)
+            .primary_account_number(&pan)
+            .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+            .verification_attributes(PinVerificationAttributes::Ibm3624Pin(
+                Ibm3624PinVerification::builder()
+                    .decimalization_table(GO_DECIM_TABLE)
+                    .pin_validation_data(&pvid)
+                    .pin_validation_data_pad_character("F")
+                    .pin_offset("0000")
+                    .build()?,
+            ))
+            .dukpt_attributes(
+                DukptAttributes::builder()
+                    .key_serial_number(ksn)
+                    .dukpt_derivation_type(DukptDerivationType::Tdes2Key)
+                    .build()?,
+            )
+            .send()
+            .await;
+        let oracle_pass = oracle.is_ok();
+
+        if proxy_pass != oracle_pass {
+            eprintln!(
+                "{}",
+                replay_hint("dukpt_pin_verify_ck_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} CK verdict mismatch: proxy_pass={proxy_pass} (error_code={}) oracle_pass={oracle_pass} pan={pan}",
+                String::from_utf8_lossy(&proxy.error_code),
+            ));
+            break;
+        }
+        if !oracle_pass {
+            eprintln!(
+                "{}",
+                replay_hint("dukpt_pin_verify_ck_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} CK: constructed PIN should verify but both rejected it (pan={pan})"
+            ));
+            break;
+        }
+
+        eprintln!("case={case_idx:02} OK pan={pan} verdict=pass");
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
