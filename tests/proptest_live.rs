@@ -1138,10 +1138,11 @@ async fn pin_translate_ca_cc_differential() -> anyhow::Result<()> {
 // fmt code(2N) || check len(2N) || PAN(12N) || decim table(16H) || PIN
 // validation data(12A) || offset(12H, left-justified F-padded).
 //
-// NOTE: this covers IBM3624 + 3DES DUKPT. The Visa-PVV sibling (GQ) is currently
-// blocked by an APC-side bug — verify_pin_data with DukptAttributes + VisaPin
+// NOTE: this covers IBM3624 + 3DES DUKPT. The Visa-PVV sibling (GQ) is GATED
+// (returns 68): APC's single-call verify_pin_data with DukptAttributes + VisaPin
 // returns InternalServerException (500), reproducibly, across 3DES/AES and
 // regions, while IBM3624 + DUKPT (this test) and non-DUKPT Visa PVV both work.
+// See the GQ gating rationale in src/handlers/thales/dukpt_pin_verify_aes.rs.
 //
 // Verify has no deterministic output to diff, so the differential is on the
 // VERDICT: a valid PIN is minted via generate_pin_data (IBM3624 natural PIN,

@@ -1098,6 +1098,15 @@ async fn unsupported_command_returns_68() {
         .expect("GU registered in dukpt_pin_verify_aes");
     let result = handler.handle(b"GU", b"", &state).await;
     assert_eq!(&result.error_code, b"68");
+
+    // GQ (Visa PVV DUKPT verify) is gated: APC's single-call verify_pin_data +
+    // DukptAttributes + VisaPin returns InternalServerException (500). Registered
+    // via dukpt_pin_verify_aes but handle() returns error 68 pending an APC fix.
+    let handler = registry
+        .get(b"GQ")
+        .expect("GQ registered in dukpt_pin_verify_aes");
+    let result = handler.handle(b"GQ", b"", &state).await;
+    assert_eq!(&result.error_code, b"68");
 }
 
 #[tokio::test]

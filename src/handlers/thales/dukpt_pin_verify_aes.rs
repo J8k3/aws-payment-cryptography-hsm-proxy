@@ -5,7 +5,7 @@ use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
 use crate::handlers::thales::common::{
-    map_pin_block_format, parse_bdk, parse_key_32, parse_ksn_with_descriptor, parse_legacy_key,
+    map_pin_block_format, parse_bdk, parse_ksn_with_descriptor, parse_legacy_key,
 };
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
@@ -14,17 +14,17 @@ use aws_sdk_paymentcryptographydata::types::{DukptDerivationType, PinBlockFormat
 /// payShield 3DES & AES DUKPT PIN verification (PUGD0537-004 p.349/352/355/358).
 ///
 /// GO — Verify PIN, IBM 3624 method  → APC verify_pin_data (Ibm3624PinVerification)
-/// GQ — Verify PIN, Visa PVV method  → APC verify_pin_data (VisaPinVerification)
+/// GQ — Verify PIN, Visa PVV method  → 68 (gated; APC-side limitation, see below)
 /// GS — Verify PIN, Diebold method   → 68 (Diebold table in HSM user storage)
 /// GU — Verify PIN, Encrypted PIN    → 68 (LMK reference PIN, no APC equivalent)
 ///
-/// Both 3DES (X9.24-1) and AES (X9.24-3) DUKPT are supported. The derivation
-/// type is read from the KSN descriptor: 20H KSN → Tdes2Key, 24H KSN → Aes128.
+/// GO supports both 3DES (X9.24-1) and AES (X9.24-3) DUKPT. The derivation type
+/// is read from the KSN descriptor: 20H KSN → Tdes2Key, 24H KSN → Aes128.
 ///
-/// Both commands begin with a Mode digit (1N): '0'/'2' = PIN verify only,
-/// '1' = PIN verify AND MAC verify. APC's verify_pin_data does not verify a MAC
-/// in the same call and the GP/GR response carries a separate MAC Error Code we
-/// cannot reproduce, so Mode '1' is rejected as unsupported (68).
+/// GO begins with a Mode digit (1N): '0'/'2' = PIN verify only, '1' = PIN verify
+/// AND MAC verify. APC's verify_pin_data does not verify a MAC in the same call
+/// and the GP response carries a separate MAC Error Code we cannot reproduce, so
+/// Mode '1' is rejected as unsupported (68).
 ///
 /// GO field layout (p.349):
 ///   Mode:             1N  ('0'/'2' accepted, '1' → 68)
@@ -37,18 +37,22 @@ use aws_sdk_paymentcryptographydata::types::{DukptDerivationType, PinBlockFormat
 ///   Account Number:  12N
 ///   Decimalization Table: 16H
 ///   PIN Validation Data:  12A
-///   Offset:          12H  IBM PIN offset, left-justified, F-padded
+///   Offset:          12H  IBM PIN offset, left-justified, F-padded (the F
+///                         padding is stripped before the APC call — APC's
+///                         pin_offset is digits-only)
 ///
-/// GQ field layout (p.352):
-///   Mode:             1N
-///   BDK:             32H | 'U'+32H | 'S'+keyblock
-///   PVK-Pair:        32H | 'U'+32H | 'T'+48H  (Visa double-length baseline)
-///   KSN Descriptor + KSN: parse_ksn_with_descriptor
-///   PIN Block:       16H | 32H
-///   PIN Block Format Code: 2N
-///   Account Number:  12N
-///   PVKI:             1N
-///   PVV:              4N
+/// GQ (Visa PVV, DUKPT) is GATED (returns 68). The APC single-call path —
+/// verify_pin_data with DukptAttributes + VisaPin — returns InternalServerException
+/// (HTTP 500), verified live 2026-06 in us-east-1 and us-west-2, on inputs that
+/// satisfy the documented schema. This is isolated: the IBM3624 sibling (GO,
+/// above) works single-call, non-DUKPT Visa PVV verify works, and the two-call
+/// flow (translate the DUKPT PIN block to a ZPK, then verify the PVV non-DUKPT)
+/// works. Rather than emit a 500-driven error or paper over the gap with a
+/// non-faithful two-call translate (which would add an intermediate interchange
+/// key to the PIN path), GQ is gated honestly pending an APC fix. The repro is
+/// filed for AWS; the two-call workaround is the documented alternative if a
+/// migration needs GQ before then. The GQ wire parser was removed with this
+/// gating (recover from git history when the APC path is fixed).
 pub struct DukptPinVerifyAesHandler;
 
 const CHECK_LEN: usize = 2;
@@ -56,8 +60,6 @@ const ACCOUNT_LEN: usize = 12;
 const DECIM_TABLE_LEN: usize = 16;
 const PIN_VAL_DATA_LEN: usize = 12;
 const IBM_OFFSET_LEN: usize = 12;
-const PVKI_LEN: usize = 1;
-const PVV_LEN: usize = 4;
 const PIN_FMT_LEN: usize = 2;
 const PIN_BLOCK_DES: usize = 16;
 const PIN_BLOCK_AES: usize = 32;
@@ -73,18 +75,6 @@ struct GoFields {
     decim_table: String,
     pin_val_data: String,
     offset: String,
-}
-
-struct GqFields {
-    bdk_id: KeyDescriptor,
-    pvk_id: KeyDescriptor,
-    deriv_type: DukptDerivationType,
-    pin_block_format: PinBlockFormatForPinData,
-    ksn: String,
-    pin_block: Zeroizing<String>,
-    account: String,
-    pvki: i32,
-    pvv: String,
 }
 
 /// Parse the leading Mode (1N) field. Returns the offset of the first field
@@ -199,60 +189,6 @@ fn parse_go(payload: &[u8]) -> Result<GoFields, ProxyError> {
     })
 }
 
-fn parse_gq(payload: &[u8]) -> Result<GqFields, ProxyError> {
-    let pos = parse_mode(payload, "GQ")?;
-    let (bdk_id, bdk_len) = parse_bdk(payload, pos)?;
-    let (pvk_id, pvk_len) = parse_key_32(payload, pos + bdk_len)?;
-
-    let ksn_offset = pos + bdk_len + pvk_len;
-    let (ksn, ksn_consumed, deriv_type) = parse_ksn_with_descriptor(payload, ksn_offset)?;
-
-    let pin_start = ksn_offset + ksn_consumed;
-    let pin_len = pin_block_len(&deriv_type);
-    let fmt_start = pin_start + pin_len;
-    let pin_block_format = map_dukpt_format(payload, fmt_start)?;
-
-    let pan_start = fmt_start + PIN_FMT_LEN;
-    let pvki_start = pan_start + ACCOUNT_LEN;
-    let pvv_start = pvki_start + PVKI_LEN;
-    let min_len = pvv_start + PVV_LEN;
-
-    if payload.len() < min_len {
-        return Err(ProxyError::MalformedPayload(format!(
-            "GQ payload too short: {} < {}",
-            payload.len(),
-            min_len
-        )));
-    }
-
-    if payload.get(pvki_start) == Some(&b';') {
-        warn!("GQ: Token mode (';' delimiter) not supported");
-        return Err(ProxyError::MalformedPayload(
-            "GQ: token mode not supported".into(),
-        ));
-    }
-
-    let pvki_str = std::str::from_utf8(&payload[pvki_start..=pvki_start])
-        .map_err(|_| ProxyError::MalformedPayload("GQ: PVKI not ASCII".into()))?;
-    let pvki = pvki_str
-        .parse::<i32>()
-        .map_err(|_| ProxyError::MalformedPayload(format!("GQ: invalid PVKI '{pvki_str}'")))?;
-
-    Ok(GqFields {
-        bdk_id,
-        pvk_id,
-        deriv_type,
-        pin_block_format,
-        ksn,
-        pin_block: Zeroizing::new(
-            String::from_utf8_lossy(&payload[pin_start..pin_start + pin_len]).to_string(),
-        ),
-        account: String::from_utf8_lossy(&payload[pan_start..pan_start + ACCOUNT_LEN]).to_string(),
-        pvki,
-        pvv: String::from_utf8_lossy(&payload[pvv_start..pvv_start + PVV_LEN]).to_string(),
-    })
-}
-
 #[async_trait]
 impl Handler for DukptPinVerifyAesHandler {
     fn command_codes(&self) -> &'static [&'static str] {
@@ -267,7 +203,22 @@ impl Handler for DukptPinVerifyAesHandler {
     ) -> HandlerResult {
         match command_code {
             b"GO" => handle_go(payload, state).await,
-            b"GQ" => handle_gq(payload, state).await,
+            b"GQ" => {
+                // Gated: APC's single-call verify_pin_data + DukptAttributes +
+                // VisaPin returns InternalServerException (verified live 2026-06,
+                // us-east-1 + us-west-2). The IBM3624 sibling GO works single-call
+                // and a two-call translate-then-verify works; we gate honestly
+                // pending an APC fix rather than emit a 500-driven error or add a
+                // non-faithful intermediate-key translate. See the handler doc.
+                warn!("GQ gated: APC single-call DUKPT+VisaPin verify returns 500");
+                HandlerResult::from_proxy_error(&ProxyError::Unsupported(
+                    "GQ (Visa PVV, DUKPT verify): APC VerifyPinData with DukptAttributes + \
+                     VisaPin returns InternalServerException; gated pending an APC fix. \
+                     Workaround: translate the DUKPT PIN block to a ZPK, then verify the \
+                     PVV non-DUKPT."
+                        .into(),
+                ))
+            }
             b"GS" | b"GU" => {
                 warn!(cmd = %String::from_utf8_lossy(command_code), "no APC equivalent; returning 68");
                 HandlerResult::err(*b"68")
@@ -356,77 +307,6 @@ async fn handle_go(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     }
 }
 
-async fn handle_gq(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
-    let fields = match parse_gq(payload) {
-        Ok(f) => f,
-        Err(e) => {
-            warn!(?e, "GQ parse error");
-            return HandlerResult::from_proxy_error(&e);
-        }
-    };
-
-    let bdk_arn = match state.key_map.resolve_descriptor(&fields.bdk_id) {
-        Ok(a) => a.to_string(),
-        Err(e) => return HandlerResult::from_proxy_error(&e),
-    };
-    let pvk_arn = match state.key_map.resolve_descriptor(&fields.pvk_id) {
-        Ok(a) => a.to_string(),
-        Err(e) => return HandlerResult::from_proxy_error(&e),
-    };
-
-    use aws_sdk_paymentcryptographydata::types::{
-        DukptAttributes, PinVerificationAttributes, VisaPinVerification,
-    };
-
-    let dukpt_attrs = match DukptAttributes::builder()
-        .key_serial_number(&fields.ksn)
-        .dukpt_derivation_type(fields.deriv_type)
-        .build()
-        .map_err(|e| ProxyError::ApcError(e.to_string()))
-    {
-        Ok(a) => a,
-        Err(e) => return HandlerResult::from_proxy_error(&e),
-    };
-
-    let visa_attrs = match VisaPinVerification::builder()
-        .pin_verification_key_index(fields.pvki)
-        .verification_value(&fields.pvv)
-        .build()
-        .map_err(|e| ProxyError::ApcError(e.to_string()))
-    {
-        Ok(a) => a,
-        Err(e) => return HandlerResult::from_proxy_error(&e),
-    };
-
-    debug!(bdk = %bdk_arn, pvk = %pvk_arn, pvki = fields.pvki, ksn_len = fields.ksn.len(), "GQ: verify_pin_data VisaPVV DUKPT");
-
-    match state
-        .data
-        .verify_pin_data()
-        .verification_key_identifier(&pvk_arn)
-        .encryption_key_identifier(&bdk_arn)
-        .encrypted_pin_block(fields.pin_block.as_str())
-        .primary_account_number(&fields.account)
-        .pin_block_format(fields.pin_block_format)
-        .verification_attributes(PinVerificationAttributes::VisaPin(visa_attrs))
-        .dukpt_attributes(dukpt_attrs)
-        .send()
-        .await
-    {
-        Ok(_) => HandlerResult::success(vec![]),
-        Err(e) => {
-            if e.as_service_error()
-                .is_some_and(aws_sdk_paymentcryptographydata::operation::verify_pin_data::VerifyPinDataError::is_verification_failed_exception)
-            {
-                warn!("GQ: PIN mismatch");
-                return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
-            }
-            warn!(?e, "GQ: verify_pin_data failed");
-            HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,9 +318,6 @@ mod tests {
     }
     fn pvk_16() -> Vec<u8> {
         b"1234567890ABCDEF".to_vec()
-    }
-    fn pvk_32() -> Vec<u8> {
-        b"1234567890ABCDEF1234567890ABCDEF".to_vec()
     }
 
     // 3DES KSN descriptor: nibbles = 0x14 = 20 → 20H KSN
@@ -477,19 +354,6 @@ mod tests {
         v.extend_from_slice(b"1234567890123456"); // decim table
         v.extend_from_slice(b"NNNNNNNNNNNN"); // pin val data
         v.extend_from_slice(b"123456FFFFFF"); // offset
-        v
-    }
-
-    fn build_gq(bdk: &[u8], pvk: &[u8], ksn_block: &[u8], pin_block: &[u8], fmt: &[u8]) -> Vec<u8> {
-        let mut v = b"0".to_vec(); // Mode
-        v.extend_from_slice(bdk);
-        v.extend_from_slice(pvk);
-        v.extend_from_slice(ksn_block);
-        v.extend_from_slice(pin_block);
-        v.extend_from_slice(fmt); // PIN block format code
-        v.extend_from_slice(b"123456789012"); // account
-        v.extend_from_slice(b"1"); // PVKI
-        v.extend_from_slice(b"1234"); // PVV
         v
     }
 
@@ -533,38 +397,6 @@ mod tests {
     fn go_rejects_plus_format() {
         let p = build_go(&bdk_32(), &pvk_16(), &ksn_tdes(), pin16(), b"04");
         assert!(matches!(parse_go(&p), Err(ProxyError::Unsupported(_))));
-    }
-
-    #[test]
-    fn gq_parse_tdes() {
-        let p = build_gq(&bdk_32(), &pvk_32(), &ksn_tdes(), pin16(), b"01");
-        let f = parse_gq(&p).unwrap();
-        assert_eq!(f.pvki, 1);
-        assert_eq!(f.pvv, "1234");
-        assert!(matches!(f.deriv_type, DukptDerivationType::Tdes2Key));
-        assert!(matches!(
-            f.pin_block_format,
-            PinBlockFormatForPinData::IsoFormat0
-        ));
-    }
-
-    #[test]
-    fn gq_parse_aes_uses_32h_pin_block() {
-        let p = build_gq(&bdk_32(), &pvk_32(), &ksn_aes(), pin32(), b"05");
-        let f = parse_gq(&p).unwrap();
-        assert!(matches!(f.deriv_type, DukptDerivationType::Aes128));
-        assert_eq!(f.pin_block.as_str().len(), 32);
-        assert!(matches!(
-            f.pin_block_format,
-            PinBlockFormatForPinData::IsoFormat1
-        ));
-    }
-
-    #[test]
-    fn gq_rejects_mode_1() {
-        let mut p = build_gq(&bdk_32(), &pvk_32(), &ksn_tdes(), pin16(), b"01");
-        p[0] = b'1';
-        assert!(matches!(parse_gq(&p), Err(ProxyError::Unsupported(_))));
     }
 
     #[test]

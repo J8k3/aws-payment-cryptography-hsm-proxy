@@ -20,19 +20,24 @@ fixes validated by the harness, branches merged.
 - `aws-payment-cryptography-mcp`: `docs/validated-command-mappings-and-constraints`
 
 **Merge gate (definition of done).** The property harness validates the *fixed*
-handlers against live APC: CVV `CW`/`CY` is already live-validated; `GO`/`GQ`,
-`CA`/`CC`, `M6`/`C2` still need `vec-thru` coverage. When the fixed set is green,
-**merge both branches to `main`.** The gated handlers (return 68) and the doc/MCP
-changes land with them. Do **not** merge a fix the harness hasn't backed. Auditing
-the still-unaudited handlers can run before or after the merge, but never block a
-validated fix from landing — and never land an unvalidated one.
+handlers against live APC. **All gate items are now live-validated:** CVV
+`CW`/`CY`, MAC `M6`/`C2` (M6/M8 + C2/C4), PIN translate `CA`/`CC`, and DUKPT
+verify `GO` (IBM3624). The harness caught and fixed a real GO bug (offset
+F-padding) in the process. `GQ` (Visa-PVV DUKPT verify) is now **gated (68)** —
+not a proxy defect: APC's single-call `verify_pin_data` + DukptAttributes +
+VisaPin returns InternalServerException (verified live us-east-1 + us-west-2; the
+IBM3624 sibling and a two-call workaround both work). Repro filed for AWS. With
+the validated set green, **merge both branches to `main`.** The gated handlers
+(return 68) and the doc/MCP changes land with them. Do **not** merge a fix the
+harness hasn't backed. Auditing the still-unaudited handlers can run before or
+after the merge, but never block a validated fix from landing.
 
 **Status of the audit:**
-- **Fixed** (manual-verified; CVV also live-validated): CVV `CW`/`CY`, DUKPT
-  verify `GO`/`GQ`, PIN translate `CA`/`CC`, MAC `M6`/`C2`.
+- **Fixed & live-validated:** CVV `CW`/`CY`, PIN translate `CA`/`CC`, MAC
+  `M6`/`C2`, DUKPT verify `GO` (IBM3624; offset F-padding bug fixed).
 - **Gated as Unsupported (payShield 68)**: Diebold `GA`/`CE`/`GS`, `JA`, `NY`/`RY`,
   `QY`/`PM`, `GU`, `BQ`, HMAC `LQ`/`LS`, issuer-script `JU`/`KU`/`KY`; dropped
-  non-existent `CI`.
+  non-existent `CI`. `GQ` (Visa-PVV DUKPT) gated on the APC single-call 500.
 - **Verified correct, unchanged:** `international_encrypt` (M0/M2/M4).
 - **Not yet audited:** `legacy_mac`, `dukpt_mac`, `mac_translate`, `emv_decrypt`,
   `encrypt_decrypt`, `CK`/`CM`.
