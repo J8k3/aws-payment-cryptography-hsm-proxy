@@ -5,7 +5,7 @@
 
 Evidence for *why* each handler behaves as it does and *how* it was verified. Generated from `Handler::grounding()` — do not edit by hand. Grounding labels: wire `vec-thru` > `diff-xprov` > `cited` > `none`; crypto `vec` > `2impl` > `apc` > `none`.
 
-**Coverage:** 5 of 26 handlers carry grounding; 21 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
+**Coverage:** 6 of 26 handlers carry grounding; 20 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
 
 ## `C2`, `C4`, `M6`, `M8`
 
@@ -58,6 +58,12 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
   - wire `none` · crypto `none` · gated (68): no APC equivalent (Diebold table / LMK-compare)
   - Diebold indexes a conversion table in HSM user storage and GU compares against an LMK-encrypted reference PIN — neither has an APC equivalent (APC verify_pin_data does IBM3624 offset / Visa PVV only). PUGD0537-004 p.355/358.
 
+## `K0`
+
+- **K0 decrypts EMV-encrypted counters / application data under an IMK-ENC (E1) master key. APC derives an EMV session key (Option A) from the master key + PAN/PSN + ATC, then CBC-decrypts. Wire PAN+Seq is 8B BCD (Option-A pre-format); ATC and DataLen are 2B binary; ciphertext is binary and hex-encoded before the APC call. SessionDerivationData = ATC(4H) + 12 zero hex chars.**
+  - wire `diff-xprov` · crypto `apc` · live test `emv_decrypt_k0_differential`
+  - PUGD0537-004. Verified live via round-trip: APC encrypt_data (EMV-CBC, built from the same field values) mints the ciphertext, and the proxy's K0 recovers the original plaintext across randomized PAN/PSN/ATC and 1..4 cipher blocks. A wrong PAN/PSN/ATC offset derives a different session key, so the round-trip would not close.
+
 ## Not yet grounded
 
 These handlers have no `grounding()` yet — the open documentation/testing gap. Grounding them is the ongoing work (documentation + test added together).
@@ -73,7 +79,6 @@ These handlers have no `grounding()` yet — the open documentation/testing gap.
 - `JA`
 - `JS`
 - `JU`, `KU`, `KY`
-- `K0`
 - `K2`, `KS`
 - `KQ`
 - `KW`

@@ -1585,3 +1585,186 @@ async fn dukpt_pin_verify_ck_differential() -> anyhow::Result<()> {
     survivor_result?;
     Ok(())
 }
+
+// ── EMV decrypt K0 (live differential, EMV-CBC round-trip) ────────────────────
+//
+// Un-audited handler (PUGD0537-004). K0 decrypts EMV-encrypted counters / app
+// data under an IMK-ENC (E1) master key: APC derives an EMV session key from the
+// master key + PAN/PSN + ATC, then CBC-decrypts. Wire (binary fields):
+//   KeyType(3H ASCII) || Key || PAN+Seq(8B BCD) || ATC(2B) || DataLen(2B BE) ||
+//   EncData(nB).
+//
+// Decrypt has a deterministic output, but a direct decrypt_data oracle would be
+// the *same call* the handler makes — trivially equal, proving nothing about the
+// wire parse. Instead the differential is a round-trip: APC encrypt_data (EMV-CBC,
+// built from the field values) mints the ciphertext; the proxy's K0 must recover
+// the original plaintext. A wrong field offset (PAN/PSN/ATC) derives a different
+// session key, so K0 yields garbage or errors — proxy ≠ plaintext.
+
+const K0_E1_WIRE_LABEL: &str = "U0000000000000000000000000000K0E1";
+
+/// 16 BCD hex digits → 8 bytes. EMV Option A pre-format = "00" ‖ PAN(12) ‖ PSN(2)
+/// (rightmost-16 of PAN‖PSN, left zero-padded), matching `decode_bcd_pan_seq`.
+fn pan_seq_bcd(pan12: &str, seq2: &str) -> Vec<u8> {
+    let hex = format!("00{pan12}{seq2}");
+    assert_eq!(hex.len(), 16, "pan_seq_bcd: expected 16 BCD digits");
+    hex_str_to_bytes(&hex)
+}
+
+/// Parse an even-length uppercase/lowercase hex string into bytes. Test-only.
+fn hex_str_to_bytes(hex: &str) -> Vec<u8> {
+    assert!(hex.len().is_multiple_of(2), "hex_str_to_bytes: odd length");
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("valid hex"))
+        .collect()
+}
+
+/// Encode a K0 wire frame per PUGD0537-004. Binary PAN/ATC/len/data fields.
+fn encode_k0(key_label: &str, pan_seq: &[u8], atc: [u8; 2], cipher_bytes: &[u8]) -> Vec<u8> {
+    let mut v = b"00E".to_vec(); // key type 3H ASCII — consumed
+    v.extend_from_slice(key_label.as_bytes());
+    v.extend_from_slice(pan_seq); // 8B BCD
+    v.extend_from_slice(&atc); // 2B ATC
+    let len = u16::try_from(cipher_bytes.len()).expect("ciphertext < 64KiB");
+    v.extend_from_slice(&len.to_be_bytes()); // 2B BE DataLen
+    v.extend_from_slice(cipher_bytes); // nB ciphertext
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn emv_decrypt_k0_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "emv_decrypt_k0_differential: grounding crypto=apc \
+         wire=diff-xprov(EMV-CBC encrypt→K0-decrypt round-trip)"
+    );
+
+    use aws_sdk_paymentcryptographydata::types::{
+        EmvEncryptionAttributes, EmvEncryptionMode, EmvMajorKeyDerivationMode,
+        EncryptionDecryptionAttributes,
+    };
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "E1",
+        wire_label: K0_E1_WIRE_LABEL,
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31E1EmvMkeyConfidentiality,
+        modes: KeyModesOfUse::builder().derive_key(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let e1_arn = keys.arn("E1").to_string();
+    let e1_label = keys.wire_label("E1").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let k0 = registry.get(b"K0").expect("K0 handler registered");
+
+    const LABEL: &str = "emv_decrypt_k0";
+    let run = cases_to_run();
+    eprintln!(
+        "emv_decrypt_k0_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let seq = format!("{:02}", edge_biased(&mut rng, 0, 99, &[0, 1, 99]));
+        // ATC (2B). Edge-biased over the 16-bit counter range.
+        let atc_val = edge_biased(&mut rng, 0, 0xFFFF, &[1, 0x2A, 0xFFFF]) as u16;
+        let atc = atc_val.to_be_bytes();
+        let atc_hex = bytes_to_hex_t(&atc); // 4 hex chars
+
+        // CBC plaintext: whole TDES blocks (8B). Edge-biased over 1..4 blocks.
+        let blocks = edge_biased(&mut rng, 1, 4, &[1, 2, 4]);
+        let plain_hex = gen_hex_message(&mut rng, blocks * 8);
+
+        // EMV-CBC attributes shared by the encrypt oracle and (rebuilt) the K0
+        // handler: same PAN/PSN/ATC ⇒ same session key ⇒ round-trip recovers plain.
+        let sdd = format!("{atc_hex}000000000000"); // ATC(4H) + 12 zero hex = 16H
+        let emv = || -> anyhow::Result<EmvEncryptionAttributes> {
+            Ok(EmvEncryptionAttributes::builder()
+                .major_key_derivation_mode(EmvMajorKeyDerivationMode::EmvOptionA)
+                .primary_account_number(&pan)
+                .pan_sequence_number(&seq)
+                .session_derivation_data(&sdd)
+                .mode(EmvEncryptionMode::Cbc)
+                .build()?)
+        };
+
+        // 1) Oracle encrypt → ciphertext (hex).
+        let cipher_hex = data
+            .encrypt_data()
+            .key_identifier(&e1_arn)
+            .plain_text(&plain_hex)
+            .encryption_attributes(EncryptionDecryptionAttributes::Emv(emv()?))
+            .send()
+            .await?
+            .cipher_text()
+            .to_string();
+
+        // 2) Proxy K0 decrypt. Wire carries the ciphertext as raw bytes; the
+        //    handler hex-encodes it back before calling APC.
+        let wire = encode_k0(
+            &e1_label,
+            &pan_seq_bcd(&pan, &seq),
+            atc,
+            &hex_str_to_bytes(&cipher_hex),
+        );
+        let proxy = k0.handle(b"K0", &wire, &state).await;
+        if &proxy.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("emv_decrypt_k0_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} K0 error_code={} (pan={pan} seq={seq} atc={atc_hex} blocks={blocks})",
+                String::from_utf8_lossy(&proxy.error_code),
+            ));
+            break;
+        }
+        let proxy_plain = String::from_utf8(proxy.payload.to_vec())?;
+
+        if !proxy_plain.eq_ignore_ascii_case(&plain_hex) {
+            eprintln!(
+                "{}",
+                replay_hint("emv_decrypt_k0_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} K0 round-trip mismatch: proxy={proxy_plain} expected={plain_hex} \
+                 (pan={pan} seq={seq} atc={atc_hex} blocks={blocks})"
+            ));
+            break;
+        }
+
+        eprintln!("case={case_idx:02} OK pan={pan} seq={seq} atc={atc_hex} blocks={blocks}");
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+/// Bytes → uppercase hex. Test-local twin of the handler's `bytes_to_hex`.
+fn bytes_to_hex_t(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(char::from(HEX[(b >> 4) as usize]));
+        s.push(char::from(HEX[(b & 0x0F) as usize]));
+    }
+    s
+}
