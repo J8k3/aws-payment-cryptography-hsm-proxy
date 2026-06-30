@@ -232,19 +232,14 @@ async fn handle_ku(payload: &[u8], state: &Arc<AppState>, cmd: &str) -> HandlerR
 mod tests {
     use super::*;
 
-    fn build_ku_payload(
-        key: &[u8],
-        pan_seq_bytes: &[u8; 8],
-        atc: &[u8; 2],
-        data: &[u8],
-    ) -> Vec<u8> {
+    fn build_ku_payload(key: &[u8], pan_seq_bytes: [u8; 8], atc: [u8; 2], data: &[u8]) -> Vec<u8> {
         let mut v = Vec::new();
         v.push(b'0'); // mode 0 = MAC only
         v.push(b'0'); // scheme 0 = Visa/Amex
         v.extend_from_slice(b"00E"); // key type
         v.extend_from_slice(key);
-        v.extend_from_slice(pan_seq_bytes);
-        v.extend_from_slice(atc);
+        v.extend_from_slice(&pan_seq_bytes);
+        v.extend_from_slice(&atc);
         v.extend_from_slice(format!("{:04X}", data.len()).as_bytes());
         v.extend_from_slice(data);
         v.push(DELIMITER);
@@ -263,7 +258,7 @@ mod tests {
 
     #[test]
     fn parse_ku_mode0_single_key() {
-        let payload = build_ku_payload(&single_key(), &pan_seq_bytes(), &[0x00, 0x12], b"SCRIPT");
+        let payload = build_ku_payload(&single_key(), pan_seq_bytes(), [0x00, 0x12], b"SCRIPT");
         let f = parse_ku_fields(&payload, "KU").unwrap();
         assert_eq!(f.key_id.raw, "1234567890ABCDEF");
         assert_eq!(f.atc, "0012");
@@ -274,7 +269,7 @@ mod tests {
     fn parse_ku_double_key() {
         let mut key = vec![b'U'];
         key.extend_from_slice(b"1234567890ABCDEF1234567890ABCDEF");
-        let payload = build_ku_payload(&key, &pan_seq_bytes(), &[0x00, 0x01], b"DATA");
+        let payload = build_ku_payload(&key, pan_seq_bytes(), [0x00, 0x01], b"DATA");
         let f = parse_ku_fields(&payload, "KU").unwrap();
         assert!(f.key_id.raw.starts_with('U'));
         assert_eq!(f.atc, "0001");
@@ -282,7 +277,7 @@ mod tests {
 
     #[test]
     fn parse_ku_mode1_returns_error() {
-        let mut payload = build_ku_payload(&single_key(), &pan_seq_bytes(), &[0x00, 0x01], b"D");
+        let mut payload = build_ku_payload(&single_key(), pan_seq_bytes(), [0x00, 0x01], b"D");
         payload[0] = b'1'; // change mode to 1
         assert!(matches!(
             parse_ku_fields(&payload, "KU"),
@@ -292,7 +287,7 @@ mod tests {
 
     #[test]
     fn parse_ku_missing_delimiter_returns_error() {
-        let mut payload = build_ku_payload(&single_key(), &pan_seq_bytes(), &[0x00, 0x01], b"D");
+        let mut payload = build_ku_payload(&single_key(), pan_seq_bytes(), [0x00, 0x01], b"D");
         payload.pop(); // remove ';' delimiter
         assert!(matches!(
             parse_ku_fields(&payload, "KU"),

@@ -123,7 +123,9 @@ where
             let _ = stream.shutdown().await;
         }
         MockBehavior::AcceptThenHang => {
-            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+            // Accept the connection then never respond, exercising the proxy's
+            // read timeout. The task is cancelled when the test runtime drops.
+            std::future::pending::<()>().await;
         }
     }
 }

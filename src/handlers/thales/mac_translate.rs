@@ -269,6 +269,9 @@ mod tests {
         b"1234567890ABCDEF".to_vec() // 16H single-length
     }
 
+    // Test wire-builder: each parameter is a distinct MY protocol field, so a
+    // bundling struct would only obscure the payload layout.
+    #[allow(clippy::too_many_arguments)]
     fn build_my_payload(
         in_mac_size: u8,
         in_algo: u8,
@@ -286,7 +289,7 @@ mod tests {
         v.extend_from_slice(b"MA1"); // out key type
         v.extend_from_slice(out_key);
         let byte_count = msg_hex.len() / 2;
-        v.extend_from_slice(format!("{:04X}", byte_count).as_bytes());
+        v.extend_from_slice(format!("{byte_count:04X}").as_bytes());
         v.extend_from_slice(msg_hex);
         v.extend_from_slice(in_mac);
         v

@@ -187,7 +187,7 @@ mod tests {
     fn parse_params_ignores_short_tokens() {
         let payload = b"AW1;;X;";
         let params = parse_params(payload);
-        assert!(params.get(b"AW").is_some());
+        assert!(params.contains_key(b"AW"));
         assert_eq!(params.len(), 1);
     }
 
@@ -244,7 +244,7 @@ mod tests {
 
         #[test]
         fn valid_frame_parse_frame_len_matches_consumed(payload in "[A-Z0-9]{0,20}") {
-            let msg = format!("[AOTPIN;AW1;AK{};]", payload);
+            let msg = format!("[AOTPIN;AW1;AK{payload};]");
             let bytes = msg.as_bytes();
             if let Some(cmd) = FuturexExcrypt.parse(bytes) {
                 // frame_len must exactly equal the bytes consumed so the outer loop drains correctly

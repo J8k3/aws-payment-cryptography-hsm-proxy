@@ -42,7 +42,7 @@ impl MockApc {
     pub async fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let url = format!("http://127.0.0.1:{}", port);
+        let url = format!("http://127.0.0.1:{port}");
 
         let routes = Arc::new(RwLock::new(default_routes()));
         let routes_bg = Arc::clone(&routes);
@@ -203,7 +203,7 @@ async fn serve_once(stream: &mut tokio::net::TcpStream, routes: &Routes) {
         .find_map(|line| {
             let lower = line.to_ascii_lowercase();
             if lower.starts_with("content-length:") {
-                lower.splitn(2, ':').nth(1)?.trim().parse().ok()
+                lower.split_once(':')?.1.trim().parse().ok()
             } else {
                 None
             }
@@ -659,7 +659,7 @@ fn m0_payload(key: &[u8], data_hex: &[u8]) -> Vec<u8> {
     v.extend_from_slice(b"00B"); // key type (DEK)
     v.extend_from_slice(key);
     let byte_count = data_hex.len() / 2;
-    v.extend_from_slice(format!("{:04X}", byte_count).as_bytes());
+    v.extend_from_slice(format!("{byte_count:04X}").as_bytes());
     v.extend_from_slice(data_hex);
     v
 }
@@ -777,7 +777,7 @@ fn m6_handler_payload(algo: u8, data_hex: &[u8]) -> Vec<u8> {
     v.extend_from_slice(b"MA1"); // key type 3H
     v.extend_from_slice(MAK_KEY_16H); // key 16H
     let byte_count = data_hex.len() / 2;
-    v.extend_from_slice(format!("{:04X}", byte_count).as_bytes());
+    v.extend_from_slice(format!("{byte_count:04X}").as_bytes());
     v.extend_from_slice(data_hex);
     v
 }
@@ -882,7 +882,7 @@ fn gw_payload(mode: u8, algo: u8, msg_hex: &[u8], mac: Option<&[u8]>) -> Vec<u8>
     v.extend_from_slice(b"014"); // KSN descriptor: 0x14=20 nibbles (3DES)
     v.extend_from_slice(b"12345678901234567890"); // KSN 20H
     let byte_count = msg_hex.len() / 2;
-    v.extend_from_slice(format!("{:04X}", byte_count).as_bytes());
+    v.extend_from_slice(format!("{byte_count:04X}").as_bytes());
     v.extend_from_slice(msg_hex);
     if let Some(m) = mac {
         v.extend_from_slice(m);
