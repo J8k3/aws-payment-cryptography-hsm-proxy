@@ -5,7 +5,7 @@
 
 Evidence for *why* each handler behaves as it does and *how* it was verified. Generated from `Handler::grounding()` — do not edit by hand. Grounding labels: wire `vec-thru` > `diff-xprov` > `cited` > `none`; crypto `vec` > `2impl` > `apc` > `none`.
 
-**Coverage:** 6 of 26 handlers carry grounding; 20 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
+**Coverage:** 10 of 26 handlers carry grounding; 16 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
 
 ## `C2`, `C4`, `M6`, `M8`
 
@@ -58,11 +58,44 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
   - wire `none` · crypto `none` · gated (68): no APC equivalent (Diebold table / LMK-compare)
   - Diebold indexes a conversion table in HSM user storage and GU compares against an LMK-encrypted reference PIN — neither has an APC equivalent (APC verify_pin_data does IBM3624 offset / Visa PVV only). PUGD0537-004 p.355/358.
 
+## `GW`
+
+- **GW generate/verify a DUKPT MAC (Alg1/Alg3/CMAC, MAC size '0'=4 bytes / '1'=2 bytes). Half MACs (size '1') verify by regenerating the full MAC and comparing the leading bytes, because APC verify_mac only accepts an 8H or 16H MAC.**
+  - wire `diff-xprov` · crypto `apc` · live test `dukpt_mac_gw_differential`
+  - PUGD0538. Verified live across every algorithm×size combo: proxy MAC == APC generate_mac (Dukpt Alg1/Alg3/CMAC, 3DES), plus the verify round-trip. The live differential caught a bug: GW verify of a 2-byte half MAC was passed straight to APC verify_mac, which rejects it ('valid length of 8 or 16') — fixed with the regenerate-and-compare-prefix path (mirrors M6 CMAC). APC constraints (verified live): DUKPT MAC needs message ≥8 bytes; the CBC-MAC variants (Alg1/Alg3) require a block-aligned (×8 byte) message — APC does not pad — while CMAC accepts any length.
+- **The APC DukptKeyVariant is hardcoded to Request (terminal MAC direction).**
+  - wire `cited` · crypto `apc` · manual: PUGD0538; direction not in the wire — assumption, not HSM-verified
+  - payShield GW carries no direction field, so the variant is a documented assumption. The differential proves proxy == APC under Request; it does NOT verify Request is what a real payShield derives. Host-response MACs (Response variant) are a known gap.
+
+## `HE`, `HG`
+
+- **HE encrypts / HG decrypts a single 64-bit block (16H) under a data key (TR31_D0), TDES-ECB. Wire: key then 16H data.**
+  - wire `diff-xprov` · crypto `apc` · live test `encrypt_decrypt_he_hg_differential`
+  - PUGD0538. Verified live: proxy HE ciphertext == APC encrypt_data (TDES-ECB, deterministic), and the HE→HG round-trip recovers the plaintext, over random plus all-zero / all-F blocks. Operational note (verified live): APC rejects encrypt+decrypt alone for a D0 key — the mapped key must use NoRestrictions (or encrypt+decrypt+wrap+unwrap) for both HE and HG to work.
+
 ## `K0`
 
 - **K0 decrypts EMV-encrypted counters / application data under an IMK-ENC (E1) master key. APC derives an EMV session key (Option A) from the master key + PAN/PSN + ATC, then CBC-decrypts. Wire PAN+Seq is 8B BCD (Option-A pre-format); ATC and DataLen are 2B binary; ciphertext is binary and hex-encoded before the APC call. SessionDerivationData = ATC(4H) + 12 zero hex chars.**
   - wire `diff-xprov` · crypto `apc` · live test `emv_decrypt_k0_differential`
   - PUGD0537-004. Verified live via round-trip: APC encrypt_data (EMV-CBC, built from the same field values) mints the ciphertext, and the proxy's K0 recovers the original plaintext across randomized PAN/PSN/ATC and 1..4 cipher blocks. A wrong PAN/PSN/ATC offset derives a different session key, so the round-trip would not close.
+
+## `MA`, `MC`, `ME`, `MK`, `MM`, `MO`, `MU`, `MW`, `MQ`, `MS`
+
+- **MA/MC ('~'-terminated) and MK/MM (3H-length-prefixed) generate/verify an ISO 9797-1 Alg1 MAC under a TAK. APC's Alg1 MAC is truncated to the 8H (4-byte) wire width.**
+  - wire `diff-xprov` · crypto `apc` · live test `legacy_mac_ma_mc_mk_mm_differential`
+  - PUGD0538 pp.89-104. Verified live across both wire styles and randomized data lengths: proxy MAC == APC generate_mac (Iso9797Algorithm1), and the MC/MM verify round-trip accepts the proxy's MAC. Note: APC returns a 4-byte Alg1 MAC (verified live), so the handler's 8H truncation is a no-op — correcting an earlier comment that claimed APC returns 16H.
+- **ME/MO (verify-then-re-MAC), MU/MW (mode-prefixed Alg1), MQ (ZAK Alg1), MS (Alg3 X9.19) share the same generate/verify paths but are not yet covered by a live differential.**
+  - wire `cited` · crypto `none` · manual: PUGD0538 pp.89-104; not yet live-differentialed
+  - PUGD0538 pp.89-104 — manual-cited layout and the same ISO9797 Alg1/Alg3 APC mapping as the live-verified commands; a live differential for these is the tracked next step.
+
+## `MY`
+
+- **MY verifies an inbound MAC under one key, then generates an outbound MAC under a second key for the same message (per-direction MAC size/algorithm). A half inbound MAC (size '1' = 2 bytes) is verified by regenerating the full MAC and comparing the leading bytes.**
+  - wire `diff-xprov` · crypto `apc` · live test `mac_translate_my_differential`
+  - PUGD0537-004 p.371. Verified live (ISO9797 Alg1) across all inbound×outbound MAC-size combos: proxy outbound MAC == APC generate_mac under the outbound key. The live differential caught the same half-MAC verify bug as GW — the inbound half MAC was handed to APC verify_mac, which rejects it — fixed with the regenerate-and-compare-prefix path.
+- **ALG3 and CMAC directions, and differing inbound/outbound algorithms, are parsed but not yet covered by a live differential (only ALG1 is).**
+  - wire `cited` · crypto `none` · manual: PUGD0537-004 p.371; ALG3/CMAC not yet live-differentialed
+  - PUGD0537-004 p.371 — same per-direction generate/verify mapping as the live-verified ALG1 path; broadening the differential is the tracked next step.
 
 ## Not yet grounded
 
@@ -74,8 +107,6 @@ These handlers have no `grounding()` yet — the open documentation/testing gap.
 - `CU`, `DU`
 - `DA`, `DC`, `EA`, `EC`
 - `ECHO`
-- `GW`
-- `HE`, `HG`
 - `JA`
 - `JS`
 - `JU`, `KU`, `KY`
@@ -84,7 +115,5 @@ These handlers have no `grounding()` yet — the open documentation/testing gap.
 - `KW`
 - `LQ`, `LS`
 - `M0`, `M2`, `M4`
-- `MA`, `MC`, `ME`, `MK`, `MM`, `MO`, `MU`, `MW`, `MQ`, `MS`
-- `MY`
 - `QY`, `PM`
 - `TPIN`

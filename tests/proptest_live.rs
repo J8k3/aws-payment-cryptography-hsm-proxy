@@ -48,9 +48,10 @@ use aws_sdk_paymentcryptography::types::{
 };
 use aws_sdk_paymentcryptographydata::types::{
     CardGenerationAttributes, CardVerificationValue1, DukptAttributes, DukptDerivationType,
-    Ibm3624NaturalPin, Ibm3624PinVerification, MacAlgorithm, MacAttributes,
+    DukptKeyVariant, EncryptionDecryptionAttributes, EncryptionMode, Ibm3624NaturalPin,
+    Ibm3624PinVerification, MacAlgorithm, MacAlgorithmDukpt, MacAttributes,
     PinBlockFormatForPinData, PinGenerationAttributes, PinVerificationAttributes,
-    TranslationIsoFormats, TranslationPinDataIsoFormat034, VisaPin,
+    SymmetricEncryptionAttributes, TranslationIsoFormats, TranslationPinDataIsoFormat034, VisaPin,
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
@@ -1373,6 +1374,681 @@ async fn dukpt_pin_verify_go_differential() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── Legacy MAC MA/MC + MK/MM (live differential + verify round-trip) ──────────
+//
+// Un-audited handler (PUGD0538). Two wire styles for the ISO 9797-1 Algorithm 1
+// MAC: MA/MC are '~'-terminated; MK/MM are 3H-length-prefixed binary. The handler
+// TRUNCATES APC's MAC to 8H (4 bytes) to match the Thales wire, then its own
+// verify (MC/MM) hands that truncated MAC straight to APC verify_mac. This checks
+// both: proxy MAC == APC's MAC prefix, and the truncated-MAC round-trip verifies.
+
+const LEGACY_TAK_M1_LABEL: &str = "U000000000000000000000000000000F1";
+
+/// Random data bytes; if `exclude_tilde`, avoids 0x7E (the MA/MC terminator).
+fn gen_data_bytes(rng: &mut StdRng, len: usize, exclude_tilde: bool) -> Vec<u8> {
+    (0..len)
+        .map(|_| {
+            let b = rng.random_range(0..=255_u8);
+            if exclude_tilde && b == b'~' {
+                b'.'
+            } else {
+                b
+            }
+        })
+        .collect()
+}
+
+fn hex_upper(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02X}");
+        s
+    })
+}
+
+fn encode_ma(key_label: &str, data: &[u8]) -> Vec<u8> {
+    let mut v = key_label.as_bytes().to_vec();
+    v.extend_from_slice(data);
+    v.push(b'~');
+    v
+}
+fn encode_mc(key_label: &str, mac_hex: &str, data: &[u8]) -> Vec<u8> {
+    let mut v = key_label.as_bytes().to_vec();
+    v.extend_from_slice(mac_hex.as_bytes());
+    v.extend_from_slice(data);
+    v.push(b'~');
+    v
+}
+fn encode_mk(key_label: &str, data: &[u8]) -> Vec<u8> {
+    let mut v = key_label.as_bytes().to_vec();
+    v.extend_from_slice(format!("{:03X}", data.len()).as_bytes());
+    v.extend_from_slice(data);
+    v
+}
+fn encode_mm(key_label: &str, mac_hex: &str, data: &[u8]) -> Vec<u8> {
+    let mut v = key_label.as_bytes().to_vec();
+    v.extend_from_slice(mac_hex.as_bytes());
+    v.extend_from_slice(format!("{:03X}", data.len()).as_bytes());
+    v.extend_from_slice(data);
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn legacy_mac_ma_mc_mk_mm_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!("legacy_mac_ma_mc_mk_mm_differential: grounding crypto=apc wire=diff-xprov(style+length-randomised)");
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "TAK",
+        wire_label: LEGACY_TAK_M1_LABEL,
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31M1Iso97971MacKey,
+        modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let tak_arn = keys.arn("TAK").to_string();
+    let tak_label = keys.wire_label("TAK").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let ma = registry.get(b"MA").expect("MA registered");
+    let mc = registry.get(b"MC").expect("MC registered");
+    let mk = registry.get(b"MK").expect("MK registered");
+    let mm = registry.get(b"MM").expect("MM registered");
+
+    const LABEL: &str = "legacy_mac_ma_mc_mk_mm";
+    let run = cases_to_run();
+    eprintln!(
+        "legacy_mac_ma_mc_mk_mm_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let terminated = rng.random_bool(0.5); // MA/MC vs MK/MM
+        let len = edge_biased(&mut rng, 1, 32, &[1, 7, 8, 9, 16, 32]);
+        let data_bytes = gen_data_bytes(&mut rng, len, terminated);
+        let data_hex = hex_upper(&data_bytes);
+        let style = if terminated { "MA/MC" } else { "MK/MM" };
+
+        // 1) generate via proxy
+        let (gen_wire, gen_h, gname): (Vec<u8>, _, &[u8]) = if terminated {
+            (encode_ma(&tak_label, &data_bytes), &ma, b"MA".as_slice())
+        } else {
+            (encode_mk(&tak_label, &data_bytes), &mk, b"MK".as_slice())
+        };
+        let proxy_gen = gen_h.handle(gname, &gen_wire, &state).await;
+        if &proxy_gen.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("legacy_mac_ma_mc_mk_mm_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} {style} generate error_code={} (len={len})",
+                String::from_utf8_lossy(&proxy_gen.error_code),
+            ));
+            break;
+        }
+        let proxy_mac = String::from_utf8(proxy_gen.payload.to_vec())?;
+
+        // 2) oracle: APC generate_mac ALG1; proxy truncates to 8H, so compare prefix
+        let oracle = data
+            .generate_mac()
+            .key_identifier(&tak_arn)
+            .message_data(&data_hex)
+            .generation_attributes(MacAttributes::Algorithm(MacAlgorithm::Iso9797Algorithm1))
+            .send()
+            .await?;
+        let oracle_mac = oracle.mac().to_string();
+        let oracle_prefix = &oracle_mac[..proxy_mac.len().min(oracle_mac.len())];
+        if !proxy_mac.eq_ignore_ascii_case(oracle_prefix) {
+            eprintln!(
+                "{}",
+                replay_hint("legacy_mac_ma_mc_mk_mm_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} {style} MAC mismatch: proxy={proxy_mac} apc_prefix={oracle_prefix} (apc_full={oracle_mac}) len={len}"
+            ));
+            break;
+        }
+
+        // 3) verify round-trip (MC or MM) — does APC verify_mac accept the truncated 8H MAC?
+        let (ver_wire, ver_h, vname): (Vec<u8>, _, &[u8]) = if terminated {
+            (
+                encode_mc(&tak_label, &proxy_mac, &data_bytes),
+                &mc,
+                b"MC".as_slice(),
+            )
+        } else {
+            (
+                encode_mm(&tak_label, &proxy_mac, &data_bytes),
+                &mm,
+                b"MM".as_slice(),
+            )
+        };
+        let proxy_ver = ver_h.handle(vname, &ver_wire, &state).await;
+        if &proxy_ver.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("legacy_mac_ma_mc_mk_mm_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} {style} verify round-trip rejected proxy MAC: error_code={} mac={proxy_mac} (apc_full={oracle_mac})",
+                String::from_utf8_lossy(&proxy_ver.error_code),
+            ));
+            break;
+        }
+
+        eprintln!(
+            "case={case_idx:02} OK style={style} len={len} MAC={proxy_mac} apc_full={oracle_mac}"
+        );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+// ── DUKPT MAC GW (live differential + verify round-trip) ──────────────────────
+//
+// Un-audited handler (PUGD0538). GW generate/verify a DUKPT MAC. Header: Mode +
+// InFmt + MACSize + MACAlgo + PadMethod (5×1N), then BDK + KSN-descriptor+KSN +
+// MsgLen(4H) + message. MAC size '0'=4 bytes, '1'=2 bytes (half). Algorithm:
+// '1'=Alg1, '3'=Alg3, '6'=CMAC. The handler hardcodes APC DukptKeyVariant=Request
+// (payShield GW does not carry direction — a documented assumption); the oracle
+// uses the same variant, so this proves proxy==APC under that assumption, not that
+// Request is what a real payShield would derive.
+
+const GW_BDK_LABEL: &str = "U000000000000000000000000000000B7";
+
+fn encode_gw(
+    mode: u8,
+    mac_size: u8,
+    algo: u8,
+    bdk_label: &str,
+    ksn: &str,
+    msg_hex: &str,
+    mac_hex: Option<&str>,
+) -> Vec<u8> {
+    let mut v = vec![mode, b'1', mac_size, algo, b'1']; // pad method '1', consumed
+    v.extend_from_slice(bdk_label.as_bytes());
+    v.extend_from_slice(b"014"); // KSN descriptor: 0x14 = 20 nibbles (3DES)
+    v.extend_from_slice(ksn.as_bytes());
+    v.extend_from_slice(format!("{:04X}", msg_hex.len() / 2).as_bytes());
+    v.extend_from_slice(msg_hex.as_bytes());
+    if let Some(m) = mac_hex {
+        v.extend_from_slice(m.as_bytes());
+    }
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn dukpt_mac_gw_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!("dukpt_mac_gw_differential: grounding crypto=apc wire=diff-xprov(algo+size+length-randomised)");
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "BDK",
+        wire_label: GW_BDK_LABEL,
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31B0BaseDerivationKey,
+        modes: KeyModesOfUse::builder().derive_key(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let bdk_arn = keys.arn("BDK").to_string();
+    let bdk_label = keys.wire_label("BDK").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let gw = registry.get(b"GW").expect("GW registered");
+
+    const LABEL: &str = "dukpt_mac_gw";
+    let ksn = "FFFF9876543210E00001"; // 3DES DUKPT, 20H
+    let run = cases_to_run();
+    eprintln!(
+        "dukpt_mac_gw_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        // Algorithm: '1'=Alg1, '3'=Alg3, '6'=CMAC.
+        let (algo_byte, oracle_algo): (u8, fn(MacAlgorithmDukpt) -> MacAttributes) =
+            match rng.random_range(0..3_u8) {
+                0 => (b'1', MacAttributes::DukptIso9797Algorithm1),
+                1 => (b'3', MacAttributes::DukptIso9797Algorithm3),
+                _ => (b'6', MacAttributes::DukptCmac),
+            };
+        let mac_size_byte = if rng.random_bool(0.5) { b'0' } else { b'1' }; // 4 or 2 bytes
+        let mac_size_chars = if mac_size_byte == b'0' { 8 } else { 4 };
+        // APC DUKPT generate_mac requires message length 8..4096 bytes. The CBC-MAC
+        // variants (ALG1, ALG3) additionally require a multiple of 8 bytes
+        // (block-aligned — APC does not pad for them); CMAC accepts any length.
+        let msg_bytes = if algo_byte == b'6' {
+            edge_biased(&mut rng, 8, 64, &[8, 9, 16, 32, 64])
+        } else {
+            8 * edge_biased(&mut rng, 1, 8, &[1, 2, 4, 8])
+        };
+        let msg_hex = gen_hex_message(&mut rng, msg_bytes);
+
+        let dukpt = MacAlgorithmDukpt::builder()
+            .key_serial_number(ksn)
+            .dukpt_key_variant(DukptKeyVariant::Request)
+            .dukpt_derivation_type(DukptDerivationType::Tdes2Key)
+            .build()?;
+
+        // 1) proxy generate
+        let gen_wire = encode_gw(
+            b'0',
+            mac_size_byte,
+            algo_byte,
+            &bdk_label,
+            ksn,
+            &msg_hex,
+            None,
+        );
+        let proxy_gen = gw.handle(b"GW", &gen_wire, &state).await;
+        if &proxy_gen.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("dukpt_mac_gw_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} GW generate error_code={} (algo={} size={} msg_bytes={msg_bytes})",
+                String::from_utf8_lossy(&proxy_gen.error_code),
+                algo_byte as char,
+                mac_size_byte as char,
+            ));
+            break;
+        }
+        let proxy_mac = String::from_utf8(proxy_gen.payload.to_vec())?;
+
+        // 2) oracle: APC generate_mac with matching DUKPT algorithm + variant
+        let oracle = data
+            .generate_mac()
+            .key_identifier(&bdk_arn)
+            .message_data(&msg_hex)
+            .generation_attributes(oracle_algo(dukpt.clone()))
+            .send()
+            .await?;
+        let oracle_mac = oracle.mac().to_string();
+        let oracle_prefix = &oracle_mac[..mac_size_chars.min(oracle_mac.len())];
+        if !proxy_mac.eq_ignore_ascii_case(oracle_prefix) {
+            eprintln!(
+                "{}",
+                replay_hint("dukpt_mac_gw_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} GW MAC mismatch (algo={} size={}): proxy={proxy_mac} apc_prefix={oracle_prefix} (apc_full={oracle_mac})",
+                algo_byte as char,
+                mac_size_byte as char,
+            ));
+            break;
+        }
+
+        // 3) verify round-trip
+        let ver_wire = encode_gw(
+            b'1',
+            mac_size_byte,
+            algo_byte,
+            &bdk_label,
+            ksn,
+            &msg_hex,
+            Some(&proxy_mac),
+        );
+        let proxy_ver = gw.handle(b"GW", &ver_wire, &state).await;
+        if &proxy_ver.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("dukpt_mac_gw_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} GW verify round-trip rejected proxy MAC: error_code={} mac={proxy_mac} (apc_full={oracle_mac})",
+                String::from_utf8_lossy(&proxy_ver.error_code),
+            ));
+            break;
+        }
+
+        eprintln!(
+            "case={case_idx:02} OK algo={} size={} msg_bytes={msg_bytes} MAC={proxy_mac}",
+            algo_byte as char, mac_size_byte as char,
+        );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+// ── MAC translate MY (live differential: verify inbound + generate outbound) ──
+//
+// Un-audited handler (PUGD0537-004 p.371). MY verifies an inbound MAC under one
+// key, then generates a new MAC under a second key for the same message. Header:
+// per-direction MAC size + algorithm. Like GW, the inbound-verify step hands the
+// (possibly truncated half) MAC straight to APC verify_mac.
+
+const MY_IN_M1_LABEL: &str = "U000000000000000000000000000000C1";
+const MY_OUT_M1_LABEL: &str = "U000000000000000000000000000000C2";
+
+#[allow(clippy::too_many_arguments)]
+fn encode_my(
+    in_size: u8,
+    out_size: u8,
+    in_label: &str,
+    out_label: &str,
+    msg_hex: &str,
+    inbound_mac: &str,
+) -> Vec<u8> {
+    // ALG1 ('1') for both directions in this test.
+    let mut v = vec![b'0', b'1', in_size, b'1', b'1']; // mode, infmt, in size, in algo, in pad
+    v.extend_from_slice(b"003"); // in key type (consumed)
+    v.extend_from_slice(in_label.as_bytes());
+    v.extend_from_slice(&[out_size, b'1', b'1']); // out size, out algo, out pad
+    v.extend_from_slice(b"003"); // out key type (consumed)
+    v.extend_from_slice(out_label.as_bytes());
+    v.extend_from_slice(format!("{:04X}", msg_hex.len() / 2).as_bytes());
+    v.extend_from_slice(msg_hex.as_bytes());
+    v.extend_from_slice(inbound_mac.as_bytes());
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn mac_translate_my_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!("mac_translate_my_differential: grounding crypto=apc wire=diff-xprov(size+length-randomised, ALG1)");
+
+    let (cpc, data) = aws_clients().await;
+    let m1 = || KeyModesOfUse::builder().generate(true).verify(true).build();
+    let specs = [
+        KeySpec {
+            role: "IN",
+            wire_label: MY_IN_M1_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31M1Iso97971MacKey,
+            modes: m1(),
+        },
+        KeySpec {
+            role: "OUT",
+            wire_label: MY_OUT_M1_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31M1Iso97971MacKey,
+            modes: m1(),
+        },
+    ];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let in_arn = keys.arn("IN").to_string();
+    let out_arn = keys.arn("OUT").to_string();
+    let in_label = keys.wire_label("IN").to_string();
+    let out_label = keys.wire_label("OUT").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let my = registry.get(b"MY").expect("MY registered");
+
+    const LABEL: &str = "mac_translate_my";
+    let run = cases_to_run();
+    eprintln!(
+        "mac_translate_my_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let in_size_byte = if rng.random_bool(0.5) { b'0' } else { b'1' };
+        let out_size_byte = if rng.random_bool(0.5) { b'0' } else { b'1' };
+        let in_chars = if in_size_byte == b'0' { 8 } else { 4 };
+        let out_chars = if out_size_byte == b'0' { 8 } else { 4 };
+        let msg_bytes = edge_biased(&mut rng, 1, 32, &[1, 7, 8, 16, 32]);
+        let msg_hex = gen_hex_message(&mut rng, msg_bytes);
+
+        // Setup: a valid inbound MAC under the IN key (truncated to in size).
+        let in_full = data
+            .generate_mac()
+            .key_identifier(&in_arn)
+            .message_data(&msg_hex)
+            .generation_attributes(MacAttributes::Algorithm(MacAlgorithm::Iso9797Algorithm1))
+            .send()
+            .await?
+            .mac()
+            .to_string();
+        let inbound_mac = in_full[..in_chars.min(in_full.len())].to_string();
+
+        // Proxy MY: verify inbound + generate outbound.
+        let wire = encode_my(
+            in_size_byte,
+            out_size_byte,
+            &in_label,
+            &out_label,
+            &msg_hex,
+            &inbound_mac,
+        );
+        let proxy = my.handle(b"MY", &wire, &state).await;
+        if &proxy.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("mac_translate_my_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} MY error_code={} (in_size={} out_size={} msg_bytes={msg_bytes})",
+                String::from_utf8_lossy(&proxy.error_code),
+                in_size_byte as char,
+                out_size_byte as char,
+            ));
+            break;
+        }
+        let proxy_out = String::from_utf8(proxy.payload.to_vec())?;
+
+        // Oracle: APC generate_mac under the OUT key, truncated to out size.
+        let out_full = data
+            .generate_mac()
+            .key_identifier(&out_arn)
+            .message_data(&msg_hex)
+            .generation_attributes(MacAttributes::Algorithm(MacAlgorithm::Iso9797Algorithm1))
+            .send()
+            .await?
+            .mac()
+            .to_string();
+        let oracle_out = &out_full[..out_chars.min(out_full.len())];
+        if !proxy_out.eq_ignore_ascii_case(oracle_out) {
+            eprintln!(
+                "{}",
+                replay_hint("mac_translate_my_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} MY outbound mismatch: proxy={proxy_out} oracle={oracle_out} (in_size={} out_size={})",
+                in_size_byte as char,
+                out_size_byte as char,
+            ));
+            break;
+        }
+
+        eprintln!(
+            "case={case_idx:02} OK in_size={} out_size={} msg_bytes={msg_bytes} out={proxy_out}",
+            in_size_byte as char, out_size_byte as char,
+        );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+// ── Legacy data encrypt/decrypt HE/HG (live differential + round-trip) ────────
+//
+// Un-audited handler (PUGD0538). HE encrypts and HG decrypts a single 64-bit
+// block (16H) under a data key (TR31_D0), TDES-ECB. ECB is deterministic, so the
+// HE differential is exact; HE→HG must recover the plaintext.
+
+const HEHG_DEK_LABEL: &str = "U000000000000000000000000000000D5";
+
+fn encode_he_hg(key_label: &str, data_hex: &str) -> Vec<u8> {
+    let mut v = key_label.as_bytes().to_vec();
+    v.extend_from_slice(data_hex.as_bytes());
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn encrypt_decrypt_he_hg_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!("encrypt_decrypt_he_hg_differential: grounding crypto=apc wire=diff-xprov(TDES-ECB 64-bit block)");
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "DEK",
+        wire_label: HEHG_DEK_LABEL,
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31D0SymmetricDataEncryptionKey,
+        // APC rejects encrypt+decrypt alone for a D0 key; NoRestrictions allows
+        // both HE (encrypt) and HG (decrypt) under the one key.
+        modes: KeyModesOfUse::builder().no_restrictions(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let dek_arn = keys.arn("DEK").to_string();
+    let dek_label = keys.wire_label("DEK").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let he = registry.get(b"HE").expect("HE registered");
+    let hg = registry.get(b"HG").expect("HG registered");
+
+    const LABEL: &str = "encrypt_decrypt_he_hg";
+    let run = cases_to_run();
+    eprintln!(
+        "encrypt_decrypt_he_hg_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+    let ecb = || {
+        EncryptionDecryptionAttributes::Symmetric(
+            SymmetricEncryptionAttributes::builder()
+                .mode(EncryptionMode::Ecb)
+                .build()
+                .expect("ecb attrs"),
+        )
+    };
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        // One 64-bit block (8 bytes = 16 hex). Include all-zero / all-F edges.
+        let plain = match rng.random_range(0..4_u8) {
+            0 => "0000000000000000".to_string(),
+            1 => "FFFFFFFFFFFFFFFF".to_string(),
+            _ => gen_hex_message(&mut rng, 8),
+        };
+
+        // 1) HE encrypt via proxy
+        let proxy_he = he
+            .handle(b"HE", &encode_he_hg(&dek_label, &plain), &state)
+            .await;
+        if &proxy_he.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("encrypt_decrypt_he_hg_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} HE error_code={} (plain={plain})",
+                String::from_utf8_lossy(&proxy_he.error_code),
+            ));
+            break;
+        }
+        let proxy_cipher = String::from_utf8(proxy_he.payload.to_vec())?;
+
+        // 2) oracle: APC encrypt_data TDES-ECB (deterministic)
+        let oracle = data
+            .encrypt_data()
+            .key_identifier(&dek_arn)
+            .plain_text(&plain)
+            .encryption_attributes(ecb())
+            .send()
+            .await?;
+        let oracle_cipher = oracle.cipher_text().to_string();
+        if !proxy_cipher.eq_ignore_ascii_case(&oracle_cipher) {
+            eprintln!(
+                "{}",
+                replay_hint("encrypt_decrypt_he_hg_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} HE mismatch: proxy={proxy_cipher} oracle={oracle_cipher} plain={plain}"
+            ));
+            break;
+        }
+
+        // 3) HG decrypt round-trip → must recover the plaintext
+        let proxy_hg = hg
+            .handle(b"HG", &encode_he_hg(&dek_label, &proxy_cipher), &state)
+            .await;
+        if &proxy_hg.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("encrypt_decrypt_he_hg_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} HG error_code={} (cipher={proxy_cipher})",
+                String::from_utf8_lossy(&proxy_hg.error_code),
+            ));
+            break;
+        }
+        let recovered = String::from_utf8(proxy_hg.payload.to_vec())?;
+        if !recovered.eq_ignore_ascii_case(&plain) {
+            eprintln!(
+                "{}",
+                replay_hint("encrypt_decrypt_he_hg_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} HE→HG round-trip mismatch: plain={plain} recovered={recovered}"
+            ));
+            break;
+        }
+
+        eprintln!("case={case_idx:02} OK plain={plain} cipher={proxy_cipher}");
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
 // ── Legacy single-length DUKPT PIN verify CK (live differential) ──────────────
 //
 // Un-audited handler (PUGD0538). CK verifies a DUKPT-encrypted PIN against an IBM
@@ -1683,7 +2359,7 @@ async fn emv_decrypt_k0_differential() -> anyhow::Result<()> {
         // ATC (2B). Edge-biased over the 16-bit counter range.
         let atc_val = edge_biased(&mut rng, 0, 0xFFFF, &[1, 0x2A, 0xFFFF]) as u16;
         let atc = atc_val.to_be_bytes();
-        let atc_hex = bytes_to_hex_t(&atc); // 4 hex chars
+        let atc_hex = hex_upper(&atc); // 4 hex chars
 
         // CBC plaintext: whole TDES blocks (8B). Edge-biased over 1..4 blocks.
         let blocks = edge_biased(&mut rng, 1, 4, &[1, 2, 4]);
@@ -1756,15 +2432,4 @@ async fn emv_decrypt_k0_differential() -> anyhow::Result<()> {
     teardown_result?;
     survivor_result?;
     Ok(())
-}
-
-/// Bytes → uppercase hex. Test-local twin of the handler's `bytes_to_hex`.
-fn bytes_to_hex_t(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(char::from(HEX[(b >> 4) as usize]));
-        s.push(char::from(HEX[(b & 0x0F) as usize]));
-    }
-    s
 }

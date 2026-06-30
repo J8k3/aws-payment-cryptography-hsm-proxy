@@ -165,6 +165,26 @@ impl Handler for MacTranslateHandler {
         &["MY"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[
+            Evidence {
+                decision: "MY verifies an inbound MAC under one key, then generates an outbound MAC under a second key for the same message (per-direction MAC size/algorithm). A half inbound MAC (size '1' = 2 bytes) is verified by regenerating the full MAC and comparing the leading bytes.",
+                because: "PUGD0537-004 p.371. Verified live (ISO9797 Alg1) across all inbound×outbound MAC-size combos: proxy outbound MAC == APC generate_mac under the outbound key. The live differential caught the same half-MAC verify bug as GW — the inbound half MAC was handed to APC verify_mac, which rejects it — fixed with the regenerate-and-compare-prefix path.",
+                wire: WireGrounding::DiffXprov,
+                crypto: CryptoGrounding::Apc,
+                proof: Proof::LiveTest("mac_translate_my_differential"),
+            },
+            Evidence {
+                decision: "ALG3 and CMAC directions, and differing inbound/outbound algorithms, are parsed but not yet covered by a live differential (only ALG1 is).",
+                because: "PUGD0537-004 p.371 — same per-direction generate/verify mapping as the live-verified ALG1 path; broadening the differential is the tracked next step.",
+                wire: WireGrounding::Cited,
+                crypto: CryptoGrounding::None,
+                proof: Proof::ManualCite("PUGD0537-004 p.371; ALG3/CMAC not yet live-differentialed"),
+            },
+        ]
+    }
+
     async fn handle(
         &self,
         _command_code: &[u8],
@@ -213,27 +233,59 @@ impl Handler for MacTranslateHandler {
 
         debug!(in_key = %in_arn, out_key = %out_arn, "MY: verify_mac then generate_mac");
 
-        // Step 1: verify inbound MAC
-        match state
-            .data
-            .verify_mac()
-            .key_identifier(&in_arn)
-            .message_data(&fields.message_hex)
-            .mac(&fields.inbound_mac)
-            .verification_attributes(MacAttributes::Algorithm(in_algo))
-            .send()
-            .await
-        {
-            Ok(_) => {}
-            Err(e) => {
-                if e.as_service_error()
-                    .is_some_and(aws_sdk_paymentcryptographydata::operation::verify_mac::VerifyMacError::is_verification_failed_exception)
-                {
-                    warn!("MY: inbound MAC mismatch");
-                    return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
+        // Step 1: verify inbound MAC. APC verify_mac only accepts a full 8H/16H
+        // MAC, so a Thales half MAC (inbound size '1' = 2 bytes = 4H) is verified
+        // by regenerating the full MAC and comparing the leading bytes (same as the
+        // GW and M6 CMAC verify paths).
+        let inbound_ok = if fields.inbound_mac.len() < 8 {
+            match state
+                .data
+                .generate_mac()
+                .key_identifier(&in_arn)
+                .message_data(&fields.message_hex)
+                .generation_attributes(MacAttributes::Algorithm(in_algo))
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let full = resp.mac();
+                    let expected = &full[..fields.inbound_mac.len().min(full.len())];
+                    Ok(fields.inbound_mac.eq_ignore_ascii_case(expected))
                 }
-                warn!(?e, "MY: verify_mac failed");
-                return HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()));
+                Err(e) => Err(e.to_string()),
+            }
+        } else {
+            match state
+                .data
+                .verify_mac()
+                .key_identifier(&in_arn)
+                .message_data(&fields.message_hex)
+                .mac(&fields.inbound_mac)
+                .verification_attributes(MacAttributes::Algorithm(in_algo))
+                .send()
+                .await
+            {
+                Ok(_) => Ok(true),
+                Err(e) => {
+                    if e.as_service_error()
+                        .is_some_and(aws_sdk_paymentcryptographydata::operation::verify_mac::VerifyMacError::is_verification_failed_exception)
+                    {
+                        Ok(false)
+                    } else {
+                        Err(e.to_string())
+                    }
+                }
+            }
+        };
+        match inbound_ok {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!("MY: inbound MAC mismatch");
+                return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
+            }
+            Err(msg) => {
+                warn!(%msg, "MY: inbound verify failed");
+                return HandlerResult::from_proxy_error(&ProxyError::ApcError(msg));
             }
         }
 
