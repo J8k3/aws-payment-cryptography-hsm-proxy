@@ -440,13 +440,17 @@ pub fn bytes_to_hex(bytes: &[u8]) -> String {
 ///
 /// Per EMV Book 2 Annex A1.4.1 this field carries the RIGHTMOST 16 digits of
 /// (PAN || 2-digit PAN sequence number), left zero-padded — NOT a left-justified
-/// PAN with 0xF padding. Splitting it as (first 14 digits, last 2 digits) yields
-/// `(pan, pan_seq)` whose `rightmost16(pan || pan_seq)` reproduces the original
-/// 16-digit field, so APC re-derives the same ICC master key. Verified against
-/// live APC: a 16-digit-PAN ARQC verifies (error 00) only with this split.
+/// PAN with 0xF padding. The last two digits are the PAN sequence number; the
+/// preceding 14 are the rightmost PAN digits. The EMV Option A left zero-padding
+/// is stripped so APC receives a conventional PAN — the derivation value is
+/// unchanged because APC re-applies `rightmost16(PAN || PSN)` internally.
+/// Verified against live APC: a 16-digit-PAN ARQC verifies (error 00) with this
+/// split (16-digit PANs have no leading zero, so the strip is a no-op there).
 pub fn decode_bcd_pan_seq(bytes: [u8; 8]) -> (String, String) {
-    let hex = bytes_to_hex(&bytes);
-    (hex[..14].to_string(), hex[14..16].to_string())
+    let hex = bytes_to_hex(&bytes); // exactly 16 BCD digits
+    let pan_seq = hex[14..16].to_string();
+    let pan = hex[..14].trim_start_matches('0').to_string();
+    (pan, pan_seq)
 }
 
 #[cfg(test)]
@@ -465,6 +469,17 @@ mod tests {
         let bytes = [0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x01];
         let (pan, seq) = decode_bcd_pan_seq(bytes);
         assert_eq!(pan, "12345678901234");
+        assert_eq!(seq, "01");
+    }
+
+    #[test]
+    fn decode_bcd_pan_seq_strips_option_a_padding() {
+        // 12-digit PAN 123456789012, PSN 01 → EMV Option A pre-format =
+        // rightmost-16(PAN‖PSN) left zero-padded: "0012345678901201". The Option A
+        // padding is stripped to recover the conventional PAN.
+        let bytes = [0x00, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x01];
+        let (pan, seq) = decode_bcd_pan_seq(bytes);
+        assert_eq!(pan, "123456789012");
         assert_eq!(seq, "01");
     }
 
