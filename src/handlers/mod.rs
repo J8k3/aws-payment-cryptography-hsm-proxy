@@ -1,4 +1,5 @@
 pub mod futurex;
+pub mod grounding;
 pub mod noop;
 pub mod thales;
 
@@ -57,6 +58,15 @@ pub trait Handler: Send + Sync {
     ) -> HandlerResult;
     /// The command codes this handler accepts. Matched by byte equality against parsed frames.
     fn command_codes(&self) -> &'static [&'static str];
+
+    /// Structured evidence for *why* this handler is implemented as it is and *how*
+    /// it was verified (manual citation and/or live-APC differential). The single
+    /// source of truth for grounding; the report in `docs/grounding-report.md` is
+    /// generated from this. Defaults to empty so handlers adopt it incrementally;
+    /// the audit test (`tests/grounding.rs`) flags supported handlers that have none.
+    fn grounding(&self) -> &'static [grounding::Evidence] {
+        &[]
+    }
 }
 
 /// O(1) command dispatch table built at startup.
@@ -138,5 +148,35 @@ impl Registry {
 
     pub fn get(&self, command_code: &[u8]) -> Option<Arc<dyn Handler>> {
         self.map.get(command_code).cloned()
+    }
+
+    /// One grounding entry per *distinct* handler (deduped by its first command
+    /// code, which is unique per handler), sorted for deterministic output. Drives
+    /// the generated grounding report and the coverage audit.
+    pub fn grounding_entries(&self) -> Vec<grounding::Entry> {
+        let mut seen = std::collections::HashSet::new();
+        let mut entries: Vec<grounding::Entry> = Vec::new();
+        for h in self.map.values() {
+            let codes = h.command_codes();
+            let Some(&first) = codes.first() else {
+                continue;
+            };
+            if !seen.insert(first) {
+                continue;
+            }
+            entries.push(grounding::Entry {
+                codes: codes.to_vec(),
+                evidence: h.grounding(),
+            });
+        }
+        entries.sort_by(|a, b| a.codes.first().cmp(&b.codes.first()));
+        entries
+    }
+
+    /// The generated grounding report (Markdown). Source of truth for
+    /// `docs/grounding-report.md`.
+    #[must_use]
+    pub fn grounding_report(&self) -> String {
+        grounding::format_report(&self.grounding_entries())
     }
 }

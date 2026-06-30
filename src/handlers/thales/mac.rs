@@ -12,7 +12,10 @@ use crate::key_map::KeyDescriptor;
 /// C2/C4: X9.9/X9.19/AS2805 MAC — fixed-layout, static MAC key
 /// M6/M8: Extended MAC (ISO9797 Alg1/Alg3/CMAC) — variable-layout per PUGD0537-004 p.363/368
 ///
-/// All four map to APC GenerateMac / VerifyMac.
+/// All four map to APC GenerateMac / VerifyMac. The wire field layouts are the
+/// `//` comments above `parse_c2_payload` / `parse_m6_payload`. Why these
+/// decisions, and how each was verified, live in `Handler::grounding()` — the
+/// single source of truth (see `src/handlers/grounding.rs`), not duplicated here.
 pub struct MacHandler;
 
 // ── C2/C4 layout (PUGD0537-004 p.583) ────────────────────────────────────────
@@ -231,6 +234,26 @@ struct MacFields {
 impl Handler for MacHandler {
     fn command_codes(&self) -> &'static [&'static str] {
         &["C2", "C4", "M6", "M8"]
+    }
+
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[
+            Evidence {
+                decision: "M6/M8 wire: Mode+InputFormat+MACSize+MACAlgo+PadMethod(5×1N)+KeyType(3H) before the key. MAC size '0'=4 bytes, '1'=8 bytes.",
+                because: "PUGD0537-004 p.363/368. Verified live: proxy M6 MAC == APC generate_mac (ISO9797 Alg3) over randomized message lengths, plus an M8 verify round-trip. Note: APC returns a 4-byte MAC for ISO9797_ALGORITHM3, so size '0' is the faithful case (verified live).",
+                wire: WireGrounding::DiffXprov,
+                crypto: CryptoGrounding::Apc,
+                proof: Proof::LiveTest("mac_m6_m8_differential"),
+            },
+            Evidence {
+                decision: "C2/C4 wire: BlockNumber+KeyType+MACMode+MessageType(4×1N) before the key — a DISTINCT header from M6. MAC generation Mode selects the algorithm: '0'=X9.9→ISO9797 Alg1, '1'=X9.19→ISO9797 Alg3.",
+                because: "PUGD0537-004 p.583. Verified live for both algorithms: proxy C2 MAC == APC generate_mac (Alg1 via M1 key, Alg3 via M3 key) over randomized mode + message length, plus a C4 verify round-trip.",
+                wire: WireGrounding::DiffXprov,
+                crypto: CryptoGrounding::Apc,
+                proof: Proof::LiveTest("mac_c2_c4_differential"),
+            },
+        ]
     }
 
     async fn handle(
