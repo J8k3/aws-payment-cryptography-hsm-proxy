@@ -4,13 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current work — start here
 
-**Goal.** Make the Thales command translations *correct and trustworthy* — faithful
-to the authoritative payShield manual (PUGD0537-004), replacing handlers that had
-been written from an unverified ("inferred") wire spec (wrong field offsets, a
-wrong PIN-block-format-code scheme). Prove that correctness with a *grounded* test
-framework — one whose every decision is sourced, so we don't manufacture false
-confidence — and then **land the work by merging the feature branches to `main`
-once testing validates them.**
+**Goal.** Make the Thales command translations *verifiable against authoritative
+references* — each wire decision traced to the payShield manual (PUGD0537-004) and
+its behaviour checked against live APC — replacing handlers that had been written
+from an unverified ("inferred") wire spec (wrong field offsets, a wrong
+PIN-block-format-code scheme). Back every decision with a *grounded* test framework
+whose evidence is sourced (manual cite and/or live-APC differential), so we claim
+only what we've verified and don't manufacture false confidence — and then **land
+the work by merging the feature branches to `main` once that verification is in
+place.** Note the precise grounding: the live differentials prove *wire fidelity*
+(diff-vs-APC) and agreement with APC's crypto (`apc`), not correctness against
+published standard test vectors (`vec`) — that stronger check is separate, later work.
 
 **This is a deliver-to-merge task, not a build-and-stop task.** The end state is:
 fixes validated by the harness, branches merged.
