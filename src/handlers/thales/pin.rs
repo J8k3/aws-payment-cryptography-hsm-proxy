@@ -32,19 +32,14 @@ use crate::key_map::KeyDescriptor;
 ///   '47' = ISO 9564-1 Format 3
 ///   '48' = ISO 9564-1 Format 4        (AES, 32H block, variable PAN+delimiter)
 ///
-/// SCOPE: this handler implements the common static 3DES path — CC and CA where
-/// the destination is a ZPK and the source/destination formats are 0/1/3 (DES,
-/// 16H block, 12N PAN). The following are returned as Unsupported (payShield 68)
-/// rather than parsed from an unverified layout:
-///   - Format '04' (Plus): no APC equivalent.
-///   - Format '48' (ISO 4): needs a 32H AES block and the ISO-4 variable
-///     PAN+delimiter encoding, which must be validated against live APC first.
-///   - CA with a '*'/'~' Destination Key Flag (DUKPT destination).
-///   - G0 (source BDK DUKPT) and BQ (Translate PIN Algorithm): distinct layouts
-///     with optional source/destination KSNs that require DUKPT validation.
-///     (The previous handler mapped a non-existent 'CI' command and a fabricated
-///     fixed-width layout with leading key-type bytes and a '00/01/03/04' format
-///     scheme that matches no real Thales message.)
+/// SCOPE: the common static 3DES path — CC/CA with a ZPK destination and DES
+/// formats 0/1/3 (16H block, 12N PAN). Returned as Unsupported (68): format '04'
+/// (Plus) and '48' (ISO-4 AES); CA with a '*'/'~' DUKPT-destination flag; and
+/// G0/BQ.
+///
+/// Why these decisions, and how each was verified, live in `Handler::grounding()`
+/// — the single source of truth (see `src/handlers/grounding.rs`), not duplicated
+/// here.
 pub struct PinHandler;
 
 const MAX_PIN_LEN_FIELD: usize = 2;
@@ -138,6 +133,26 @@ fn parse_translate(payload: &[u8], has_dest_flag: bool) -> Result<PinFields, Pro
 impl Handler for PinHandler {
     fn command_codes(&self) -> &'static [&'static str] {
         &["CA", "CC", "BQ", "G0"]
+    }
+
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[
+            Evidence {
+                decision: "CA/CC wire: src key, dst key, MaxPINLen(2N), 16H source PIN block, src + dst PIN-block-format codes(2N each: 01=ISO0, 47=ISO3), PAN(12N). Format codes are the standard Thales 2N values, NOT a 00/01/03/04 scheme.",
+                because: "PUGD0537-004 p.282/285. Verified live across all src/dst format combos (ISO0/ISO3) and both CA/CC: a valid block is minted via generate_pin_data, translated through the proxy, then BOTH proxy output and original input are canonicalized to deterministic ISO Format 0 under a shared key and compared — immune to ISO-3's random fill.",
+                wire: WireGrounding::DiffXprov,
+                crypto: CryptoGrounding::Apc,
+                proof: Proof::LiveTest("pin_translate_ca_cc_differential"),
+            },
+            Evidence {
+                decision: "G0 (BDK DUKPT translate) and BQ (Translate PIN Algorithm) return Unsupported (68).",
+                because: "G0 carries optional source/destination KSNs needing DUKPT validation against APC; BQ is the proprietary Visa→Racal LMK-PIN algorithm with no APC equivalent (PUGD0537-004 p.294). Gated rather than parsed from an unverified layout.",
+                wire: WireGrounding::None,
+                crypto: CryptoGrounding::None,
+                proof: Proof::Gated("G0 needs DUKPT validation; BQ has no APC equivalent"),
+            },
+        ]
     }
 
     async fn handle(

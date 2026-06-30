@@ -18,13 +18,9 @@ use aws_sdk_paymentcryptographydata::types::{DukptDerivationType, PinBlockFormat
 /// GS — Verify PIN, Diebold method   → 68 (Diebold table in HSM user storage)
 /// GU — Verify PIN, Encrypted PIN    → 68 (LMK reference PIN, no APC equivalent)
 ///
-/// GO supports both 3DES (X9.24-1) and AES (X9.24-3) DUKPT. The derivation type
-/// is read from the KSN descriptor: 20H KSN → Tdes2Key, 24H KSN → Aes128.
-///
-/// GO begins with a Mode digit (1N): '0'/'2' = PIN verify only, '1' = PIN verify
-/// AND MAC verify. APC's verify_pin_data does not verify a MAC in the same call
-/// and the GP response carries a separate MAC Error Code we cannot reproduce, so
-/// Mode '1' is rejected as unsupported (68).
+/// GO supports both 3DES (X9.24-1) and AES (X9.24-3) DUKPT; the derivation type
+/// comes from the KSN descriptor (20H → Tdes2Key, 24H → Aes128). Mode '1' (verify
+/// PIN + MAC) is rejected (68).
 ///
 /// GO field layout (p.349):
 ///   Mode:             1N  ('0'/'2' accepted, '1' → 68)
@@ -37,22 +33,14 @@ use aws_sdk_paymentcryptographydata::types::{DukptDerivationType, PinBlockFormat
 ///   Account Number:  12N
 ///   Decimalization Table: 16H
 ///   PIN Validation Data:  12A
-///   Offset:          12H  IBM PIN offset, left-justified, F-padded (the F
-///                         padding is stripped before the APC call — APC's
-///                         pin_offset is digits-only)
+///   Offset:          12H  IBM offset, F-padded (stripped before the APC call)
 ///
-/// GQ (Visa PVV, DUKPT) is GATED (returns 68). The APC single-call path —
-/// verify_pin_data with DukptAttributes + VisaPin — returns InternalServerException
-/// (HTTP 500), verified live 2026-06 in us-east-1 and us-west-2, on inputs that
-/// satisfy the documented schema. This is isolated: the IBM3624 sibling (GO,
-/// above) works single-call, non-DUKPT Visa PVV verify works, and the two-call
-/// flow (translate the DUKPT PIN block to a ZPK, then verify the PVV non-DUKPT)
-/// works. Rather than emit a 500-driven error or paper over the gap with a
-/// non-faithful two-call translate (which would add an intermediate interchange
-/// key to the PIN path), GQ is gated honestly pending an APC fix. The repro is
-/// filed for AWS; the two-call workaround is the documented alternative if a
-/// migration needs GQ before then. The GQ wire parser was removed with this
-/// gating (recover from git history when the APC path is fixed).
+/// GQ/GS/GU return 68. The GQ wire parser was removed when it was gated (recover
+/// from git history if the APC path is fixed).
+///
+/// Why these decisions, and how each was verified, live in `Handler::grounding()`
+/// — the single source of truth (see `src/handlers/grounding.rs`), not duplicated
+/// here.
 pub struct DukptPinVerifyAesHandler;
 
 const CHECK_LEN: usize = 2;
@@ -195,6 +183,33 @@ impl Handler for DukptPinVerifyAesHandler {
         &["GO", "GQ", "GS", "GU"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[
+            Evidence {
+                decision: "GO (IBM3624 DUKPT PIN verify) wire: Mode + BDK + PVK + KSN-descriptor(3H)+KSN + PIN block + fmt code + check len + PAN + decim table + PIN validation data + offset(12H, F-padded). The 12H offset's F-padding is STRIPPED before APC.",
+                because: "PUGD0537-004 p.349. Verified live: proxy GO verdict == APC verify_pin_data verdict (IBM3624 + 3DES DUKPT) for valid PINs across randomized PAN/KSN. The live differential CAUGHT a real bug: APC's pin_offset is ^[0-9]+$, so the wire's F-padded offset was rejected (GO returned 41 for every valid PIN) until the strip was added.",
+                wire: WireGrounding::DiffXprov,
+                crypto: CryptoGrounding::Apc,
+                proof: Proof::LiveTest("dukpt_pin_verify_go_differential"),
+            },
+            Evidence {
+                decision: "GQ (Visa PVV DUKPT verify) returns Unsupported (68).",
+                because: "APC single-call verify_pin_data + DukptAttributes + VisaPin returns InternalServerException (500), verified live us-east-1 + us-west-2 on schema-valid inputs. Isolated: the IBM3624 sibling (GO) works single-call, non-DUKPT Visa PVV works, and a two-call translate-then-verify works. Gated honestly rather than inject an intermediate interchange key into the PIN path. Repro filed for AWS.",
+                wire: WireGrounding::None,
+                crypto: CryptoGrounding::None,
+                proof: Proof::Gated("APC single-call DUKPT+VisaPin verify returns 500; see handler doc"),
+            },
+            Evidence {
+                decision: "GS (Diebold) and GU (Encrypted PIN) DUKPT verify return Unsupported (68).",
+                because: "Diebold indexes a conversion table in HSM user storage and GU compares against an LMK-encrypted reference PIN — neither has an APC equivalent (APC verify_pin_data does IBM3624 offset / Visa PVV only). PUGD0537-004 p.355/358.",
+                wire: WireGrounding::None,
+                crypto: CryptoGrounding::None,
+                proof: Proof::Gated("no APC equivalent (Diebold table / LMK-compare)"),
+            },
+        ]
+    }
+
     async fn handle(
         &self,
         command_code: &[u8],
@@ -204,12 +219,7 @@ impl Handler for DukptPinVerifyAesHandler {
         match command_code {
             b"GO" => handle_go(payload, state).await,
             b"GQ" => {
-                // Gated: APC's single-call verify_pin_data + DukptAttributes +
-                // VisaPin returns InternalServerException (verified live 2026-06,
-                // us-east-1 + us-west-2). The IBM3624 sibling GO works single-call
-                // and a two-call translate-then-verify works; we gate honestly
-                // pending an APC fix rather than emit a 500-driven error or add a
-                // non-faithful intermediate-key translate. See the handler doc.
+                // Gated (returns 68). Reason and evidence: Handler::grounding().
                 warn!("GQ gated: APC single-call DUKPT+VisaPin verify returns 500");
                 HandlerResult::from_proxy_error(&ProxyError::Unsupported(
                     "GQ (Visa PVV, DUKPT verify): APC VerifyPinData with DukptAttributes + \

@@ -48,9 +48,14 @@ after the merge, but never block a validated fix from landing.
 
 **Read before building the harness:**
 - `docs/property-testing-plan.md` — differential-vs-APC design, per-run *varying*
-  keys, in-crate `#[cfg(test)]`/`#[ignore]` module (the crate is a bin, no `lib.rs`).
-- `docs/test-grounding-inventory.md` — what each test is grounded in, and the
-  cite-or-gate discipline ("inferred" fails review) with crypto/wire labels.
+  keys, edge-biased generation, replay.
+- **Grounding is in-code, not a hand-maintained doc.** Each handler's evidence
+  (the *why* and *how verified*) lives in `Handler::grounding()`
+  (`src/handlers/grounding.rs`) — the single source of truth. `docs/grounding-report.md`
+  is *generated* from it by `tests/grounding.rs` (regenerate with
+  `GROUNDING_REGEN=1 cargo test --test grounding`); never hand-edit it. Handler
+  doc-comments keep only the wire layout + a pointer, so evidence isn't duplicated.
+  Going forward, a handler's documentation (grounding) and its test land together.
 
 **Non-negotiable harness rules:** every wire decision **cites the manual
 page+field**; nothing "inferred"; APC test keys are **created per run and deleted
