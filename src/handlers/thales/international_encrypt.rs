@@ -49,9 +49,10 @@ use crate::key_map::KeyDescriptor;
 /// APC key expectation: TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY.
 /// payShield LMK pairs: DEK→LMK 32-33, ZEK→LMK 30-31.
 ///
-/// KNOWN LIMITATION: Only ECB mode ('00') is supported. CBC/CFB modes require
-/// returning an output IV that APC does not expose; they return error 15 until
-/// the official International Host Commands doc is available to confirm behaviour.
+/// KNOWN LIMITATION: Only ECB mode ('00') is supported. Per PUGD0539-003 §2.2.1,
+/// the CBC/CFB modes ('01'-'03') take an input IV and return a new output IV for
+/// chaining; APC's symmetric encrypt/decrypt does not expose an output IV, so
+/// those modes return error 15.
 pub struct InternationalEncryptHandler;
 
 const MODE_FLAG_LEN: usize = 2;
