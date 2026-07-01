@@ -57,6 +57,26 @@ after the merge, but never block a validated fix from landing.
   doc-comments keep only the wire layout + a pointer, so evidence isn't duplicated.
   Going forward, a handler's documentation (grounding) and its test land together.
 
+- **Second-implementation cross-validation (`2impl`) — a separate axis from the
+  live differentials.** The live differentials prove `proxy == APC` (`crypto=apc`),
+  which is self-referential: a bug shared by APC and the proxy would pass. A
+  separately maintained cross-validation compares `APC == CyberChef Payments` for a
+  primitive over a shared clear key. **CyberChef Payments** is a purpose-built,
+  inspectable payment-cryptography implementation (a separate codebase, different
+  language) built alongside this proxy. Since `proxy == APC` is established here,
+  agreement lifts the covered primitives to "consistent with a second
+  implementation." Currently cross-validated: **CVV, AES-CMAC, HMAC-SHA256, ISO
+  9797-1 Algorithm 3.** Where it applies to an active handler it's recorded as a
+  `crypto=TwoImpl` evidence entry. **Honesty rules for this axis:** CyberChef
+  Payments *shares an author with this proxy*, so it cross-checks the
+  implementation (catching coding-level divergence) rather than being a neutral
+  third-party oracle, and it is less battle-tested than APC — agreement is
+  corroboration, with APC (AWS) as the independent reference (and, where present, a
+  from-spec computation as an author-independent anchor). A disagreement means
+  investigate the test setup first, then both sides. The cross-validation is run
+  separately from this repository's automated tests, so `2impl` evidence says so
+  and never dangles an in-repo proof.
+
 **Non-negotiable harness rules:** every wire decision **cites the manual
 page+field**; nothing "inferred"; APC test keys are **created per run and deleted
 on every exit path** with a zero-surviving-key assertion (a prior run leaked test

@@ -78,18 +78,21 @@ assert result_proxy == result_oracle
   the 8-byte DES block {1, 7, 8, 9, 16, 32}. When a handler adds an axis (PIN
   block format code, KSN length, key prefix), give it the same treatment.
 
-### Tier 2 — independent spec oracle (later; the CyberChef story)
+### Tier 2 — second-implementation spec oracle (later; the `2impl` story)
 
 Generate fresh key material whose clear value we *do* know (create exportable
 test keys, or import known material under a per-run KEK), compute the expected
-CVV/PVV/MAC/ARQC with an independent implementation, and assert the proxy
-matches. This validates crypto correctness against the spec, not just "matches
-APC."
+CVV/PVV/MAC/ARQC with a *second* implementation, and assert APC (and therefore
+the proxy) matches. This corroborates crypto correctness against the spec, not
+just "matches APC."
 
-Jacob's **CyberChef fork** is the natural fit here: its operations already
-implement CVV, PIN-block, DUKPT, MAC and EMV crypto (the oracle), and its
-input-generation code can drive the generators. Aspirational, not required for
-Tier 1.
+**CyberChef Payments** is the natural fit here: a purpose-built,
+inspectable payment-cryptography implementation whose operations already cover
+CVV, PIN-block, DUKPT, MAC and EMV crypto (the oracle), and whose
+input-generation code can drive the generators. Honest caveat: it shares an
+author with this proxy, so it cross-checks the implementation rather than being
+a neutral oracle — APC (AWS) and, where present, a from-spec computation are the
+independent anchors. Aspirational, not required for Tier 1.
 
 ## Harness architecture (in-process, because the crate is a bin)
 

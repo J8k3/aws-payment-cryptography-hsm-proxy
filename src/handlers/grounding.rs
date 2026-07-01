@@ -40,7 +40,10 @@ pub enum WireGrounding {
 pub enum CryptoGrounding {
     /// Published standard test vector (strongest — neither APC nor we computed it).
     Vec,
-    /// An independent implementation agrees (e.g. `pyemv`/`psec`).
+    /// A second implementation agrees (e.g. a from-spec check, `pyemv`/`psec`, or
+    /// CyberChef Payments). Strength depends on independence: a from-spec or
+    /// third-party impl is an independent anchor; a same-author impl cross-checks
+    /// the code but can share blind spots — see the per-evidence `because`.
     TwoImpl,
     /// APC only — a single implementation. We verify the proxy *agrees with APC*,
     /// not that the crypto matches a published standard. Weakest crypto grounding.

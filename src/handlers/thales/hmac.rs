@@ -58,7 +58,11 @@ impl Handler for HmacHandler {
                       raw-byte (not hex) message. A faithful mapping must resolve the HMAC-length \
                       truncation and the raw-byte key/message representation against APC's \
                       hex-message generate_mac/verify_mac before enabling. Until then, returning 68 \
-                      is correct rather than proxying a guessed layout.",
+                      is correct rather than proxying a guessed layout. (Forward note: APC's HMAC \
+                      primitive is already cross-validated against CyberChef Payments, a separate \
+                      payment-cryptography implementation — APC HMAC-SHA256 == CyberChef Payments \
+                      over random keys/messages — so when LQ/LS is implemented the APC crypto leg \
+                      is already corroborated 2impl; only the wire mapping remains.)",
             wire: WireGrounding::None,
             crypto: CryptoGrounding::None,
             proof: Proof::Gated(
