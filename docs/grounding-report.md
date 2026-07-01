@@ -5,7 +5,7 @@
 
 Evidence for *why* each handler behaves as it does and *how* it was verified. Generated from `Handler::grounding()` — do not edit by hand. Grounding labels: wire `vec-thru` > `diff-xprov` > `cited` > `none`; crypto `vec` > `2impl` > `apc` > `none`.
 
-**Coverage:** 14 of 26 handlers carry grounding; 12 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
+**Coverage:** 15 of 26 handlers carry grounding; 11 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
 
 ## `AQ`, `BA`, `BC`, `BE`, `BK`, `CG`, `DE`, `DG`, `EE`, `EG`, `FW`, `JC`, `JE`, `JG`, `LE`, `LG`, `LO`, `NG`, `EM`, `EU`, `EW`, `EY`, `GM`, `A0`, `A4`, `A6`, `A8`, `AA`, `AC`, `AE`, `AG`, `AK`, `AM`, `AS`, `AU`, `AW`, `BI`, `B0`, `B8`, `BG`, `BU`, `BW`, `BS`, `BY`, `CS`, `DW`, `DY`, `FA`, `FC`, `FE`, `FG`, `FK`, `GC`, `GE`, `GG`, `GK`, `GY`, `HA`, `HC`, `HY`, `IA`, `J6`, `J8`, `JK`, `K8`, `KA`, `KC`, `KG`, `KI`, `L0`, `LU`, `LW`, `MG`, `MI`, `N0`, `NC`, `NI`, `NO`, `Q0`, `Q6`, `Q8`, `QH`, `RA`, `SE`, `TG`, `TY`, `UI`, `VW`, `VY`, `WC`, `WQ`, `WW`, `WY`
 
@@ -73,6 +73,12 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
   - wire `none` · crypto `none` · gated (68): no single-call APC equivalent; see handler doc
   - NY's NZ response returns two values (IVCVC3 + CVC3) and RY validates 3 CSC lengths at once / includes AEVV — neither reproducible as APC's single generate/verify_card_validation_data call (PUGD0537-004 p.493 / p.252,316).
 
+## `DA`, `DC`, `EA`, `EC`
+
+- **DA/EA verify an IBM 3624 PIN and DC/EC a Visa PVV, all via APC verify_pin_data with no DUKPT. DA/DC carry a TPK and EA/EC a ZPK; both are P0 encryption keys in APC, so each pair shares one code path. The IBM 12H offset is F-padded on the wire and trimmed to APC's ^[0-9]+$ before the call (same handling as GO/CK).**
+  - wire `diff-xprov` · crypto `apc` · live test `pin_verify_non_dukpt_differential`
+  - PUGD0537-004 p.269/277/279/281. Verified live: the proxy's verify verdict matches a direct APC verify_pin_data verdict across randomized PAN, both methods, and all four command codes. A valid PIN is minted via generate_pin_data (IBM3624 natural PIN offset 0, or Visa PVV read back from PinData::VerificationValue); a wrong field offset would feed APC a different block, which it rejects, so proxy and oracle verdicts diverge.
+
 ## `ECHO`
 
 - **Futurex Excrypt ECHO is a connectivity heartbeat: returns an empty success response, makes no APC call.**
@@ -135,7 +141,6 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 These handlers have no `grounding()` yet — the open documentation/testing gap. Grounding them is the ongoing work (documentation + test added together).
 
 - `CU`, `DU`
-- `DA`, `DC`, `EA`, `EC`
 - `JA`
 - `JS`
 - `JU`, `KU`, `KY`

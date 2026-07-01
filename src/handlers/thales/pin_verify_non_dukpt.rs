@@ -158,6 +158,26 @@ impl Handler for PinVerifyNonDukptHandler {
         &["DA", "DC", "EA", "EC"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[Evidence {
+            decision: "DA/EA verify an IBM 3624 PIN and DC/EC a Visa PVV, all via APC \
+                           verify_pin_data with no DUKPT. DA/DC carry a TPK and EA/EC a ZPK; both \
+                           are P0 encryption keys in APC, so each pair shares one code path. The \
+                           IBM 12H offset is F-padded on the wire and trimmed to APC's ^[0-9]+$ \
+                           before the call (same handling as GO/CK).",
+            because: "PUGD0537-004 p.269/277/279/281. Verified live: the proxy's verify verdict \
+                          matches a direct APC verify_pin_data verdict across randomized PAN, both \
+                          methods, and all four command codes. A valid PIN is minted via \
+                          generate_pin_data (IBM3624 natural PIN offset 0, or Visa PVV read back \
+                          from PinData::VerificationValue); a wrong field offset would feed APC a \
+                          different block, which it rejects, so proxy and oracle verdicts diverge.",
+            wire: WireGrounding::DiffXprov,
+            crypto: CryptoGrounding::Apc,
+            proof: Proof::LiveTest("pin_verify_non_dukpt_differential"),
+        }]
+    }
+
     async fn handle(
         &self,
         command_code: &[u8],
