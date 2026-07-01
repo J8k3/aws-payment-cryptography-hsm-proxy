@@ -181,6 +181,31 @@ impl Handler for PinChangeHandler {
         &["CU", "DU"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[Evidence {
+            decision: "DU verifies the current PIN by IBM 3624 offset and generates a new offset; \
+                       CU does the same by Visa PVV. Each is atomic: the current PIN is verified \
+                       first (APC verify_pin_data), and only on a match is the new datum generated \
+                       (APC generate_pin_data with Ibm3624PinOffset / VisaPinVerificationValue for \
+                       the new PIN block). On mismatch the response is error 01 and no datum is \
+                       returned. The IBM 12H current offset is F-padded and trimmed to APC's \
+                       ^[0-9]+$ before the verify call.",
+            because: "PUGD0537-004 Rev A p.255 (DU) / p.259 (CU). Verified live end-to-end: for \
+                      both methods the proxy verifies a valid current PIN and returns a new \
+                      offset/PVV that a direct APC verify_pin_data then confirms against the new \
+                      PIN block, across randomized PAN. The live differential caught two DU offset \
+                      bugs: the F-padded current offset was passed to APC's pin_offset (which \
+                      requires ^[0-9]+$) so every valid current PIN was rejected — fixed by \
+                      stripping the padding (as GO/CK/DA do); and the generated New Offset was \
+                      returned unpadded, but the DV response field is 12H left-justified F-padded \
+                      (p.255) — fixed by re-padding.",
+            wire: WireGrounding::DiffXprov,
+            crypto: CryptoGrounding::Apc,
+            proof: Proof::LiveTest("pin_change_du_cu_differential"),
+        }]
+    }
+
     async fn handle(
         &self,
         command_code: &[u8],
@@ -223,12 +248,15 @@ async fn handle_du(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    // Step 1: verify current PIN
+    // Step 1: verify current PIN. The wire offset is 12H left-justified and
+    // F-padded; APC's pin_offset requires only the significant digits (^[0-9]+$),
+    // no padding — strip it (same handling as GO/CK/DA).
+    let cur_offset_trimmed = fields.cur_offset.trim_end_matches('F');
     let ibm_verify = match Ibm3624PinVerification::builder()
         .decimalization_table(&fields.decim_table)
         .pin_validation_data_pad_character("F")
         .pin_validation_data(&fields.pin_val_data)
-        .pin_offset(&fields.cur_offset)
+        .pin_offset(cur_offset_trimmed)
         .build()
         .map_err(|e| ProxyError::ApcError(e.to_string()))
     {
@@ -293,7 +321,11 @@ async fn handle_du(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
             use aws_sdk_paymentcryptographydata::types::PinData;
             match resp.pin_data() {
                 Some(PinData::PinOffset(offset)) => {
-                    HandlerResult::success(offset.as_bytes().to_vec())
+                    // DV response: New Offset is 12H, left-justified and F-padded
+                    // (PUGD0537-004 Rev A p.255). APC returns only the significant
+                    // digits, so re-pad to the 12H field width.
+                    let padded = format!("{offset:F<12}");
+                    HandlerResult::success(padded.into_bytes())
                 }
                 other => {
                     warn!(?other, "DU: unexpected pin_data variant");

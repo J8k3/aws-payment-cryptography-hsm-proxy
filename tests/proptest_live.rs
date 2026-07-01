@@ -35,6 +35,10 @@
 // Test-only file: pedantic noise about Vec<u8> args and `.expect` strings is
 // not worth chasing here.
 #![allow(clippy::missing_panics_doc)]
+// Several cases use a fail-fast `if err != "00" { (…, false) } else { … }` shape
+// where the error branch is deliberately first; positive-first would bury the
+// happy path under the check.
+#![allow(clippy::if_not_else)]
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -2952,6 +2956,315 @@ async fn intl_encrypt_m0_m2_m4_differential() -> anyhow::Result<()> {
         }
 
         eprintln!("case={case_idx:02} OK blocks={blocks} cipher={proxy_cipher} m4=ok");
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+// ── PIN change DU/CU (live differential, verify-current + generate-new) ────────
+//
+// Un-audited handler (PUGD0537-004 Rev A: DU "Verify a PIN & Generate an IBM PIN
+// Offset" p.255; CU "Verify a PIN & Generate an ABA PVV" p.259). Each is atomic:
+// verify the current PIN, and only on a match generate the new verification datum
+// for a customer-selected new PIN. Two APC calls — verify_pin_data then
+// generate_pin_data (Ibm3624PinOffset / VisaPinVerificationValue).
+//
+// Differential: mint a current PIN block (known offset/PVV) and a new PIN block,
+// run the proxy command, then confirm end-to-end that the returned NEW
+// offset/PVV actually verifies the NEW block via a direct APC verify_pin_data.
+// A wrong field offset in the parse breaks either the verify step (proxy rejects
+// a valid current PIN) or the generate step (the returned datum won't verify).
+
+const PC_ZPK_LABEL: &str = "U0000000000000000000000000000F001";
+const PC_PVK_IBM_LABEL: &str = "U0000000000000000000000000000F002";
+const PC_PVK_VISA_LABEL: &str = "U0000000000000000000000000000F003";
+
+/// Encode a DU (IBM offset) PIN-change frame.
+#[allow(clippy::too_many_arguments)]
+fn encode_du(
+    zpk_label: &str,
+    pvk_label: &str,
+    cur_block: &str,
+    account: &str,
+    decim: &str,
+    pin_val_data: &str,
+    cur_offset12: &str,
+    new_block: &str,
+) -> Vec<u8> {
+    let mut v = zpk_label.as_bytes().to_vec();
+    v.extend_from_slice(pvk_label.as_bytes());
+    v.extend_from_slice(b"04"); // max
+    v.extend_from_slice(b"04"); // min
+    v.extend_from_slice(cur_block.as_bytes()); // 16H current PIN block
+    v.extend_from_slice(b"01"); // format (ISO0)
+    v.extend_from_slice(account.as_bytes()); // 12N
+    v.extend_from_slice(decim.as_bytes()); // 16H
+    v.extend_from_slice(pin_val_data.as_bytes()); // 12A
+    v.extend_from_slice(cur_offset12.as_bytes()); // 12H F-padded
+    v.extend_from_slice(new_block.as_bytes()); // 16H new PIN block
+    v
+}
+
+/// Encode a CU (Visa PVV) PIN-change frame.
+#[allow(clippy::too_many_arguments)]
+fn encode_cu(
+    zpk_label: &str,
+    pvk_label: &str,
+    cur_block: &str,
+    account: &str,
+    pvki: &str,
+    cur_pvv: &str,
+    new_block: &str,
+) -> Vec<u8> {
+    let mut v = zpk_label.as_bytes().to_vec();
+    v.extend_from_slice(pvk_label.as_bytes());
+    v.extend_from_slice(b"04");
+    v.extend_from_slice(b"04");
+    v.extend_from_slice(cur_block.as_bytes()); // 16H current PIN block
+    v.extend_from_slice(b"01"); // format (ISO0)
+    v.extend_from_slice(account.as_bytes()); // 12N
+    v.extend_from_slice(pvki.as_bytes()); // 1N PVKI
+    v.extend_from_slice(cur_pvv.as_bytes()); // 4N current PVV
+    v.extend_from_slice(new_block.as_bytes()); // 16H new PIN block
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn pin_change_du_cu_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "pin_change_du_cu_differential: grounding crypto=apc \
+         wire=diff-xprov(IBM offset + Visa PVV; verify-current + generate-new; new datum re-verified)"
+    );
+
+    use aws_sdk_paymentcryptographydata::types::{VisaPin, VisaPinVerification};
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [
+        KeySpec {
+            role: "ZPK",
+            wire_label: PC_ZPK_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31P0PinEncryptionKey,
+            modes: KeyModesOfUse::builder()
+                .encrypt(true)
+                .decrypt(true)
+                .wrap(true)
+                .unwrap(true)
+                .build(),
+        },
+        KeySpec {
+            role: "PVK_IBM",
+            wire_label: PC_PVK_IBM_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31V1Ibm3624PinVerificationKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+        KeySpec {
+            role: "PVK_VISA",
+            wire_label: PC_PVK_VISA_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31V2VisaPinVerificationKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+    ];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let zpk_arn = keys.arn("ZPK").to_string();
+    let pvk_ibm_arn = keys.arn("PVK_IBM").to_string();
+    let pvk_visa_arn = keys.arn("PVK_VISA").to_string();
+    let zpk_label = keys.wire_label("ZPK").to_string();
+    let pvk_ibm_label = keys.wire_label("PVK_IBM").to_string();
+    let pvk_visa_label = keys.wire_label("PVK_VISA").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let du = registry.get(b"DU").expect("DU registered");
+    let cu = registry.get(b"CU").expect("CU registered");
+
+    const LABEL: &str = "pin_change_du_cu";
+    let iso0 = || PinBlockFormatForPinData::IsoFormat0;
+    let run = cases_to_run();
+    eprintln!(
+        "pin_change_du_cu_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+    let mut result: anyhow::Result<()> = Ok(());
+
+    // Mint an IBM3624 natural-PIN block under the ZPK for a given validation data.
+    async fn mint_natural(
+        data: &aws_sdk_paymentcryptographydata::Client,
+        pvk: &str,
+        zpk: &str,
+        pan: &str,
+        pvid: &str,
+    ) -> anyhow::Result<String> {
+        Ok(data
+            .generate_pin_data()
+            .generation_key_identifier(pvk)
+            .encryption_key_identifier(zpk)
+            .primary_account_number(pan)
+            .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+            .generation_attributes(PinGenerationAttributes::Ibm3624NaturalPin(
+                Ibm3624NaturalPin::builder()
+                    .decimalization_table(GO_DECIM_TABLE)
+                    .pin_validation_data(pvid)
+                    .pin_validation_data_pad_character("F")
+                    .build()?,
+            ))
+            .send()
+            .await?
+            .encrypted_pin_block()
+            .to_string())
+    }
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let use_ibm = rng.random_bool(0.5);
+        // New PIN block: a different natural PIN (distinct validation data), same PAN.
+        let new_block = mint_natural(&data, &pvk_ibm_arn, &zpk_arn, &pan, "999999999999").await?;
+
+        let (cmd, method, proxy_ok, new_verifies): (&[u8], &str, bool, bool) = if use_ibm {
+            // Current PIN: natural PIN (pvid=PAN), so current offset is all-zero.
+            let cur_block = mint_natural(&data, &pvk_ibm_arn, &zpk_arn, &pan, &pan).await?;
+            let wire = encode_du(
+                &zpk_label,
+                &pvk_ibm_label,
+                &cur_block,
+                &pan,
+                GO_DECIM_TABLE,
+                &pan,
+                "0000FFFFFFFF",
+                &new_block,
+            );
+            let proxy = du.handle(b"DU", &wire, &state).await;
+            if &proxy.error_code != b"00" {
+                (b"DU", "IBM", false, false)
+            } else {
+                // DV response New Offset is 12H, left-justified and F-padded
+                // (PUGD0537-004 Rev A p.255); APC's pin_offset wants the
+                // significant digits only, so trim before re-verifying.
+                let new_offset_wire = String::from_utf8(proxy.payload.to_vec())?;
+                anyhow::ensure!(
+                    new_offset_wire.len() == 12,
+                    "DU new offset not 12H F-padded: {new_offset_wire:?}"
+                );
+                let new_offset = new_offset_wire.trim_end_matches('F');
+                // The returned new offset must verify the new PIN block.
+                let ok = data
+                    .verify_pin_data()
+                    .verification_key_identifier(&pvk_ibm_arn)
+                    .encryption_key_identifier(&zpk_arn)
+                    .encrypted_pin_block(&new_block)
+                    .primary_account_number(&pan)
+                    .pin_block_format(iso0())
+                    .verification_attributes(PinVerificationAttributes::Ibm3624Pin(
+                        Ibm3624PinVerification::builder()
+                            .decimalization_table(GO_DECIM_TABLE)
+                            .pin_validation_data(&pan)
+                            .pin_validation_data_pad_character("F")
+                            .pin_offset(new_offset)
+                            .build()?,
+                    ))
+                    .send()
+                    .await
+                    .is_ok();
+                (b"DU", "IBM", true, ok)
+            }
+        } else {
+            // Current PIN: Visa PVV block; read back its PVV for the verify step.
+            let pvki = i32::try_from(edge_biased(&mut rng, 1, 6, &[1, 6])).expect("pvki");
+            let gen = data
+                .generate_pin_data()
+                .generation_key_identifier(&pvk_visa_arn)
+                .encryption_key_identifier(&zpk_arn)
+                .primary_account_number(&pan)
+                .pin_block_format(iso0())
+                .generation_attributes(PinGenerationAttributes::VisaPin(
+                    VisaPin::builder()
+                        .pin_verification_key_index(pvki)
+                        .build()?,
+                ))
+                .send()
+                .await?;
+            let cur_block = gen.encrypted_pin_block().to_string();
+            let cur_pvv = gen
+                .pin_data()
+                .and_then(|d| d.as_verification_value().ok().cloned())
+                .ok_or_else(|| anyhow::anyhow!("no Visa PVV"))?;
+            let wire = encode_cu(
+                &zpk_label,
+                &pvk_visa_label,
+                &cur_block,
+                &pan,
+                &pvki.to_string(),
+                &cur_pvv,
+                &new_block,
+            );
+            let proxy = cu.handle(b"CU", &wire, &state).await;
+            if &proxy.error_code != b"00" {
+                (b"CU", "Visa", false, false)
+            } else {
+                let new_pvv = String::from_utf8(proxy.payload.to_vec())?;
+                let ok = data
+                    .verify_pin_data()
+                    .verification_key_identifier(&pvk_visa_arn)
+                    .encryption_key_identifier(&zpk_arn)
+                    .encrypted_pin_block(&new_block)
+                    .primary_account_number(&pan)
+                    .pin_block_format(iso0())
+                    .verification_attributes(PinVerificationAttributes::VisaPin(
+                        VisaPinVerification::builder()
+                            .pin_verification_key_index(pvki)
+                            .verification_value(&new_pvv)
+                            .build()?,
+                    ))
+                    .send()
+                    .await
+                    .is_ok();
+                (b"CU", "Visa", true, ok)
+            }
+        };
+
+        if !proxy_ok {
+            eprintln!(
+                "{}",
+                replay_hint("pin_change_du_cu_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} {} {}: proxy did not return 00 (verify-current or generate-new failed) pan={pan}",
+                String::from_utf8_lossy(cmd),
+                method,
+            ));
+            break;
+        }
+        if !new_verifies {
+            eprintln!(
+                "{}",
+                replay_hint("pin_change_du_cu_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} {} {}: proxy's new offset/PVV does NOT verify the new PIN block pan={pan}",
+                String::from_utf8_lossy(cmd),
+                method,
+            ));
+            break;
+        }
+        eprintln!(
+            "case={case_idx:02} OK cmd={} method={method} pan={pan} new-datum-verifies=yes",
+            String::from_utf8_lossy(cmd),
+        );
     }
 
     let teardown_result = keys.teardown().await;
