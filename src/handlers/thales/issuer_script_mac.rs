@@ -42,6 +42,30 @@ impl Handler for IssuerScriptMacHandler {
         &["JU", "KU", "KY"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[Evidence {
+            decision:
+                "JU/KU/KY (Generate a Secure Message with Integrity) return Unsupported (68). \
+                       JU is the UnionPay/CUP variant; KY adds further profiles.",
+            because: "PUGD0537-004 Rev A p.475 (KU) / p.480 (KY); PUGD0538-003 §7 p.124 (JU, \
+                      UnionPay). These derive an integrity session \
+                      key from an issuer master key (MK-SMI, E2) per scheme and MAC an \
+                      issuer-script message. APC's generate_mac takes a pre-derived key and does \
+                      not perform EMV session-key derivation, and the KU wire supplies the MASTER \
+                      key plus derivation data (no 3H key-type prefix), so a faithful mapping must \
+                      resolve the per-scheme session-key derivation and the binary field layout \
+                      against APC before it can be proxied. Gated rather than emit a MAC under the \
+                      wrong key. (The previous handler mis-parsed the layout — a 3-byte + 6-byte \
+                      misalignment.)",
+            wire: WireGrounding::None,
+            crypto: CryptoGrounding::None,
+            proof: Proof::Gated(
+                "EMV MK-SMI session-key derivation not in APC generate_mac; wire not yet validated",
+            ),
+        }]
+    }
+
     async fn handle(
         &self,
         command_code: &[u8],

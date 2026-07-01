@@ -173,6 +173,26 @@ impl Handler for UnionPayArqcHandler {
         &["JS"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[Evidence {
+            decision: "JS verifies a UnionPay (CUP) Authorisation Request Cryptogram → APC \
+                       verify_auth_request_cryptogram. Response code JT.",
+            because: "PUGD0538-003 §7 p.122. Wire parse is manual-cited and unit-tested; the APC \
+                      mapping (verify_auth_request_cryptogram) is exercised via unit tests. A live \
+                      ACCEPT-path differential is not yet included: it needs a valid ARQC, and ARQC \
+                      generation is a terminal-side operation not exposed by APC's public data \
+                      plane, so it requires an external EMV generator (Tier-2). Hence wire=cited, \
+                      not diff-xprov.",
+            wire: WireGrounding::Cited,
+            crypto: CryptoGrounding::None,
+            proof: Proof::ManualCite(
+                "PUGD0538-003 §7 p.122; APC verify_auth_request_cryptogram; live accept-path needs \
+                 an external ARQC generator",
+            ),
+        }]
+    }
+
     async fn handle(
         &self,
         _command_code: &[u8],

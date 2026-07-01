@@ -5,7 +5,7 @@
 
 Evidence for *why* each handler behaves as it does and *how* it was verified. Generated from `Handler::grounding()` — do not edit by hand. Grounding labels: wire `vec-thru` > `diff-xprov` > `cited` > `none`; crypto `vec` > `2impl` > `apc` > `none`.
 
-**Coverage:** 20 of 26 handlers carry grounding; 6 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
+**Coverage:** 26 of 26 handlers carry grounding; 0 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
 
 ## `AQ`, `BA`, `BC`, `BE`, `BK`, `CG`, `DE`, `DG`, `EE`, `EG`, `FW`, `JC`, `JE`, `JG`, `LE`, `LG`, `LO`, `NG`, `EM`, `EU`, `EW`, `EY`, `GM`, `A0`, `A4`, `A6`, `A8`, `AA`, `AC`, `AE`, `AG`, `AK`, `AM`, `AS`, `AU`, `AW`, `BI`, `B0`, `B8`, `BG`, `BU`, `BW`, `BS`, `BY`, `CS`, `DW`, `DY`, `FA`, `FC`, `FE`, `FG`, `FK`, `GC`, `GE`, `GG`, `GK`, `GY`, `HA`, `HC`, `HY`, `IA`, `J6`, `J8`, `JK`, `K8`, `KA`, `KC`, `KG`, `KI`, `L0`, `LU`, `LW`, `MG`, `MI`, `N0`, `NC`, `NI`, `NO`, `Q0`, `Q6`, `Q8`, `QH`, `RA`, `SE`, `TG`, `TY`, `UI`, `VW`, `VY`, `WC`, `WQ`, `WW`, `WY`
 
@@ -124,11 +124,41 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
   - wire `none` · crypto `none` · gated (68): no APC equivalent — LMK-encrypted PIN output
   - PUGD0537-004 Rev A p.215 ("Generate a Random PIN"). JB returns the generated PIN encrypted under the LMK — a PIN block cryptographically bound to the account number — and carries no keys in the request. APC has no Local Master Key and cannot emit an LMK-encrypted PIN block, so JA's defining output has no equivalent. (generate_pin_data + Ibm3624RandomPin is a fused random-PIN/offset/ZPK-encrypt flow returning a ZPK-encrypted block; it does not reproduce JA's LMK-bound output or wire format.) Migration: issue PINs via generate_pin_data as ZPK-encrypted blocks with a verification value.
 
+## `JS`
+
+- **JS verifies a UnionPay (CUP) Authorisation Request Cryptogram → APC verify_auth_request_cryptogram. Response code JT.**
+  - wire `cited` · crypto `none` · manual: PUGD0538-003 §7 p.122; APC verify_auth_request_cryptogram; live accept-path needs an external ARQC generator
+  - PUGD0538-003 §7 p.122. Wire parse is manual-cited and unit-tested; the APC mapping (verify_auth_request_cryptogram) is exercised via unit tests. A live ACCEPT-path differential is not yet included: it needs a valid ARQC, and ARQC generation is a terminal-side operation not exposed by APC's public data plane, so it requires an external EMV generator (Tier-2). Hence wire=cited, not diff-xprov.
+
+## `JU`, `KU`, `KY`
+
+- **JU/KU/KY (Generate a Secure Message with Integrity) return Unsupported (68). JU is the UnionPay/CUP variant; KY adds further profiles.**
+  - wire `none` · crypto `none` · gated (68): EMV MK-SMI session-key derivation not in APC generate_mac; wire not yet validated
+  - PUGD0537-004 Rev A p.475 (KU) / p.480 (KY); PUGD0538-003 §7 p.124 (JU, UnionPay). These derive an integrity session key from an issuer master key (MK-SMI, E2) per scheme and MAC an issuer-script message. APC's generate_mac takes a pre-derived key and does not perform EMV session-key derivation, and the KU wire supplies the MASTER key plus derivation data (no 3H key-type prefix), so a faithful mapping must resolve the per-scheme session-key derivation and the binary field layout against APC before it can be proxied. Gated rather than emit a MAC under the wrong key. (The previous handler mis-parsed the layout — a 3-byte + 6-byte misalignment.)
+
 ## `K0`
 
 - **K0 decrypts EMV-encrypted counters / application data under an IMK-ENC (E1) master key. APC derives an EMV session key (Option A) from the master key + PAN/PSN + ATC, then CBC-decrypts. Wire PAN+Seq is 8B BCD (Option-A pre-format); ATC and DataLen are 2B binary; ciphertext is binary and hex-encoded before the APC call. SessionDerivationData = ATC(4H) + 12 zero hex chars.**
   - wire `diff-xprov` · crypto `apc` · live test `emv_decrypt_k0_differential`
   - PUGD0537-004 Rev A p.490. Verified live via round-trip: APC encrypt_data (EMV-CBC, built from the same field values) mints the ciphertext, and the proxy's K0 recovers the original plaintext across randomized PAN/PSN/ATC and 1..4 cipher blocks. A wrong PAN/PSN/ATC offset derives a different session key, so the round-trip would not close.
+
+## `K2`, `KS`
+
+- **K2/KS verify a CAP/EMV Authorisation Request Cryptogram → APC verify_auth_request_cryptogram. KS carries an extra field vs K2. ARQC mismatch → 01.**
+  - wire `cited` · crypto `none` · manual: PUGD0537-004 Rev A p.485 (K2) / p.488 (KS); APC verify_auth_request_cryptogram; live accept-path needs an external ARQC generator
+  - PUGD0537-004 Rev A p.485 (K2) / p.488 (KS). Wire parse is manual-cited and unit-tested; the APC mapping (verify_auth_request_cryptogram) and its result plumbing are exercised by unit tests. A live ACCEPT-path differential is not yet included: it needs a valid ARQC, and ARQC generation is a terminal-side operation not exposed by APC's public data plane, so it requires an external EMV generator (Tier-2). Hence wire=cited, not diff-xprov.
+
+## `KQ`
+
+- **KQ verifies an ARQC and optionally generates an ARPC → APC verify_auth_request_cryptogram. Scheme ID selects the session-key method (Mastercard M/Chip, Amex AEIPS) on EMV Option A; Visa VIS (static, Scheme '0') and skip-verify modes 3/4 are rejected as having no APC equivalent. Mode 1/2 map to ARPC Method 1 (ARC) / Method 2 (CSU + proprietary data).**
+  - wire `cited` · crypto `none` · manual: PUGD0537-004 Rev A p.468; APC verify_auth_request_cryptogram; plumbing mock-tested; live accept-path needs an external ARQC generator
+  - PUGD0537-004 Rev A p.468 (KQ). Wire parse is manual-cited and unit-tested; the APC mapping (verify_auth_request_cryptogram, ARPC Method 1/2) and its result plumbing — verdict, ARQC-mismatch → 01, key-not-found → 10, unsupported-mode → 15 — are exercised by the mock-APC integration tests. A live ACCEPT-path differential is not yet included: it requires a valid ARQC, and ARQC generation is a terminal-side operation not exposed by APC's public data plane, so it needs an external/terminal EMV generator (the Tier-2 published-vector path). Hence wire=cited, not diff-xprov.
+
+## `KW`
+
+- **KW verifies an ARQC and optionally generates an ARPC for the EMV / Cloud-Based SKD methods → APC verify_auth_request_cryptogram. Unlike KQ, the Scheme ID encodes the major derivation mode too (Option A for even codes, Option B for odd) plus the session method (EMV2000 / EMV Common). Cloud / LUK / Option-C / JCB / UnionPay SKD schemes are rejected as having no APC equivalent.**
+  - wire `cited` · crypto `none` · manual: PUGD0537-004 Rev A p.471; APC verify_auth_request_cryptogram; plumbing mock-tested; live accept-path needs an external ARQC generator
+  - PUGD0537-004 Rev A p.471 (KW). Wire parse is manual-cited and unit-tested; the APC mapping (verify_auth_request_cryptogram, Option A/B + EMV2000 / EMV Common, ARPC Method 1/2) and result plumbing are exercised via the mock-APC tests (shared with KQ). A live ACCEPT-path differential is not yet included: it needs a valid ARQC, and ARQC generation is a terminal-side operation not exposed by APC's public data plane, so it requires an external EMV generator (Tier-2). Hence wire=cited, not diff-xprov.
 
 ## `LQ`, `LS`
 
@@ -169,13 +199,9 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
   - wire `none` · crypto `none` · gated (68): EMV card-unique-key dCVV; no validated APC mapping yet
   - PUGD0537-004 Rev A p.306 (QY) / p.308 (PM). These are EMV multi-scheme dynamic-CVV operations — not the static-CVK CW/CY algorithm. The wire begins with a Scheme ID and derives a card-unique key from an EMV issuer master key (E-type) via an explicit Option A/B method. Only Visa dCVV (Scheme '0') plausibly maps to APC's DynamicCardVerificationValue, but APC requires a PAN sequence number the Visa-dCVV wire does not carry, and the ATC width/encoding and card-key derivation must be validated end-to-end before a mapping can be trusted. The other schemes (Visa AV/dCVV2, Mastercard CVC3, Amex, Discover, Oberthur, JCB, Gemalto) have no APC equivalent. Gated to avoid emitting a cryptographically wrong dCVV.
 
-## Not yet grounded
+## `TPIN`
 
-These handlers have no `grounding()` yet — the open documentation/testing gap. Grounding them is the ongoing work (documentation + test added together).
+- **Futurex Excrypt TPIN translates a PIN block from an inbound PEK (AX) to an outbound PEK (BT) → APC translate_pin_data. Request params are ';'-delimited 2-char tags: AW=format, AX/BT=keys, AL=PIN block, AK=account; the response carries the translated block in AL.**
+  - wire `diff-xprov` · crypto `apc` · live test `futurex_tpin_differential`
+  - Futurex HSM Reference Manual (TPIN). Verified live: for ISO Format 0 — which is deterministic (no random fill) — the proxy's translated block byte-matches a direct APC translate_pin_data with the same inbound/outbound keys and account, across randomized PAN. A Futurex param-parse error (wrong key/format/account) would diverge them. Non-ISO0 formats share the same code path but are not yet separately differentialed.
 
-- `JS`
-- `JU`, `KU`, `KY`
-- `K2`, `KS`
-- `KQ`
-- `KW`
-- `TPIN`

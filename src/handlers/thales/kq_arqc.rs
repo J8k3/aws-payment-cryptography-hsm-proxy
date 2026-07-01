@@ -257,6 +257,31 @@ impl Handler for KqArqcHandler {
         &["KQ"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[Evidence {
+            decision: "KQ verifies an ARQC and optionally generates an ARPC → APC \
+                       verify_auth_request_cryptogram. Scheme ID selects the session-key method \
+                       (Mastercard M/Chip, Amex AEIPS) on EMV Option A; Visa VIS (static, Scheme \
+                       '0') and skip-verify modes 3/4 are rejected as having no APC equivalent. \
+                       Mode 1/2 map to ARPC Method 1 (ARC) / Method 2 (CSU + proprietary data).",
+            because: "PUGD0537-004 Rev A p.468 (KQ). Wire parse is manual-cited and unit-tested; \
+                      the APC mapping (verify_auth_request_cryptogram, ARPC Method 1/2) and its \
+                      result plumbing — verdict, ARQC-mismatch → 01, key-not-found → 10, \
+                      unsupported-mode → 15 — are exercised by the mock-APC integration tests. A \
+                      live ACCEPT-path differential is not yet included: it requires a valid ARQC, \
+                      and ARQC generation is a terminal-side operation not exposed by APC's public \
+                      data plane, so it needs an external/terminal EMV generator (the Tier-2 \
+                      published-vector path). Hence wire=cited, not diff-xprov.",
+            wire: WireGrounding::Cited,
+            crypto: CryptoGrounding::None,
+            proof: Proof::ManualCite(
+                "PUGD0537-004 Rev A p.468; APC verify_auth_request_cryptogram; plumbing \
+                 mock-tested; live accept-path needs an external ARQC generator",
+            ),
+        }]
+    }
+
     async fn handle(
         &self,
         _command_code: &[u8],

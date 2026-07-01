@@ -36,6 +36,25 @@ impl Handler for TpinHandler {
         &["TPIN"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[Evidence {
+            decision: "Futurex Excrypt TPIN translates a PIN block from an inbound PEK (AX) to an \
+                       outbound PEK (BT) → APC translate_pin_data. Request params are ';'-delimited \
+                       2-char tags: AW=format, AX/BT=keys, AL=PIN block, AK=account; the response \
+                       carries the translated block in AL.",
+            because: "Futurex HSM Reference Manual (TPIN). Verified live: for ISO Format 0 — which \
+                      is deterministic (no random fill) — the proxy's translated block byte-matches \
+                      a direct APC translate_pin_data with the same inbound/outbound keys and \
+                      account, across randomized PAN. A Futurex param-parse error (wrong \
+                      key/format/account) would diverge them. Non-ISO0 formats share the same code \
+                      path but are not yet separately differentialed.",
+            wire: WireGrounding::DiffXprov,
+            crypto: CryptoGrounding::Apc,
+            proof: Proof::LiveTest("futurex_tpin_differential"),
+        }]
+    }
+
     async fn handle(
         &self,
         _command_code: &[u8],
