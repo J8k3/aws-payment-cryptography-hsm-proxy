@@ -14,10 +14,15 @@ use crate::key_map::KeyDescriptor;
 /// M2/M3 — Decrypt a Block of Data  → APC decrypt_data
 /// M4/M5 — Translate a Data Block   → APC re_encrypt_data
 ///
-/// FIELD LAYOUT SOURCE: Inferred from the payShield SEED variant commands (AI/A1/AM),
-/// which the Legacy Host Commands manual describes as "similar to M0/M2/M4 in input/output
-/// and command processing." The official Thales International Host Commands PDF was not
-/// available; treat field positions as reference-quality.
+/// FIELD LAYOUT SOURCE: The dedicated International Host Commands manual is not
+/// in hand, but the layout is corroborated by the SEED-variant commands AI/AK/AM
+/// in the payShield 10K Legacy Host Commands manual (§11, p.161/163/165). Each
+/// SEED command's own text states it is "similar to standard host command
+/// M0/M2/M4 in input/output and command processing," and their documented field
+/// tables match the parse below for ECB (the SEED IV field appears only for
+/// Mode Flag '01'-'03', which this handler rejects). The one M0/M2/M4-specific
+/// difference is the key field: TDES key schemes (16H | 'U'+32H | 'T'+48H) here
+/// vs. the SEED "J" scheme (1A+32H).
 ///
 /// M0 field layout:
 ///   Mode Flag:          2N  ('00'=ECB; '01'-'03'=CBC/CFB variants — return error 15)
@@ -69,13 +74,14 @@ impl Handler for InternationalEncryptHandler {
                            symmetric data key. Only ECB ('00') and hex I/O ('1') are accepted; \
                            other modes/formats are rejected. Response is a 4H byte-length prefix + \
                            data hex.",
-                because: "payShield International Host Commands. Verified live: M0's ciphertext \
-                          equals a direct APC encrypt_data ECB oracle across length-randomised \
-                          plaintext (1..4 blocks), and M2 round-trips the proxy's own ciphertext \
-                          back to the original plaintext. The wire field layout is INFERRED from \
-                          the SEED-variant commands (the official International Host Commands PDF \
-                          was unavailable), so the differential proves parse-consistency with APC, \
-                          not manual-confirmed field positions — hence diff-xprov, not cited.",
+                because: "Field layout corroborated by the SEED-variant commands AI/AK/AM \
+                          (payShield Legacy Host Commands §11), whose own text states they mirror \
+                          M0/M2/M4 in input/output and command processing and whose field tables \
+                          match this parse for ECB. Verified live: M0's ciphertext equals a direct \
+                          APC encrypt_data ECB oracle across length-randomised plaintext (1..4 \
+                          blocks), and M2 round-trips the proxy's own ciphertext back to plaintext. \
+                          diff-xprov (manual-corroborated layout + APC differential), not vec (no \
+                          published TDES-ECB vectors checked yet).",
                 wire: WireGrounding::DiffXprov,
                 crypto: CryptoGrounding::Apc,
                 proof: Proof::LiveTest("intl_encrypt_m0_m2_m4_differential"),
@@ -84,10 +90,12 @@ impl Handler for InternationalEncryptHandler {
                 decision: "M4 translates a data block from a source key to a destination key \
                            (TDES-ECB) using two APC calls: decrypt_data under the source key, then \
                            encrypt_data under the destination key.",
-                because: "APC's single-call re_encrypt_data requires KeyModesOfUse.Encrypt=true on \
-                          both keys, but a D0 symmetric data key can only be created as \
-                          NoRestrictions (encrypt flag false); re_encrypt_data then rejects it with \
-                          \"KeyUsages not allowed\" (confirmed live). Decrypt-then-encrypt is \
+                because: "APC's single-call re_encrypt_data requires KeyModesOfUse=Encrypt (AWS \
+                          Payment Cryptography Data API, ReEncryptData: \"The KeyArn ... must be in \
+                          a compatible key state with KeyModesOfUse set to Encrypt\"), but a D0 \
+                          symmetric data key can only be created as NoRestrictions (encrypt flag \
+                          false); re_encrypt_data then rejects it with \"KeyUsages not allowed\" \
+                          (confirmed live). Decrypt-then-encrypt is \
                           semantically identical for ECB and works with D0 NoRestrictions keys. \
                           Verified live: M4 translates the M0 ciphertext src→dst and a direct APC \
                           decrypt under the dst key recovers the original plaintext. TRADE-OFF: the \
