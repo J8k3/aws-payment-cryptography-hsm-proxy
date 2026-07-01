@@ -3438,3 +3438,372 @@ async fn futurex_tpin_differential() -> anyhow::Result<()> {
     survivor_result?;
     Ok(())
 }
+
+// ══ Negative / discrimination tests ═══════════════════════════════════════════
+//
+// The positive differentials above are accept-only: they confirm a VALID
+// credential is accepted, but not that an INVALID one is rejected — an
+// always-accept handler would pass them. These tests close that gap: for each
+// verify handler, the valid credential must be accepted (error 00) AND a
+// minimally-corrupted one must be rejected (error 01). A handler that ignores
+// the credential fails the reject leg; one that rejects everything fails the
+// accept leg.
+
+/// Flip the first character between '0' and '1' (any other digit -> '0'), so the
+/// value changes by the smallest possible edit. Works for decimal CVV/PVV and
+/// hex MAC alike.
+fn corrupt_first(s: &str) -> String {
+    let mut chars: Vec<char> = s.chars().collect();
+    if let Some(first) = chars.first_mut() {
+        *first = if *first == '0' { '1' } else { '0' };
+    }
+    chars.into_iter().collect()
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn cvv_cy_discrimination_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "cvv_cy_discrimination_differential: valid CVV accepted (00), corrupted rejected (01)"
+    );
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "CVK",
+        wire_label: CVK_WIRE_LABEL,
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31C0CardVerificationKey,
+        modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let cvk_label = keys.wire_label("CVK").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let cw = registry.get(b"CW").expect("CW registered");
+    let cy = registry.get(b"CY").expect("CY registered");
+
+    const LABEL: &str = "cvv_cy_discrimination";
+    let run = cases_to_run();
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan_len = gen_pan_len(&mut rng);
+        let pan = gen_pan(&mut rng, pan_len);
+        let expiry = gen_expiry(&mut rng);
+        let svc = gen_service_code(&mut rng);
+
+        let cvv = {
+            let r = cw
+                .handle(b"CW", &encode_cw(&cvk_label, &pan, &expiry, svc), &state)
+                .await;
+            anyhow::ensure!(&r.error_code == b"00", "CW failed to generate CVV");
+            String::from_utf8(r.payload.to_vec())?
+        };
+        let bad = corrupt_first(&cvv);
+
+        let accept = cy
+            .handle(
+                b"CY",
+                &encode_cy(&cvk_label, &cvv, &pan, &expiry, svc),
+                &state,
+            )
+            .await;
+        let reject = cy
+            .handle(
+                b"CY",
+                &encode_cy(&cvk_label, &bad, &pan, &expiry, svc),
+                &state,
+            )
+            .await;
+
+        if let Err(e) =
+            assert_discriminates("CY", case_idx, accept.error_code, reject.error_code, &pan)
+        {
+            eprintln!(
+                "{}",
+                replay_hint("cvv_cy_discrimination_differential", LABEL, case_idx)
+            );
+            result = Err(e);
+            break;
+        }
+        eprintln!("case={case_idx:02} OK CVV={cvv} accept=00 corrupted({bad})=01");
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn mac_m8_discrimination_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "mac_m8_discrimination_differential: valid MAC accepted (00), corrupted rejected (01)"
+    );
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "MAK",
+        wire_label: MAK_WIRE_LABEL,
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31M3Iso97973MacKey,
+        modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let mak_label = keys.wire_label("MAK").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let m6 = registry.get(b"M6").expect("M6 registered");
+    let m8 = registry.get(b"M8").expect("M8 registered");
+
+    const LABEL: &str = "mac_m8_discrimination";
+    let run = cases_to_run();
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let msg_bytes = edge_biased(&mut rng, 1, 32, &[1, 8, 16, 32]);
+        let msg = gen_hex_message(&mut rng, msg_bytes);
+
+        let mac = {
+            let r = m6
+                .handle(b"M6", &encode_m6(&mak_label, b'3', b'0', &msg), &state)
+                .await;
+            anyhow::ensure!(&r.error_code == b"00", "M6 failed to generate MAC");
+            String::from_utf8(r.payload.to_vec())?
+        };
+        let bad = corrupt_first(&mac);
+
+        let accept = m8
+            .handle(
+                b"M8",
+                &encode_m8(&mak_label, b'3', b'0', &msg, &mac),
+                &state,
+            )
+            .await;
+        let reject = m8
+            .handle(
+                b"M8",
+                &encode_m8(&mak_label, b'3', b'0', &msg, &bad),
+                &state,
+            )
+            .await;
+
+        if let Err(e) =
+            assert_discriminates("M8", case_idx, accept.error_code, reject.error_code, &msg)
+        {
+            eprintln!(
+                "{}",
+                replay_hint("mac_m8_discrimination_differential", LABEL, case_idx)
+            );
+            result = Err(e);
+            break;
+        }
+        eprintln!("case={case_idx:02} OK MAC={mac} accept=00 corrupted({bad})=01");
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn pin_verify_non_dukpt_discrimination_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "pin_verify_non_dukpt_discrimination_differential: valid PIN accepted (00), \
+         wrong offset/PVV rejected (01)"
+    );
+
+    use aws_sdk_paymentcryptographydata::types::VisaPin;
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [
+        KeySpec {
+            role: "ENC",
+            wire_label: NDV_ENC_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31P0PinEncryptionKey,
+            modes: KeyModesOfUse::builder()
+                .encrypt(true)
+                .decrypt(true)
+                .wrap(true)
+                .unwrap(true)
+                .build(),
+        },
+        KeySpec {
+            role: "PVK_IBM",
+            wire_label: NDV_PVK_IBM_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31V1Ibm3624PinVerificationKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+        KeySpec {
+            role: "PVK_VISA",
+            wire_label: NDV_PVK_VISA_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31V2VisaPinVerificationKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+    ];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let enc_arn = keys.arn("ENC").to_string();
+    let pvk_ibm_arn = keys.arn("PVK_IBM").to_string();
+    let pvk_visa_arn = keys.arn("PVK_VISA").to_string();
+    let enc_label = keys.wire_label("ENC").to_string();
+    let pvk_ibm_label = keys.wire_label("PVK_IBM").to_string();
+    let pvk_visa_label = keys.wire_label("PVK_VISA").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let ea = registry.get(b"EA").expect("EA registered");
+    let ec = registry.get(b"EC").expect("EC registered");
+
+    const LABEL: &str = "pin_verify_non_dukpt_discrimination";
+    let run = cases_to_run();
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let use_ibm = rng.random_bool(0.5);
+
+        let (label, accept_code, reject_code): (&str, [u8; 2], [u8; 2]) = if use_ibm {
+            // IBM natural PIN (offset 0); verify with correct then wrong offset.
+            let block = data
+                .generate_pin_data()
+                .generation_key_identifier(&pvk_ibm_arn)
+                .encryption_key_identifier(&enc_arn)
+                .primary_account_number(&pan)
+                .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+                .generation_attributes(PinGenerationAttributes::Ibm3624NaturalPin(
+                    Ibm3624NaturalPin::builder()
+                        .decimalization_table(GO_DECIM_TABLE)
+                        .pin_validation_data(&pan)
+                        .pin_validation_data_pad_character("F")
+                        .build()?,
+                ))
+                .send()
+                .await?
+                .encrypted_pin_block()
+                .to_string();
+            let good = encode_da_ea(
+                &enc_label,
+                &pvk_ibm_label,
+                &block,
+                &pan,
+                GO_DECIM_TABLE,
+                &pan,
+                "0000FFFFFFFF",
+            );
+            let bad = encode_da_ea(
+                &enc_label,
+                &pvk_ibm_label,
+                &block,
+                &pan,
+                GO_DECIM_TABLE,
+                &pan,
+                "0001FFFFFFFF",
+            );
+            let a = ea.handle(b"EA", &good, &state).await.error_code;
+            let r = ea.handle(b"EA", &bad, &state).await.error_code;
+            ("EA/IBM", a, r)
+        } else {
+            // Visa PVV; verify with correct then corrupted PVV.
+            let pvki = 1;
+            let gen = data
+                .generate_pin_data()
+                .generation_key_identifier(&pvk_visa_arn)
+                .encryption_key_identifier(&enc_arn)
+                .primary_account_number(&pan)
+                .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+                .generation_attributes(PinGenerationAttributes::VisaPin(
+                    VisaPin::builder()
+                        .pin_verification_key_index(pvki)
+                        .build()?,
+                ))
+                .send()
+                .await?;
+            let block = gen.encrypted_pin_block().to_string();
+            let pvv = gen
+                .pin_data()
+                .and_then(|d| d.as_verification_value().ok().cloned())
+                .ok_or_else(|| anyhow::anyhow!("no Visa PVV"))?;
+            let bad_pvv = corrupt_first(&pvv);
+            let good = encode_dc_ec(&enc_label, &pvk_visa_label, &block, &pan, "1", &pvv);
+            let bad = encode_dc_ec(&enc_label, &pvk_visa_label, &block, &pan, "1", &bad_pvv);
+            let a = ec.handle(b"EC", &good, &state).await.error_code;
+            let r = ec.handle(b"EC", &bad, &state).await.error_code;
+            ("EC/Visa", a, r)
+        };
+
+        if let Err(e) = assert_discriminates(label, case_idx, accept_code, reject_code, &pan) {
+            eprintln!(
+                "{}",
+                replay_hint(
+                    "pin_verify_non_dukpt_discrimination_differential",
+                    LABEL,
+                    case_idx
+                )
+            );
+            result = Err(e);
+            break;
+        }
+        eprintln!("case={case_idx:02} OK {label} accept=00 wrong-credential=01 pan={pan}");
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+/// Assert a verify handler discriminates: the valid credential yields `00`
+/// (accept) and the corrupted one yields `01` (reject). Any other pairing is a
+/// failure — most importantly `accept==reject==00` (an always-accept handler).
+fn assert_discriminates(
+    what: &str,
+    case_idx: usize,
+    accept_code: [u8; 2],
+    reject_code: [u8; 2],
+    ctx: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        &accept_code == b"00",
+        "case={case_idx} {what}: VALID credential was not accepted (got {}) — {ctx}",
+        String::from_utf8_lossy(&accept_code)
+    );
+    anyhow::ensure!(
+        &reject_code == b"01",
+        "case={case_idx} {what}: CORRUPTED credential was not rejected with 01 (got {}) — \
+         a handler that accepts an invalid credential is a critical bug — {ctx}",
+        String::from_utf8_lossy(&reject_code)
+    );
+    Ok(())
+}
