@@ -152,6 +152,27 @@ impl Handler for CapArqcHandler {
         &["K2", "KS"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[Evidence {
+            decision: "K2/KS verify a CAP/EMV Authorisation Request Cryptogram → APC \
+                       verify_auth_request_cryptogram. KS carries an extra field vs K2. ARQC \
+                       mismatch → 01.",
+            because: "PUGD0537-004 Rev A p.485 (K2) / p.488 (KS). Wire parse is manual-cited and \
+                      unit-tested; the APC mapping (verify_auth_request_cryptogram) and its result \
+                      plumbing are exercised by unit tests. A live ACCEPT-path differential is not \
+                      yet included: it needs a valid ARQC, and ARQC generation is a terminal-side \
+                      operation not exposed by APC's public data plane, so it requires an external \
+                      EMV generator (Tier-2). Hence wire=cited, not diff-xprov.",
+            wire: WireGrounding::Cited,
+            crypto: CryptoGrounding::None,
+            proof: Proof::ManualCite(
+                "PUGD0537-004 Rev A p.485 (K2) / p.488 (KS); APC verify_auth_request_cryptogram; \
+                 live accept-path needs an external ARQC generator",
+            ),
+        }]
+    }
+
     async fn handle(
         &self,
         command_code: &[u8],

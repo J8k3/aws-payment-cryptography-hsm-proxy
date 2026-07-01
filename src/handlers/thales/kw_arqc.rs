@@ -273,6 +273,31 @@ impl Handler for KwArqcHandler {
         &["KW"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[Evidence {
+            decision: "KW verifies an ARQC and optionally generates an ARPC for the EMV / \
+                       Cloud-Based SKD methods → APC verify_auth_request_cryptogram. Unlike KQ, the \
+                       Scheme ID encodes the major derivation mode too (Option A for even codes, \
+                       Option B for odd) plus the session method (EMV2000 / EMV Common). Cloud / \
+                       LUK / Option-C / JCB / UnionPay SKD schemes are rejected as having no APC \
+                       equivalent.",
+            because: "PUGD0537-004 Rev A p.471 (KW). Wire parse is manual-cited and unit-tested; \
+                      the APC mapping (verify_auth_request_cryptogram, Option A/B + EMV2000 / EMV \
+                      Common, ARPC Method 1/2) and result plumbing are exercised via the mock-APC \
+                      tests (shared with KQ). A live ACCEPT-path differential is not yet included: \
+                      it needs a valid ARQC, and ARQC generation is a terminal-side operation not \
+                      exposed by APC's public data plane, so it requires an external EMV generator \
+                      (Tier-2). Hence wire=cited, not diff-xprov.",
+            wire: WireGrounding::Cited,
+            crypto: CryptoGrounding::None,
+            proof: Proof::ManualCite(
+                "PUGD0537-004 Rev A p.471; APC verify_auth_request_cryptogram; plumbing \
+                 mock-tested; live accept-path needs an external ARQC generator",
+            ),
+        }]
+    }
+
     async fn handle(
         &self,
         _command_code: &[u8],
