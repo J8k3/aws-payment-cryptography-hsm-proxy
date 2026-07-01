@@ -140,14 +140,14 @@ impl Handler for PinHandler {
         &[
             Evidence {
                 decision: "CA/CC wire: src key, dst key, MaxPINLen(2N), 16H source PIN block, src + dst PIN-block-format codes(2N each: 01=ISO0, 47=ISO3), PAN(12N). Format codes are the standard Thales 2N values, NOT a 00/01/03/04 scheme.",
-                because: "PUGD0537-004 p.282/285. Verified live across all src/dst format combos (ISO0/ISO3) and both CA/CC: a valid block is minted via generate_pin_data, translated through the proxy, then BOTH proxy output and original input are canonicalized to deterministic ISO Format 0 under a shared key and compared — immune to ISO-3's random fill.",
+                because: "PUGD0537-004 Rev A p.282/285. Verified live across all src/dst format combos (ISO0/ISO3) and both CA/CC: a valid block is minted via generate_pin_data, translated through the proxy, then BOTH proxy output and original input are canonicalized to deterministic ISO Format 0 under a shared key and compared — immune to ISO-3's random fill.",
                 wire: WireGrounding::DiffXprov,
                 crypto: CryptoGrounding::Apc,
                 proof: Proof::LiveTest("pin_translate_ca_cc_differential"),
             },
             Evidence {
                 decision: "G0 (BDK DUKPT translate) and BQ (Translate PIN Algorithm) return Unsupported (68).",
-                because: "G0 carries optional source/destination KSNs needing DUKPT validation against APC; BQ is the proprietary Visa→Racal LMK-PIN algorithm with no APC equivalent (PUGD0537-004 p.294). Gated rather than parsed from an unverified layout.",
+                because: "G0 carries optional source/destination KSNs needing DUKPT validation against APC; BQ is the proprietary Visa→Racal LMK-PIN algorithm with no APC equivalent (PUGD0537-004 Rev A p.294). Gated rather than parsed from an unverified layout.",
                 wire: WireGrounding::None,
                 crypto: CryptoGrounding::None,
                 proof: Proof::Gated("G0 needs DUKPT validation; BQ has no APC equivalent"),

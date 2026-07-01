@@ -12,7 +12,7 @@ use crate::key_map::KeyDescriptor;
 
 /// payShield KW — Verify ARQC and optionally generate ARPC (EMV & Cloud-Based SKD).
 ///
-/// Wire format per PUGD0537-004 p.471 — identical to KQ with one extra field:
+/// Wire format per PUGD0537-004 Rev A p.471 — identical to KQ with one extra field:
 ///
 ///   Mode Flag        1N ASCII  '0'=verify only
 ///                              '1'=verify + ARPC Method 1 (ARC)
@@ -104,7 +104,7 @@ fn parse_kw(payload: &[u8]) -> Result<KwFields, ProxyError> {
     if payload.len() < pos + 1 {
         return Err(ProxyError::MalformedPayload("KW: scheme ID missing".into()));
     }
-    // Scheme ID selects BOTH major mode and session method (PUGD0537-004 p.471).
+    // Scheme ID selects BOTH major mode and session method (PUGD0537-004 Rev A p.471).
     let (deriv_mode_a, session) = match payload[pos] {
         b'0' => (true, EmvSession::Emv2000),  // Option A + EMV2000
         b'1' => (false, EmvSession::Emv2000), // Option B + EMV2000

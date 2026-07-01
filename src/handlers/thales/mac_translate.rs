@@ -7,14 +7,14 @@ use crate::handlers::thales::common::parse_legacy_key;
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
-/// payShield MY — Verify and Translate MAC (PUGD0537-004 p.371).
+/// payShield MY — Verify and Translate MAC (PUGD0537-004 Rev A p.371).
 ///
 /// Verifies an inbound MAC under one key, then generates a new MAC under a
 /// second key for the same message. Maps to two sequential APC calls:
 ///   1. verify_mac  (inbound key + MAC)
 ///   2. generate_mac (outbound key)
 ///
-/// Field layout — same header structure as M6/M8 (PUGD0537-004 p.363/368),
+/// Field layout — same header structure as M6/M8 (PUGD0537-004 Rev A p.365/368),
 /// but with two key blocks and two MAC algo/size fields:
 ///
 ///   Mode Flag       1N  '0'=complete message (only '0' supported)
@@ -170,17 +170,17 @@ impl Handler for MacTranslateHandler {
         &[
             Evidence {
                 decision: "MY verifies an inbound MAC under one key, then generates an outbound MAC under a second key for the same message (per-direction MAC size/algorithm). A half inbound MAC (size '1' = 2 bytes) is verified by regenerating the full MAC and comparing the leading bytes.",
-                because: "PUGD0537-004 p.371. Verified live (ISO9797 Alg1) across all inbound×outbound MAC-size combos: proxy outbound MAC == APC generate_mac under the outbound key. The live differential caught the same half-MAC verify bug as GW — the inbound half MAC was handed to APC verify_mac, which rejects it — fixed with the regenerate-and-compare-prefix path.",
+                because: "PUGD0537-004 Rev A p.371. Verified live (ISO9797 Alg1) across all inbound×outbound MAC-size combos: proxy outbound MAC == APC generate_mac under the outbound key. The live differential caught the same half-MAC verify bug as GW — the inbound half MAC was handed to APC verify_mac, which rejects it — fixed with the regenerate-and-compare-prefix path.",
                 wire: WireGrounding::DiffXprov,
                 crypto: CryptoGrounding::Apc,
                 proof: Proof::LiveTest("mac_translate_my_differential"),
             },
             Evidence {
                 decision: "ALG3 and CMAC directions, and differing inbound/outbound algorithms, are parsed but not yet covered by a live differential (only ALG1 is).",
-                because: "PUGD0537-004 p.371 — same per-direction generate/verify mapping as the live-verified ALG1 path; broadening the differential is the tracked next step.",
+                because: "PUGD0537-004 Rev A p.371 — same per-direction generate/verify mapping as the live-verified ALG1 path; broadening the differential is the tracked next step.",
                 wire: WireGrounding::Cited,
                 crypto: CryptoGrounding::None,
-                proof: Proof::ManualCite("PUGD0537-004 p.371; ALG3/CMAC not yet live-differentialed"),
+                proof: Proof::ManualCite("PUGD0537-004 Rev A p.371; ALG3/CMAC not yet live-differentialed"),
             },
         ]
     }

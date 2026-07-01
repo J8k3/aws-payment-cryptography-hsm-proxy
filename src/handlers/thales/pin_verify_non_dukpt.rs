@@ -10,15 +10,17 @@ use crate::key_map::KeyDescriptor;
 
 /// payShield non-DUKPT PIN verification: DA/DC (TPK) and EA/EC (ZPK).
 ///
-/// DA — Verify Terminal PIN Block, IBM 3624 method  (TPK; p.269)
-/// DC — Verify Terminal PIN Block, Visa PVV method  (TPK; p.277)
-/// EA — Verify PIN, IBM 3624 method                 (ZPK; p.279)
-/// EC — Verify PIN, Visa PVV method                 (ZPK; p.281)
+/// Sources: PUGD0537-004 Rev A (Core Host Commands):
+///   DA — "Verify a Terminal PIN Using the IBM Offset Method"     (TPK; p.263)
+///   DC — "Verify a Terminal PIN Using the ABA PVV Method"        (TPK; p.273)
+///   EA — "Verify an Interchange PIN Using the IBM Offset Method" (ZPK; p.266)
+///   EC — "Verify an Interchange PIN Using the ABA PVV Method"    (ZPK; p.275)
+/// (The manual's "ABA PVV" is the algorithm Visa adopted as its PVV.)
 ///
 /// All four map to APC verify_pin_data without dukpt_attributes.
 /// TPK and ZPK both become the encryption_key_identifier (P0 key type).
 ///
-/// DA/EA field layout (PUGD0537-004 p.269/279):
+/// DA/EA field layout (PUGD0537-004 Rev A p.263/266):
 ///   Enc Key (TPK/ZPK):  16H | 'U'+32H | 'T'+48H  (parse_legacy_key)
 ///   PVK:                16H | 'U'+32H | 'T'+48H  (parse_legacy_key; IBM single-length)
 ///   Max PIN Length:     2N  consumed
@@ -30,7 +32,7 @@ use crate::key_map::KeyDescriptor;
 ///   PIN Validation Data:  12A
 ///   Offset:            12H  IBM PIN offset, left-justified, F-padded
 ///
-/// DC/EC field layout (PUGD0537-004 p.277/281):
+/// DC/EC field layout (PUGD0537-004 Rev A p.273/275):
 ///   Enc Key (TPK/ZPK):  16H | 'U'+32H | 'T'+48H  (parse_legacy_key)
 ///   PVK-Pair:           32H | 'U'+32H | 'T'+48H  (parse_key_32; Visa double-length)
 ///   Max PIN Length:     2N  consumed
@@ -166,7 +168,8 @@ impl Handler for PinVerifyNonDukptHandler {
                            are P0 encryption keys in APC, so each pair shares one code path. The \
                            IBM 12H offset is F-padded on the wire and trimmed to APC's ^[0-9]+$ \
                            before the call (same handling as GO/CK).",
-            because: "PUGD0537-004 p.269/277/279/281. Verified live: the proxy's verify verdict \
+            because: "PUGD0537-004 Rev A p.263 (DA) / p.273 (DC) / p.266 (EA) / p.275 (EC). \
+                          Verified live: the proxy's verify verdict \
                           matches a direct APC verify_pin_data verdict across randomized PAN, both \
                           methods, and all four command codes. A valid PIN is minted via \
                           generate_pin_data (IBM3624 natural PIN offset 0, or Visa PVV read back \

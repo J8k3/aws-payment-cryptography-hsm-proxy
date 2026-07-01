@@ -41,7 +41,9 @@ use crate::handlers::{AppState, Handler, HandlerResult};
 ///              Generate MAC using ANSI X9.19 (Retail MAC), ISO9797_ALG3.
 ///              Mode '0' only.
 ///
-/// Sources: payShield 10K Legacy Host Commands (PUGD0538), pp. 89–104.
+/// Sources: payShield 10K Legacy Host Commands (PUGD0538-003), pp. 90–104
+/// (MA p.90, MC p.91, ME p.92, MQ p.94, MS p.96, MK p.98, MM p.99, MO p.100,
+/// MU p.102, MW p.104).
 pub struct LegacyMacHandler;
 
 const MAC_HEX_LEN: usize = 8;
@@ -91,17 +93,17 @@ impl Handler for LegacyMacHandler {
         &[
             Evidence {
                 decision: "MA/MC ('~'-terminated) and MK/MM (3H-length-prefixed) generate/verify an ISO 9797-1 Alg1 MAC under a TAK. APC's Alg1 MAC is truncated to the 8H (4-byte) wire width.",
-                because: "PUGD0538 pp.89-104. Verified live across both wire styles and randomized data lengths: proxy MAC == APC generate_mac (Iso9797Algorithm1), and the MC/MM verify round-trip accepts the proxy's MAC. Note: APC returns a 4-byte Alg1 MAC (verified live), so the handler's 8H truncation is a no-op — correcting an earlier comment that claimed APC returns 16H.",
+                because: "PUGD0538-003 pp.90-104. Verified live across both wire styles and randomized data lengths: proxy MAC == APC generate_mac (Iso9797Algorithm1), and the MC/MM verify round-trip accepts the proxy's MAC. Note: APC returns a 4-byte Alg1 MAC (verified live), so the handler's 8H truncation is a no-op — correcting an earlier comment that claimed APC returns 16H.",
                 wire: WireGrounding::DiffXprov,
                 crypto: CryptoGrounding::Apc,
                 proof: Proof::LiveTest("legacy_mac_ma_mc_mk_mm_differential"),
             },
             Evidence {
                 decision: "ME/MO (verify-then-re-MAC), MU/MW (mode-prefixed Alg1), MQ (ZAK Alg1), MS (Alg3 X9.19) share the same generate/verify paths but are not yet covered by a live differential.",
-                because: "PUGD0538 pp.89-104 — manual-cited layout and the same ISO9797 Alg1/Alg3 APC mapping as the live-verified commands; a live differential for these is the tracked next step.",
+                because: "PUGD0538-003 pp.90-104 — manual-cited layout and the same ISO9797 Alg1/Alg3 APC mapping as the live-verified commands; a live differential for these is the tracked next step.",
                 wire: WireGrounding::Cited,
                 crypto: CryptoGrounding::None,
-                proof: Proof::ManualCite("PUGD0538 pp.89-104; not yet live-differentialed"),
+                proof: Proof::ManualCite("PUGD0538-003 pp.90-104; not yet live-differentialed"),
             },
         ]
     }

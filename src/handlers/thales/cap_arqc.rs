@@ -13,7 +13,7 @@ use crate::key_map::KeyDescriptor;
 /// payShield K2 — Verify Mastercard CAP / Dynamic CAP cryptogram.
 /// payShield KS — Verify EMV 3.1.1 Dynamic Data Authentication Code.
 ///
-/// K2 (→ K3) wire format per PUGD0537-004 (binary, not ASCII hex):
+/// K2 (→ K3) wire format per PUGD0537-004 Rev A p.485 (binary, not ASCII hex):
 ///   Key Type    3H ASCII  consumed (E0 — IMK-AC)
 ///   Key         var       16H | 'U'+32H | 'T'+48H
 ///   PAN+Seq     8B binary BCD — 12 PAN digits + 2 seq digits, right-padded 0xFF
@@ -27,7 +27,7 @@ use crate::key_map::KeyDescriptor;
 /// K2 → APC verify_auth_request_cryptogram, SessionKeyDerivation::Mastercard
 ///       (PAN + PanSeq + ATC + UN), MajorKeyDerivationMode::EmvOptionB, verify-only.
 ///
-/// KS (→ KT) wire format per PUGD0537-004:
+/// KS (→ KT) wire format per PUGD0537-004 Rev A p.488:
 ///   Key Type    3H ASCII  consumed (E0 — IMK-AC)
 ///   Key         var       16H | 'U'+32H | 'T'+48H
 ///   PAN+Seq     8B binary BCD

@@ -61,7 +61,7 @@ impl Handler for DukptPinVerifyHandler {
         &[
             Evidence {
                 decision: "CK verifies a DUKPT-encrypted PIN against an IBM 3624 offset (original single-length DUKPT, Tdes2Key). The 12H wire offset is F-padded; the padding is stripped before the APC call.",
-                because: "PUGD0538. Verified live: proxy CK verdict == APC verify_pin_data verdict (IBM3624 + DUKPT) for valid PINs across randomized PAN/KSN. CK had the same offset F-padding bug as GO (APC pin_offset is ^[0-9]+$) — fixed the same way.",
+                because: "PUGD0538-003 p.112 (CK). Verified live: proxy CK verdict == APC verify_pin_data verdict (IBM3624 + DUKPT) for valid PINs across randomized PAN/KSN. CK had the same offset F-padding bug as GO (APC pin_offset is ^[0-9]+$) — fixed the same way.",
                 wire: WireGrounding::DiffXprov,
                 crypto: CryptoGrounding::Apc,
                 proof: Proof::LiveTest("dukpt_pin_verify_ck_differential"),

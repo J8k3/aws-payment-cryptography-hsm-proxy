@@ -18,13 +18,15 @@ impl Handler for HeartbeatHandler {
         &[Evidence {
             decision: "B2 is a heartbeat/echo: returns success with an empty payload and makes no \
                        APC call.",
-            because:
-                "PUGD0537-004 B2 (echo). No cryptography and no key material are involved, so \
+            because: "PUGD0537-004 Rev A p.433 (B2, \"Echo Command\"). No cryptography and no key \
+                      material are involved, so \
                       the proxy answers locally — host health checks succeed without a data-plane \
                       round-trip. Nothing to differentially verify against APC.",
             wire: WireGrounding::Cited,
             crypto: CryptoGrounding::None,
-            proof: Proof::ManualCite("PUGD0537-004 B2 — echo/heartbeat, empty success response"),
+            proof: Proof::ManualCite(
+                "PUGD0537-004 Rev A p.433 — B2 Echo Command, empty success response",
+            ),
         }]
     }
 

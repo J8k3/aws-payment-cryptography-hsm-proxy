@@ -10,7 +10,7 @@ use crate::key_map::KeyDescriptor;
 /// payShield MAC commands: C2/M6 (generate) and C4/M8 (verify).
 ///
 /// C2/C4: X9.9/X9.19/AS2805 MAC — fixed-layout, static MAC key
-/// M6/M8: Extended MAC (ISO9797 Alg1/Alg3/CMAC) — variable-layout per PUGD0537-004 p.363/368
+/// M6/M8: Extended MAC (ISO9797 Alg1/Alg3/CMAC) — variable-layout per PUGD0537-004 Rev A p.365/368
 ///
 /// All four map to APC GenerateMac / VerifyMac. The wire field layouts are the
 /// `//` comments above `parse_c2_payload` / `parse_m6_payload`. Why these
@@ -18,7 +18,7 @@ use crate::key_map::KeyDescriptor;
 /// single source of truth (see `src/handlers/grounding.rs`), not duplicated here.
 pub struct MacHandler;
 
-// ── C2/C4 layout (PUGD0537-004 p.583) ────────────────────────────────────────
+// ── C2/C4 layout (PUGD0537-004 Rev A p.583 (C2) / p.587 (C4)) ────────────────────────────────────────
 //   [0]       Block Number 1N  '0'=only block (continuation 1-3 unsupported)
 //   [1]       Key Type     1N  '0'=TAK,'1'=ZAK,'2'=TAKs,'3'=ZAKs (consumed)
 //   [2]       MAC Mode     1N  '0'=X9.9(ALG1), '1'=X9.19(ALG3), '2'/'3'=AS2805_4_1
@@ -38,7 +38,7 @@ fn algorithm_from_mode_c2(mode: u8) -> Result<String, ProxyError> {
 }
 
 fn parse_c2_payload(payload: &[u8], is_verify: bool) -> Result<MacFields, ProxyError> {
-    // Real C2 layout (PUGD0537-004 p.583):
+    // Real C2 layout (PUGD0537-004 Rev A p.583 (C2) / p.587 (C4)):
     //   [0] Message Block Number 1N ('0' only / '1'-'3' continuation)
     //   [1] Key Type             1N ('0' TAK, '1' ZAK, '2' TAKs, '3' ZAKs — consumed)
     //   [2] MAC generation Mode  1N ('0' X9.9, '1' X9.19, '2'/'3' AS2805.4.1)
@@ -112,7 +112,7 @@ fn parse_c2_payload(payload: &[u8], is_verify: bool) -> Result<MacFields, ProxyE
     })
 }
 
-// ── M6/M8 layout (PUGD0537-004 p.363/368) ────────────────────────────────────
+// ── M6/M8 layout (PUGD0537-004 Rev A p.365/368) ────────────────────────────────────
 //   [0]        Mode Flag    1N  '0'=complete message (only '0' supported)
 //   [1]        Input Format 1N  '1'=hex-encoded input (only '1' supported)
 //   [2]        MAC Size     1N  '0'=8 hex digits (4 bytes), '1'=16 hex digits (8 bytes)
@@ -161,7 +161,7 @@ fn parse_m6_payload(payload: &[u8], is_verify: bool) -> Result<MacFields, ProxyE
         )));
     }
 
-    // Per PUGD0537-004 p.365: MAC Size '0' = 8 hex digits (4 bytes),
+    // Per PUGD0537-004 Rev A p.365: MAC Size '0' = 8 hex digits (4 bytes),
     // '1' = 16 hex digits (8 bytes). The larger size is the full double-length MAC.
     let mac_size_bytes: usize = match payload[2] {
         b'0' => 4,
@@ -241,14 +241,14 @@ impl Handler for MacHandler {
         &[
             Evidence {
                 decision: "M6/M8 wire: Mode+InputFormat+MACSize+MACAlgo+PadMethod(5×1N)+KeyType(3H) before the key. MAC size '0'=4 bytes, '1'=8 bytes.",
-                because: "PUGD0537-004 p.363/368. Verified live: proxy M6 MAC == APC generate_mac (ISO9797 Alg3) over randomized message lengths, plus an M8 verify round-trip. Note: APC returns a 4-byte MAC for ISO9797_ALGORITHM3, so size '0' is the faithful case (verified live).",
+                because: "PUGD0537-004 Rev A p.365/368. Verified live: proxy M6 MAC == APC generate_mac (ISO9797 Alg3) over randomized message lengths, plus an M8 verify round-trip. Note: APC returns a 4-byte MAC for ISO9797_ALGORITHM3, so size '0' is the faithful case (verified live).",
                 wire: WireGrounding::DiffXprov,
                 crypto: CryptoGrounding::Apc,
                 proof: Proof::LiveTest("mac_m6_m8_differential"),
             },
             Evidence {
                 decision: "C2/C4 wire: BlockNumber+KeyType+MACMode+MessageType(4×1N) before the key — a DISTINCT header from M6. MAC generation Mode selects the algorithm: '0'=X9.9→ISO9797 Alg1, '1'=X9.19→ISO9797 Alg3.",
-                because: "PUGD0537-004 p.583. Verified live for both algorithms: proxy C2 MAC == APC generate_mac (Alg1 via M1 key, Alg3 via M3 key) over randomized mode + message length, plus a C4 verify round-trip.",
+                because: "PUGD0537-004 Rev A p.583 (C2) / p.587 (C4). Verified live for both algorithms: proxy C2 MAC == APC generate_mac (Alg1 via M1 key, Alg3 via M3 key) over randomized mode + message length, plus a C4 verify round-trip.",
                 wire: WireGrounding::DiffXprov,
                 crypto: CryptoGrounding::Apc,
                 proof: Proof::LiveTest("mac_c2_c4_differential"),
