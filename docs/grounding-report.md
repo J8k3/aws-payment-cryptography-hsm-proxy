@@ -5,7 +5,7 @@
 
 Evidence for *why* each handler behaves as it does and *how* it was verified. Generated from `Handler::grounding()` — do not edit by hand. Grounding labels: wire `vec-thru` > `diff-xprov` > `cited` > `none`; crypto `vec` > `2impl` > `apc` > `none`.
 
-**Coverage:** 15 of 26 handlers carry grounding; 11 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
+**Coverage:** 17 of 26 handlers carry grounding; 9 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
 
 ## `AQ`, `BA`, `BC`, `BE`, `BK`, `CG`, `DE`, `DG`, `EE`, `EG`, `FW`, `JC`, `JE`, `JG`, `LE`, `LG`, `LO`, `NG`, `EM`, `EU`, `EW`, `EY`, `GM`, `A0`, `A4`, `A6`, `A8`, `AA`, `AC`, `AE`, `AG`, `AK`, `AM`, `AS`, `AU`, `AW`, `BI`, `B0`, `B8`, `BG`, `BU`, `BW`, `BS`, `BY`, `CS`, `DW`, `DY`, `FA`, `FC`, `FE`, `FG`, `FK`, `GC`, `GE`, `GG`, `GK`, `GY`, `HA`, `HC`, `HY`, `IA`, `J6`, `J8`, `JK`, `K8`, `KA`, `KC`, `KG`, `KI`, `L0`, `LU`, `LW`, `MG`, `MI`, `N0`, `NC`, `NI`, `NO`, `Q0`, `Q6`, `Q8`, `QH`, `RA`, `SE`, `TG`, `TY`, `UI`, `VW`, `VY`, `WC`, `WQ`, `WW`, `WY`
 
@@ -118,6 +118,21 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
   - wire `diff-xprov` · crypto `apc` · live test `emv_decrypt_k0_differential`
   - PUGD0537-004. Verified live via round-trip: APC encrypt_data (EMV-CBC, built from the same field values) mints the ciphertext, and the proxy's K0 recovers the original plaintext across randomized PAN/PSN/ATC and 1..4 cipher blocks. A wrong PAN/PSN/ATC offset derives a different session key, so the round-trip would not close.
 
+## `LQ`, `LS`
+
+- **LQ (generate HMAC) and LS (verify HMAC) return Unsupported (68) — gated pending wire-format validation, NOT because APC lacks the capability.**
+  - wire `none` · crypto `none` · gated (68): wire format not yet validated against APC (deferred implementation)
+  - APC supports HMAC via generate_mac/verify_mac, so LQ/LS are a realistic future mapping. They are gated because the previous handler parsed a fabricated layout that does not match the authoritative wire format (PUGD0537-004 Rev A p.405/407): a 2N hash id, a byte-length HMAC-truncation field, a length-prefixed inline key, and a raw-byte (not hex) message. A faithful mapping must resolve the HMAC-length truncation and the raw-byte key/message representation against APC's hex-message generate_mac/verify_mac and confirm SHA-224 support — validated end-to-end before enabling. Until then, returning 68 is correct rather than proxying a guessed layout.
+
+## `M0`, `M2`, `M4`
+
+- **M0 encrypts and M2 decrypts a data block, TDES-ECB, under a D0 symmetric data key. Only ECB ('00') and hex I/O ('1') are accepted; other modes/formats are rejected. Response is a 4H byte-length prefix + data hex.**
+  - wire `diff-xprov` · crypto `apc` · live test `intl_encrypt_m0_m2_m4_differential`
+  - payShield International Host Commands. Verified live: M0's ciphertext equals a direct APC encrypt_data ECB oracle across length-randomised plaintext (1..4 blocks), and M2 round-trips the proxy's own ciphertext back to the original plaintext. The wire field layout is INFERRED from the SEED-variant commands (the official International Host Commands PDF was unavailable), so the differential proves parse-consistency with APC, not manual-confirmed field positions — hence diff-xprov, not cited.
+- **M4 translates a data block from a source key to a destination key (TDES-ECB) using two APC calls: decrypt_data under the source key, then encrypt_data under the destination key.**
+  - wire `diff-xprov` · crypto `apc` · live test `intl_encrypt_m0_m2_m4_differential`
+  - APC's single-call re_encrypt_data requires KeyModesOfUse.Encrypt=true on both keys, but a D0 symmetric data key can only be created as NoRestrictions (encrypt flag false); re_encrypt_data then rejects it with "KeyUsages not allowed" (confirmed live). Decrypt-then-encrypt is semantically identical for ECB and works with D0 NoRestrictions keys. Verified live: M4 translates the M0 ciphertext src→dst and a direct APC decrypt under the dst key recovers the original plaintext. TRADE-OFF: the plaintext transits the proxy between the two calls (zeroized on drop) — the same trust boundary M0/M2 already cross for this key class, not a new exposure.
+
 ## `MA`, `MC`, `ME`, `MK`, `MM`, `MO`, `MU`, `MW`, `MQ`, `MS`
 
 - **MA/MC ('~'-terminated) and MK/MM (3H-length-prefixed) generate/verify an ISO 9797-1 Alg1 MAC under a TAK. APC's Alg1 MAC is truncated to the 8H (4-byte) wire width.**
@@ -147,7 +162,5 @@ These handlers have no `grounding()` yet — the open documentation/testing gap.
 - `K2`, `KS`
 - `KQ`
 - `KW`
-- `LQ`, `LS`
-- `M0`, `M2`, `M4`
 - `QY`, `PM`
 - `TPIN`

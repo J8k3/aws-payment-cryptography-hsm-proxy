@@ -61,6 +61,46 @@ impl Handler for InternationalEncryptHandler {
         &["M0", "M2", "M4"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[
+            Evidence {
+                decision: "M0 encrypts and M2 decrypts a data block, TDES-ECB, under a D0 \
+                           symmetric data key. Only ECB ('00') and hex I/O ('1') are accepted; \
+                           other modes/formats are rejected. Response is a 4H byte-length prefix + \
+                           data hex.",
+                because: "payShield International Host Commands. Verified live: M0's ciphertext \
+                          equals a direct APC encrypt_data ECB oracle across length-randomised \
+                          plaintext (1..4 blocks), and M2 round-trips the proxy's own ciphertext \
+                          back to the original plaintext. The wire field layout is INFERRED from \
+                          the SEED-variant commands (the official International Host Commands PDF \
+                          was unavailable), so the differential proves parse-consistency with APC, \
+                          not manual-confirmed field positions — hence diff-xprov, not cited.",
+                wire: WireGrounding::DiffXprov,
+                crypto: CryptoGrounding::Apc,
+                proof: Proof::LiveTest("intl_encrypt_m0_m2_m4_differential"),
+            },
+            Evidence {
+                decision: "M4 translates a data block from a source key to a destination key \
+                           (TDES-ECB) using two APC calls: decrypt_data under the source key, then \
+                           encrypt_data under the destination key.",
+                because: "APC's single-call re_encrypt_data requires KeyModesOfUse.Encrypt=true on \
+                          both keys, but a D0 symmetric data key can only be created as \
+                          NoRestrictions (encrypt flag false); re_encrypt_data then rejects it with \
+                          \"KeyUsages not allowed\" (confirmed live). Decrypt-then-encrypt is \
+                          semantically identical for ECB and works with D0 NoRestrictions keys. \
+                          Verified live: M4 translates the M0 ciphertext src→dst and a direct APC \
+                          decrypt under the dst key recovers the original plaintext. TRADE-OFF: the \
+                          plaintext transits the proxy between the two calls (zeroized on drop) — \
+                          the same trust boundary M0/M2 already cross for this key class, not a new \
+                          exposure.",
+                wire: WireGrounding::DiffXprov,
+                crypto: CryptoGrounding::Apc,
+                proof: Proof::LiveTest("intl_encrypt_m0_m2_m4_differential"),
+            },
+        ]
+    }
+
     async fn handle(
         &self,
         command_code: &[u8],
@@ -371,27 +411,55 @@ async fn handle_m4(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
+    // M4 translate = re-encrypt the same plaintext under the destination key.
+    // APC's single-call re_encrypt_data requires KeyModesOfUse.Encrypt on both
+    // keys, but a D0 symmetric data key can only be created as NoRestrictions
+    // (encrypt flag false), so re_encrypt_data rejects it ("KeyUsages not
+    // allowed"). We instead do it in two calls — decrypt under the source key,
+    // encrypt under the destination key — which succeeds with D0 NoRestrictions
+    // keys and is semantically identical for ECB. The plaintext transits the
+    // proxy briefly; this is the same trust boundary M0/M2 already cross for this
+    // key class (see Handler::grounding()).
     use aws_sdk_paymentcryptographydata::types::{
-        EncryptionMode, ReEncryptionAttributes, SymmetricEncryptionAttributes,
+        EncryptionDecryptionAttributes, EncryptionMode, SymmetricEncryptionAttributes,
     };
-    let ecb = match SymmetricEncryptionAttributes::builder()
-        .mode(EncryptionMode::Ecb)
-        .build()
-        .map_err(|e| ProxyError::ApcError(e.to_string()))
-    {
-        Ok(a) => a,
-        Err(e) => return HandlerResult::from_proxy_error(&e),
+    let ecb = || {
+        SymmetricEncryptionAttributes::builder()
+            .mode(EncryptionMode::Ecb)
+            .build()
+            .map_err(|e| ProxyError::ApcError(e.to_string()))
+    };
+    let (dec_attrs, enc_attrs) = match (ecb(), ecb()) {
+        (Ok(d), Ok(e)) => (d, e),
+        (Err(e), _) | (_, Err(e)) => return HandlerResult::from_proxy_error(&e),
     };
 
-    debug!(src = %src_arn, dst = %dst_arn, "M4: re_encrypt_data TDES-ECB");
+    debug!(src = %src_arn, dst = %dst_arn, "M4: translate via decrypt(src)+encrypt(dst) TDES-ECB");
+
+    // Decrypt under the source key. The recovered plaintext is zeroized on drop.
+    let plain = match state
+        .data
+        .decrypt_data()
+        .key_identifier(&src_arn)
+        .cipher_text(cipher_text.as_str())
+        .decryption_attributes(EncryptionDecryptionAttributes::Symmetric(dec_attrs))
+        .send()
+        .await
+    {
+        Ok(resp) => Zeroizing::new(resp.plain_text().to_string()),
+        Err(e) => {
+            warn!(?e, "M4: decrypt_data (source) failed");
+            return HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()));
+        }
+    };
+
+    // Re-encrypt under the destination key.
     match state
         .data
-        .re_encrypt_data()
-        .incoming_key_identifier(&src_arn)
-        .outgoing_key_identifier(&dst_arn)
-        .cipher_text(cipher_text.as_str())
-        .incoming_encryption_attributes(ReEncryptionAttributes::Symmetric(ecb.clone()))
-        .outgoing_encryption_attributes(ReEncryptionAttributes::Symmetric(ecb))
+        .encrypt_data()
+        .key_identifier(&dst_arn)
+        .plain_text(plain.as_str())
+        .encryption_attributes(EncryptionDecryptionAttributes::Symmetric(enc_attrs))
         .send()
         .await
     {
@@ -403,7 +471,7 @@ async fn handle_m4(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
             HandlerResult::success(out)
         }
         Err(e) => {
-            warn!(?e, "M4: re_encrypt_data failed");
+            warn!(?e, "M4: encrypt_data (destination) failed");
             HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
         }
     }

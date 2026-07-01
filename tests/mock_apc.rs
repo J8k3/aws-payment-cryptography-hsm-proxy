@@ -140,13 +140,21 @@ fn default_routes() -> HashMap<String, (u16, String)> {
             r#"{"KeyArn":"mock-dek","KeyCheckValue":"AAA","PlainText":"AABBCCDDEE112233"}"#.into(),
         ),
     );
-    // M4: re_encrypt_data path is /keys/{IncomingKeyIdentifier}/reencrypt.
-    // Tests use "mock-src" as incoming key.
+    // M4 translate is done as two calls: decrypt under the source key, then
+    // encrypt under the destination key (re_encrypt_data rejects D0 keys — see
+    // the handler grounding). Tests use "mock-src" and "mock-dst".
     m.insert(
-        "/keys/mock-src/reencrypt".into(),
+        "/keys/mock-src/decrypt".into(),
         (
             200,
-            r#"{"IncomingKeyArn":"mock-src","OutgoingKeyArn":"mock-dst","KeyCheckValue":"AAA","CipherText":"EEFF11223344AABB"}"#.into(),
+            r#"{"KeyArn":"mock-src","KeyCheckValue":"AAA","PlainText":"AABBCCDDEE112233"}"#.into(),
+        ),
+    );
+    m.insert(
+        "/keys/mock-dst/encrypt".into(),
+        (
+            200,
+            r#"{"KeyArn":"mock-dst","KeyCheckValue":"AAA","CipherText":"EEFF11223344AABB"}"#.into(),
         ),
     );
     // KQ: verify_auth_request_cryptogram path.
@@ -722,7 +730,8 @@ async fn thales_m4_reencrypt_success() {
     let result = handler.handle(b"M4", &payload, &state).await;
 
     assert_eq!(&result.error_code, b"00");
-    // Mock returns CipherText "EEFF11223344AABB" (8 bytes) → prefix "0008"
+    // Two-call translate: decrypt(mock-src) → plaintext, encrypt(mock-dst) →
+    // CipherText "EEFF11223344AABB" (8 bytes) → 4H prefix "0008".
     assert_eq!(result.payload.as_slice(), b"0008EEFF11223344AABB");
 }
 
