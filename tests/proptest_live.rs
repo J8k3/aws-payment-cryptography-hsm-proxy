@@ -3449,15 +3449,49 @@ async fn futurex_tpin_differential() -> anyhow::Result<()> {
 // the credential fails the reject leg; one that rejects everything fails the
 // accept leg.
 
-/// Flip the first character between '0' and '1' (any other digit -> '0'), so the
-/// value changes by the smallest possible edit. Works for decimal CVV/PVV and
-/// hex MAC alike.
-fn corrupt_first(s: &str) -> String {
-    let mut chars: Vec<char> = s.chars().collect();
-    if let Some(first) = chars.first_mut() {
-        *first = if *first == '0' { '1' } else { '0' };
+/// A random symbol: hex nibble (`hex=true`) or decimal digit.
+fn rand_symbol(rng: &mut StdRng, hex: bool) -> char {
+    if hex {
+        char::from(b"0123456789ABCDEF"[rng.random_range(0..16)])
+    } else {
+        char::from(b'0' + rng.random_range(0..10_u8))
     }
-    chars.into_iter().collect()
+}
+
+/// Produce an invalid variant of `correct`, guaranteed different (case-insensitive)
+/// and the same length/alphabet. Half the time a minimal single-symbol edit at a
+/// random position, half the time a fully random value — so a sweep explores both
+/// off-by-one and far-away wrong credentials, varying per case and per seed.
+fn corrupt(rng: &mut StdRng, correct: &str, hex: bool) -> String {
+    loop {
+        let mut chars: Vec<char> = correct.chars().collect();
+        if chars.is_empty() {
+            return rand_symbol(rng, hex).to_string();
+        }
+        if rng.random_bool(0.5) {
+            let i = rng.random_range(0..chars.len());
+            chars[i] = rand_symbol(rng, hex);
+        } else {
+            for c in &mut chars {
+                *c = rand_symbol(rng, hex);
+            }
+        }
+        let s: String = chars.into_iter().collect();
+        if !s.eq_ignore_ascii_case(correct) {
+            return s;
+        }
+    }
+}
+
+/// A random 12H IBM offset that is NOT the natural-PIN offset ("0000" F-padded).
+/// Four random decimal digits (≠ "0000") left-justified and F-padded to 12H.
+fn random_wrong_offset(rng: &mut StdRng) -> String {
+    loop {
+        let digits: String = (0..4).map(|_| rand_symbol(rng, false)).collect();
+        if digits != "0000" {
+            return format!("{digits:F<12}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -3506,7 +3540,7 @@ async fn cvv_cy_discrimination_differential() -> anyhow::Result<()> {
             anyhow::ensure!(&r.error_code == b"00", "CW failed to generate CVV");
             String::from_utf8(r.payload.to_vec())?
         };
-        let bad = corrupt_first(&cvv);
+        let bad = corrupt(&mut rng, &cvv, false);
 
         let accept = cy
             .handle(
@@ -3588,7 +3622,7 @@ async fn mac_m8_discrimination_differential() -> anyhow::Result<()> {
             anyhow::ensure!(&r.error_code == b"00", "M6 failed to generate MAC");
             String::from_utf8(r.payload.to_vec())?
         };
-        let bad = corrupt_first(&mac);
+        let bad = corrupt(&mut rng, &mac, true);
 
         let accept = m8
             .handle(
@@ -3720,6 +3754,7 @@ async fn pin_verify_non_dukpt_discrimination_differential() -> anyhow::Result<()
                 &pan,
                 "0000FFFFFFFF",
             );
+            let wrong_offset = random_wrong_offset(&mut rng);
             let bad = encode_da_ea(
                 &enc_label,
                 &pvk_ibm_label,
@@ -3727,7 +3762,7 @@ async fn pin_verify_non_dukpt_discrimination_differential() -> anyhow::Result<()
                 &pan,
                 GO_DECIM_TABLE,
                 &pan,
-                "0001FFFFFFFF",
+                &wrong_offset,
             );
             let a = ea.handle(b"EA", &good, &state).await.error_code;
             let r = ea.handle(b"EA", &bad, &state).await.error_code;
@@ -3753,7 +3788,7 @@ async fn pin_verify_non_dukpt_discrimination_differential() -> anyhow::Result<()
                 .pin_data()
                 .and_then(|d| d.as_verification_value().ok().cloned())
                 .ok_or_else(|| anyhow::anyhow!("no Visa PVV"))?;
-            let bad_pvv = corrupt_first(&pvv);
+            let bad_pvv = corrupt(&mut rng, &pvv, false);
             let good = encode_dc_ec(&enc_label, &pvk_visa_label, &block, &pan, "1", &pvv);
             let bad = encode_dc_ec(&enc_label, &pvk_visa_label, &block, &pan, "1", &bad_pvv);
             let a = ec.handle(b"EC", &good, &state).await.error_code;
@@ -3922,6 +3957,7 @@ async fn pin_change_du_cu_discrimination_differential() -> anyhow::Result<()> {
                 "0000FFFFFFFF",
                 &new_block,
             );
+            let wrong_offset = random_wrong_offset(&mut rng);
             let bad = encode_du(
                 &zpk_label,
                 &pvk_ibm_label,
@@ -3929,7 +3965,7 @@ async fn pin_change_du_cu_discrimination_differential() -> anyhow::Result<()> {
                 &pan,
                 GO_DECIM_TABLE,
                 &pan,
-                "0001FFFFFFFF",
+                &wrong_offset,
                 &new_block,
             );
             let a = du.handle(b"DU", &good, &state).await.error_code;
@@ -3968,7 +4004,7 @@ async fn pin_change_du_cu_discrimination_differential() -> anyhow::Result<()> {
                 &cur_block,
                 &pan,
                 "1",
-                &corrupt_first(&pvv),
+                &corrupt(&mut rng, &pvv, false),
                 &new_block,
             );
             let a = cu.handle(b"CU", &good, &state).await.error_code;
@@ -3990,6 +4026,137 @@ async fn pin_change_du_cu_discrimination_differential() -> anyhow::Result<()> {
         }
         eprintln!(
             "case={case_idx:02} OK {label} correct-current-PIN=00 wrong-current-PIN=01 pan={pan}"
+        );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+// ── Out-of-bounds / malformed input robustness ────────────────────────────────
+//
+// The discrimination tests above use well-formed-but-wrong credentials. This test
+// pushes the other axis: intentionally out-of-bounds inputs — wrong length,
+// non-hex where hex is expected, empty, oversized, and truncated wire frames. The
+// property is stronger than "reject": a verify handler must NEVER return 00
+// (accept) for malformed input, and must NEVER panic (the test completing is the
+// no-panic proof). The malformed set is regenerated with random junk each run.
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn verify_rejects_malformed_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "verify_rejects_malformed_differential: out-of-bounds inputs are never accepted (never 00), \
+         never panic"
+    );
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [
+        KeySpec {
+            role: "CVK",
+            wire_label: CVK_WIRE_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31C0CardVerificationKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+        KeySpec {
+            role: "MAK",
+            wire_label: MAK_WIRE_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31M3Iso97973MacKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+    ];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let cvk_label = keys.wire_label("CVK").to_string();
+    let mak_label = keys.wire_label("MAK").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let cy = registry.get(b"CY").expect("CY registered");
+    let m8 = registry.get(b"M8").expect("M8 registered");
+
+    const LABEL: &str = "verify_rejects_malformed";
+    let pan = "12345678901234";
+    let (expiry, svc, msg) = ("3012", "201", "AABBCCDDEE112233");
+    let run = cases_to_run();
+    eprintln!(
+        "verify_rejects_malformed_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        // Half the cases target the hex MAC field, half the decimal CVV field.
+        let target_mac = rng.random_bool(0.5);
+        let hex = target_mac;
+
+        // Pick a random out-of-bounds strategy and build the malformed input.
+        let (desc, cmd, wire): (String, &[u8], Vec<u8>) = if rng.random_bool(0.25) {
+            // Truncated / arbitrary-byte wire frame — the parser must not panic or
+            // index out of bounds. Real garbage bytes, not just ASCII.
+            let n = rng.random_range(0..40_usize);
+            let w: Vec<u8> = (0..n).map(|_| rng.random_range(0..=255_u8)).collect();
+            if target_mac {
+                (format!("M8 wire=junk[{n}]"), b"M8", w)
+            } else {
+                (format!("CY wire=junk[{n}]"), b"CY", w)
+            }
+        } else {
+            // Well-formed frame carrying an out-of-bounds credential field.
+            let bad: String = match rng.random_range(0..4) {
+                0 => String::new(), // empty
+                1 => (0..rng.random_range(1..12)) // wrong length
+                    .map(|_| rand_symbol(&mut rng, hex))
+                    .collect(),
+                2 => (0..if hex { 8 } else { 3 }) // right length, out-of-alphabet
+                    .map(|_| char::from(b"GHIJKLMNOPQRSTUVWXYZ"[rng.random_range(0..20)]))
+                    .collect(),
+                _ => (0..rng.random_range(20..48)) // oversized
+                    .map(|_| rand_symbol(&mut rng, hex))
+                    .collect(),
+            };
+            if target_mac {
+                (
+                    format!("M8 mac={bad:?}"),
+                    b"M8",
+                    encode_m8(&mak_label, b'3', b'0', msg, &bad),
+                )
+            } else {
+                (
+                    format!("CY cvv={bad:?}"),
+                    b"CY",
+                    encode_cy(&cvk_label, &bad, pan, expiry, svc),
+                )
+            }
+        };
+
+        let handler = if target_mac { &m8 } else { &cy };
+        let out = handler.handle(cmd, &wire, &state).await;
+        if &out.error_code == b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("verify_rejects_malformed_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} malformed input was ACCEPTED (00) — critical: {desc}"
+            ));
+            break;
+        }
+        eprintln!(
+            "case={case_idx:02} OK rejected({}) {desc}",
+            String::from_utf8_lossy(&out.error_code)
         );
     }
 
