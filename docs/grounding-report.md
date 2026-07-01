@@ -5,7 +5,7 @@
 
 Evidence for *why* each handler behaves as it does and *how* it was verified. Generated from `Handler::grounding()` — do not edit by hand. Grounding labels: wire `vec-thru` > `diff-xprov` > `cited` > `none`; crypto `vec` > `2impl` > `apc` > `none`.
 
-**Coverage:** 17 of 26 handlers carry grounding; 9 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
+**Coverage:** 20 of 26 handlers carry grounding; 6 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
 
 ## `AQ`, `BA`, `BC`, `BE`, `BK`, `CG`, `DE`, `DG`, `EE`, `EG`, `FW`, `JC`, `JE`, `JG`, `LE`, `LG`, `LO`, `NG`, `EM`, `EU`, `EW`, `EY`, `GM`, `A0`, `A4`, `A6`, `A8`, `AA`, `AC`, `AE`, `AG`, `AK`, `AM`, `AS`, `AU`, `AW`, `BI`, `B0`, `B8`, `BG`, `BU`, `BW`, `BS`, `BY`, `CS`, `DW`, `DY`, `FA`, `FC`, `FE`, `FG`, `FK`, `GC`, `GE`, `GG`, `GK`, `GY`, `HA`, `HC`, `HY`, `IA`, `J6`, `J8`, `JK`, `K8`, `KA`, `KC`, `KG`, `KI`, `L0`, `LU`, `LW`, `MG`, `MI`, `N0`, `NC`, `NI`, `NO`, `Q0`, `Q6`, `Q8`, `QH`, `RA`, `SE`, `TG`, `TY`, `UI`, `VW`, `VY`, `WC`, `WQ`, `WW`, `WY`
 
@@ -64,6 +64,12 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
   - wire `none` · crypto `none` · gated (68): no APC equivalent (Diebold table / LMK-compare)
   - Diebold indexes a conversion table in HSM user storage and CQ compares against an LMK-encrypted reference PIN — neither has an APC equivalent (APC verify_pin_data does IBM3624 offset / Visa PVV only).
 
+## `CU`, `DU`
+
+- **DU verifies the current PIN by IBM 3624 offset and generates a new offset; CU does the same by Visa PVV. Each is atomic: the current PIN is verified first (APC verify_pin_data), and only on a match is the new datum generated (APC generate_pin_data with Ibm3624PinOffset / VisaPinVerificationValue for the new PIN block). On mismatch the response is error 01 and no datum is returned. The IBM 12H current offset is F-padded and trimmed to APC's ^[0-9]+$ before the verify call.**
+  - wire `diff-xprov` · crypto `apc` · live test `pin_change_du_cu_differential`
+  - PUGD0537-004 Rev A p.255 (DU) / p.259 (CU). Verified live end-to-end: for both methods the proxy verifies a valid current PIN and returns a new offset/PVV that a direct APC verify_pin_data then confirms against the new PIN block, across randomized PAN. The live differential caught two DU offset bugs: the F-padded current offset was passed to APC's pin_offset (which requires ^[0-9]+$) so every valid current PIN was rejected — fixed by stripping the padding (as GO/CK/DA do); and the generated New Offset was returned unpadded, but the DV response field is 12H left-justified F-padded (p.255) — fixed by re-padding.
+
 ## `CW`, `CY`, `NY`, `RY`
 
 - **CW/CY wire: CVK(32H) then a VARIABLE-LENGTH ';'-terminated PAN, then expiry(4N) + service code(3N) — not a fixed-16 PAN.**
@@ -112,6 +118,12 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
   - wire `diff-xprov` · crypto `apc` · live test `encrypt_decrypt_he_hg_differential`
   - PUGD0538-003 p.107 (HE) / p.108 (HG). Verified live: proxy HE ciphertext == APC encrypt_data (TDES-ECB, deterministic), and the HE→HG round-trip recovers the plaintext, over random plus all-zero / all-F blocks. Operational note (verified live): APC rejects encrypt+decrypt alone for a D0 key — the mapped key must use NoRestrictions (or encrypt+decrypt+wrap+unwrap) for both HE and HG to work.
 
+## `JA`
+
+- **JA (Generate a Random PIN) returns Unsupported (68).**
+  - wire `none` · crypto `none` · gated (68): no APC equivalent — LMK-encrypted PIN output
+  - PUGD0537-004 Rev A p.215 ("Generate a Random PIN"). JB returns the generated PIN encrypted under the LMK — a PIN block cryptographically bound to the account number — and carries no keys in the request. APC has no Local Master Key and cannot emit an LMK-encrypted PIN block, so JA's defining output has no equivalent. (generate_pin_data + Ibm3624RandomPin is a fused random-PIN/offset/ZPK-encrypt flow returning a ZPK-encrypted block; it does not reproduce JA's LMK-bound output or wire format.) Migration: issue PINs via generate_pin_data as ZPK-encrypted blocks with a verification value.
+
 ## `K0`
 
 - **K0 decrypts EMV-encrypted counters / application data under an IMK-ENC (E1) master key. APC derives an EMV session key (Option A) from the master key + PAN/PSN + ATC, then CBC-decrypts. Wire PAN+Seq is 8B BCD (Option-A pre-format); ATC and DataLen are 2B binary; ciphertext is binary and hex-encoded before the APC call. SessionDerivationData = ATC(4H) + 12 zero hex chars.**
@@ -151,16 +163,19 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
   - wire `cited` · crypto `none` · manual: PUGD0537-004 Rev A p.371; ALG3/CMAC not yet live-differentialed
   - PUGD0537-004 Rev A p.371 — same per-direction generate/verify mapping as the live-verified ALG1 path; broadening the differential is the tracked next step.
 
+## `QY`, `PM`
+
+- **QY (Generate a Dynamic CVV) and PM (Verify a Dynamic CVV/CVC) return Unsupported (68).**
+  - wire `none` · crypto `none` · gated (68): EMV card-unique-key dCVV; no validated APC mapping yet
+  - PUGD0537-004 Rev A p.306 (QY) / p.308 (PM). These are EMV multi-scheme dynamic-CVV operations — not the static-CVK CW/CY algorithm. The wire begins with a Scheme ID and derives a card-unique key from an EMV issuer master key (E-type) via an explicit Option A/B method. Only Visa dCVV (Scheme '0') plausibly maps to APC's DynamicCardVerificationValue, but APC requires a PAN sequence number the Visa-dCVV wire does not carry, and the ATC width/encoding and card-key derivation must be validated end-to-end before a mapping can be trusted. The other schemes (Visa AV/dCVV2, Mastercard CVC3, Amex, Discover, Oberthur, JCB, Gemalto) have no APC equivalent. Gated to avoid emitting a cryptographically wrong dCVV.
+
 ## Not yet grounded
 
 These handlers have no `grounding()` yet — the open documentation/testing gap. Grounding them is the ongoing work (documentation + test added together).
 
-- `CU`, `DU`
-- `JA`
 - `JS`
 - `JU`, `KU`, `KY`
 - `K2`, `KS`
 - `KQ`
 - `KW`
-- `QY`, `PM`
 - `TPIN`

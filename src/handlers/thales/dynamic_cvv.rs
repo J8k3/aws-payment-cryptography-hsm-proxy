@@ -57,6 +57,27 @@ impl Handler for DynamicCvvHandler {
         &["QY", "PM"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[Evidence {
+            decision: "QY (Generate a Dynamic CVV) and PM (Verify a Dynamic CVV/CVC) return \
+                       Unsupported (68).",
+            because: "PUGD0537-004 Rev A p.306 (QY) / p.308 (PM). These are EMV multi-scheme \
+                      dynamic-CVV operations — not the static-CVK CW/CY algorithm. The wire begins \
+                      with a Scheme ID and derives a card-unique key from an EMV issuer master key \
+                      (E-type) via an explicit Option A/B method. Only Visa dCVV (Scheme '0') \
+                      plausibly maps to APC's DynamicCardVerificationValue, but APC requires a PAN \
+                      sequence number the Visa-dCVV wire does not carry, and the ATC \
+                      width/encoding and card-key derivation must be validated end-to-end before a \
+                      mapping can be trusted. The other schemes (Visa AV/dCVV2, Mastercard CVC3, \
+                      Amex, Discover, Oberthur, JCB, Gemalto) have no APC equivalent. Gated to avoid \
+                      emitting a cryptographically wrong dCVV.",
+            wire: WireGrounding::None,
+            crypto: CryptoGrounding::None,
+            proof: Proof::Gated("EMV card-unique-key dCVV; no validated APC mapping yet"),
+        }]
+    }
+
     async fn handle(
         &self,
         command_code: &[u8],

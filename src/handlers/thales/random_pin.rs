@@ -37,6 +37,24 @@ impl Handler for RandomPinHandler {
         &["JA"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[Evidence {
+            decision: "JA (Generate a Random PIN) returns Unsupported (68).",
+            because: "PUGD0537-004 Rev A p.215 (\"Generate a Random PIN\"). JB returns the generated \
+                      PIN encrypted under the LMK — a PIN block cryptographically bound to the \
+                      account number — and carries no keys in the request. APC has no Local Master \
+                      Key and cannot emit an LMK-encrypted PIN block, so JA's defining output has no \
+                      equivalent. (generate_pin_data + Ibm3624RandomPin is a fused \
+                      random-PIN/offset/ZPK-encrypt flow returning a ZPK-encrypted block; it does \
+                      not reproduce JA's LMK-bound output or wire format.) Migration: issue PINs via \
+                      generate_pin_data as ZPK-encrypted blocks with a verification value.",
+            wire: WireGrounding::None,
+            crypto: CryptoGrounding::None,
+            proof: Proof::Gated("no APC equivalent — LMK-encrypted PIN output"),
+        }]
+    }
+
     async fn handle(
         &self,
         _command_code: &[u8],
