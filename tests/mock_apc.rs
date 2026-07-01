@@ -1104,3 +1104,55 @@ async fn noop_handler_returns_68_for_all_registered_commands() {
         );
     }
 }
+
+// ── Registry-wide robustness (no panic on malformed input) ────────────────────
+//
+// Negative testing is not verify-specific: EVERY handler must survive hostile
+// wire input without panicking. A proxy that panics on a malformed frame is a
+// DoS. This sweep fuzzes every registered command code with random/truncated
+// byte payloads and asserts the call returns (the test completing is the
+// no-panic proof). It runs offline in CI: the key map is empty, so any
+// key-using handler fails key resolution before any data-plane call, and the
+// rest return fixed codes — nothing reaches APC.
+//
+// Deterministic (fixed-seed xorshift) so a failure reproduces exactly.
+#[tokio::test]
+async fn all_handlers_survive_malformed_input() {
+    let mock = MockApc::start().await; // never actually reached; a safety net if it were
+    let registry = Registry::build();
+    let state = mock_state(&mock.url, HashMap::new()).await; // empty key map
+
+    // Small deterministic xorshift64 PRNG — no external rand dependency here.
+    let mut x: u64 = 0x1234_5678_9abc_def0;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+
+    let codes = registry.command_codes();
+    assert!(
+        codes.len() >= 26,
+        "expected the full command surface, got {}",
+        codes.len()
+    );
+
+    let mut total = 0_usize;
+    for code in &codes {
+        let handler = registry.get(code).expect("code came from the registry");
+        for _ in 0..64 {
+            let len = (next() % 96) as usize; // 0..95 bytes, incl. empty and short frames
+            let payload: Vec<u8> = (0..len).map(|_| (next() & 0xff) as u8).collect();
+            // The assertion is simply that this does not panic. Every handler
+            // returns a well-formed 2-byte error code for garbage.
+            let out = handler.handle(code, &payload, &state).await;
+            let _ = out.error_code;
+            total += 1;
+        }
+    }
+    eprintln!(
+        "robustness: fuzzed {} command codes x 64 payloads = {total} calls, no panic",
+        codes.len()
+    );
+}

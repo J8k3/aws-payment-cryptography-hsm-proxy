@@ -150,6 +150,15 @@ impl Registry {
         self.map.get(command_code).cloned()
     }
 
+    /// Every registered command code, sorted for determinism. Used by the
+    /// robustness sweep to fuzz every handler, and by tooling that enumerates
+    /// the command surface.
+    pub fn command_codes(&self) -> Vec<Vec<u8>> {
+        let mut codes: Vec<Vec<u8>> = self.map.keys().cloned().collect();
+        codes.sort();
+        codes
+    }
+
     /// One grounding entry per *distinct* handler (deduped by its first command
     /// code, which is unique per handler), sorted for deterministic output. Drives
     /// the generated grounding report and the coverage audit.
