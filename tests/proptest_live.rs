@@ -2433,3 +2433,291 @@ async fn emv_decrypt_k0_differential() -> anyhow::Result<()> {
     survivor_result?;
     Ok(())
 }
+
+// ── Non-DUKPT PIN verify DA/DC/EA/EC (live verdict differential) ───────────────
+//
+// Un-audited handler (PUGD0537-004 p.269/277/279/281). DA/EA verify an IBM 3624
+// PIN; DC/EC verify a Visa PVV. DA/DC use a TPK, EA/EC a ZPK — both are P0 in APC
+// (encryption_key_identifier), so the four commands share two code paths. No
+// DUKPT. Wire (IBM): EncKey || PVK || Max(2N) || Min(2N) || PINblock(16H) ||
+// fmt(2N) || PAN(12N) || decim(16H) || PIN-val-data(12A) || offset(12H F-padded).
+// Wire (Visa): EncKey || PVK-pair(32H) || Max || Min || PINblock || fmt || PAN ||
+// PVKI(1N) || PVV(4N).
+//
+// Verdict differential like GO/CK but without the DUKPT translate: a valid PIN is
+// minted via generate_pin_data (IBM3624 natural PIN offset 0, or Visa PVV), the
+// proxy's verify verdict must match a direct APC verify_pin_data verdict. A wrong
+// field offset feeds APC garbage, which it rejects → verdicts diverge.
+
+const NDV_ENC_LABEL: &str = "U00000000000000000000000000000D01";
+const NDV_PVK_IBM_LABEL: &str = "U00000000000000000000000000000D02";
+const NDV_PVK_VISA_LABEL: &str = "U00000000000000000000000000000D03";
+
+/// Encode a DA/EA (IBM 3624) verify frame.
+#[allow(clippy::too_many_arguments)]
+fn encode_da_ea(
+    enc_label: &str,
+    pvk_label: &str,
+    pin_block16: &str,
+    account: &str,
+    decim: &str,
+    pin_val_data: &str,
+    offset12: &str,
+) -> Vec<u8> {
+    let mut v = enc_label.as_bytes().to_vec();
+    v.extend_from_slice(pvk_label.as_bytes());
+    v.extend_from_slice(b"04"); // Max PIN length
+    v.extend_from_slice(b"04"); // Min PIN length
+    v.extend_from_slice(pin_block16.as_bytes()); // 16H
+    v.extend_from_slice(b"01"); // PIN block format (ISO0)
+    v.extend_from_slice(account.as_bytes()); // 12N
+    v.extend_from_slice(decim.as_bytes()); // 16H
+    v.extend_from_slice(pin_val_data.as_bytes()); // 12A
+    v.extend_from_slice(offset12.as_bytes()); // 12H F-padded
+    v
+}
+
+/// Encode a DC/EC (Visa PVV) verify frame.
+fn encode_dc_ec(
+    enc_label: &str,
+    pvk_label: &str,
+    pin_block16: &str,
+    account: &str,
+    pvki: &str,
+    pvv: &str,
+) -> Vec<u8> {
+    let mut v = enc_label.as_bytes().to_vec();
+    v.extend_from_slice(pvk_label.as_bytes());
+    v.extend_from_slice(b"04"); // Max PIN length
+    v.extend_from_slice(b"04"); // Min PIN length
+    v.extend_from_slice(pin_block16.as_bytes()); // 16H
+    v.extend_from_slice(b"01"); // PIN block format (ISO0)
+    v.extend_from_slice(account.as_bytes()); // 12N
+    v.extend_from_slice(pvki.as_bytes()); // 1N PVKI
+    v.extend_from_slice(pvv.as_bytes()); // 4N PVV
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn pin_verify_non_dukpt_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "pin_verify_non_dukpt_differential: grounding crypto=apc \
+         wire=diff-xprov(IBM3624 + Visa PVV non-DUKPT; cmd-randomised; verdict)"
+    );
+
+    use aws_sdk_paymentcryptographydata::types::VisaPinVerification;
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [
+        KeySpec {
+            role: "ENC",
+            wire_label: NDV_ENC_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31P0PinEncryptionKey,
+            modes: KeyModesOfUse::builder()
+                .encrypt(true)
+                .decrypt(true)
+                .wrap(true)
+                .unwrap(true)
+                .build(),
+        },
+        KeySpec {
+            role: "PVK_IBM",
+            wire_label: NDV_PVK_IBM_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31V1Ibm3624PinVerificationKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+        KeySpec {
+            role: "PVK_VISA",
+            wire_label: NDV_PVK_VISA_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31V2VisaPinVerificationKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+    ];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let enc_arn = keys.arn("ENC").to_string();
+    let pvk_ibm_arn = keys.arn("PVK_IBM").to_string();
+    let pvk_visa_arn = keys.arn("PVK_VISA").to_string();
+    let enc_label = keys.wire_label("ENC").to_string();
+    let pvk_ibm_label = keys.wire_label("PVK_IBM").to_string();
+    let pvk_visa_label = keys.wire_label("PVK_VISA").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let da = registry.get(b"DA").expect("DA registered");
+    let dc = registry.get(b"DC").expect("DC registered");
+    let ea = registry.get(b"EA").expect("EA registered");
+    let ec = registry.get(b"EC").expect("EC registered");
+
+    const LABEL: &str = "pin_verify_non_dukpt";
+    let run = cases_to_run();
+    eprintln!(
+        "pin_verify_non_dukpt_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12); // 12N account, also the ISO-0 PAN
+        let use_ibm = rng.random_bool(0.5);
+
+        let (cmd, method, proxy_pass, oracle_pass): (&[u8], &str, bool, bool) = if use_ibm {
+            // DA (TPK) or EA (ZPK) — same APC path.
+            let (cmd, handler): (&[u8], _) = if rng.random_bool(0.5) {
+                (b"DA", &da)
+            } else {
+                (b"EA", &ea)
+            };
+            // Mint an IBM3624 natural-PIN block (offset 0) under the ENC key.
+            let block = data
+                .generate_pin_data()
+                .generation_key_identifier(&pvk_ibm_arn)
+                .encryption_key_identifier(&enc_arn)
+                .primary_account_number(&pan)
+                .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+                .generation_attributes(PinGenerationAttributes::Ibm3624NaturalPin(
+                    Ibm3624NaturalPin::builder()
+                        .decimalization_table(GO_DECIM_TABLE)
+                        .pin_validation_data(&pan)
+                        .pin_validation_data_pad_character("F")
+                        .build()?,
+                ))
+                .send()
+                .await?
+                .encrypted_pin_block()
+                .to_string();
+
+            let wire = encode_da_ea(
+                &enc_label,
+                &pvk_ibm_label,
+                &block,
+                &pan,
+                GO_DECIM_TABLE,
+                &pan,
+                "0000FFFFFFFF",
+            );
+            let proxy = handler.handle(cmd, &wire, &state).await;
+            let oracle = data
+                .verify_pin_data()
+                .verification_key_identifier(&pvk_ibm_arn)
+                .encryption_key_identifier(&enc_arn)
+                .encrypted_pin_block(&block)
+                .primary_account_number(&pan)
+                .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+                .verification_attributes(PinVerificationAttributes::Ibm3624Pin(
+                    Ibm3624PinVerification::builder()
+                        .decimalization_table(GO_DECIM_TABLE)
+                        .pin_validation_data(&pan)
+                        .pin_validation_data_pad_character("F")
+                        .pin_offset("0000")
+                        .build()?,
+                ))
+                .send()
+                .await;
+            (cmd, "IBM3624", &proxy.error_code == b"00", oracle.is_ok())
+        } else {
+            // DC (TPK) or EC (ZPK) — same APC path.
+            let (cmd, handler): (&[u8], _) = if rng.random_bool(0.5) {
+                (b"DC", &dc)
+            } else {
+                (b"EC", &ec)
+            };
+            let pvki = i32::try_from(edge_biased(&mut rng, 1, 6, &[1, 6])).expect("pvki in 1..6");
+            // Mint a Visa PVV block; read back the generated PVV.
+            let gen = data
+                .generate_pin_data()
+                .generation_key_identifier(&pvk_visa_arn)
+                .encryption_key_identifier(&enc_arn)
+                .primary_account_number(&pan)
+                .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+                .generation_attributes(PinGenerationAttributes::VisaPin(
+                    VisaPin::builder()
+                        .pin_verification_key_index(pvki)
+                        .build()?,
+                ))
+                .send()
+                .await?;
+            let block = gen.encrypted_pin_block().to_string();
+            let pvv = gen
+                .pin_data()
+                .and_then(|d| d.as_verification_value().ok().cloned())
+                .ok_or_else(|| anyhow::anyhow!("generate_pin_data returned no Visa PVV"))?;
+
+            let wire = encode_dc_ec(
+                &enc_label,
+                &pvk_visa_label,
+                &block,
+                &pan,
+                &pvki.to_string(),
+                &pvv,
+            );
+            let proxy = handler.handle(cmd, &wire, &state).await;
+            let oracle = data
+                .verify_pin_data()
+                .verification_key_identifier(&pvk_visa_arn)
+                .encryption_key_identifier(&enc_arn)
+                .encrypted_pin_block(&block)
+                .primary_account_number(&pan)
+                .pin_block_format(PinBlockFormatForPinData::IsoFormat0)
+                .verification_attributes(PinVerificationAttributes::VisaPin(
+                    VisaPinVerification::builder()
+                        .pin_verification_key_index(pvki)
+                        .verification_value(&pvv)
+                        .build()?,
+                ))
+                .send()
+                .await;
+            (cmd, "VisaPVV", &proxy.error_code == b"00", oracle.is_ok())
+        };
+
+        if proxy_pass != oracle_pass {
+            eprintln!(
+                "{}",
+                replay_hint("pin_verify_non_dukpt_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} {} {} verdict mismatch: proxy_pass={proxy_pass} \
+                 oracle_pass={oracle_pass} pan={pan}",
+                String::from_utf8_lossy(cmd),
+                method,
+            ));
+            break;
+        }
+        if !oracle_pass {
+            eprintln!(
+                "{}",
+                replay_hint("pin_verify_non_dukpt_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} {} {}: minted PIN should verify but both proxy and oracle \
+                 rejected it (pan={pan}) — likely a setup error",
+                String::from_utf8_lossy(cmd),
+                method,
+            ));
+            break;
+        }
+
+        eprintln!(
+            "case={case_idx:02} OK cmd={} method={method} pan={pan} verdict=pass",
+            String::from_utf8_lossy(cmd),
+        );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
