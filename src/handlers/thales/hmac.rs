@@ -43,6 +43,30 @@ impl Handler for HmacHandler {
         &["LQ", "LS"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[Evidence {
+            decision: "LQ (generate HMAC) and LS (verify HMAC) return Unsupported (68) — gated \
+                       pending wire-format validation, NOT because APC lacks the capability.",
+            because: "APC supports HMAC via generate_mac/verify_mac (AWS Payment Cryptography Data \
+                      API: generation attributes accept HMAC with a TR31_M7_HMAC_KEY, and the \
+                      valid algorithms include HMAC_SHA224/256/384/512 — so the SHA-224 variant is \
+                      confirmed available). LQ/LS are therefore a realistic future mapping, gated \
+                      only because the previous handler parsed a fabricated layout that does not \
+                      match the authoritative wire format (PUGD0537-004 Rev A p.405/407): a 2N hash \
+                      id, a byte-length HMAC-truncation field, a length-prefixed inline key, and a \
+                      raw-byte (not hex) message. A faithful mapping must resolve the HMAC-length \
+                      truncation and the raw-byte key/message representation against APC's \
+                      hex-message generate_mac/verify_mac before enabling. Until then, returning 68 \
+                      is correct rather than proxying a guessed layout.",
+            wire: WireGrounding::None,
+            crypto: CryptoGrounding::None,
+            proof: Proof::Gated(
+                "wire format not yet validated against APC (deferred implementation)",
+            ),
+        }]
+    }
+
     async fn handle(
         &self,
         command_code: &[u8],

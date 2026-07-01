@@ -2721,3 +2721,243 @@ async fn pin_verify_non_dukpt_differential() -> anyhow::Result<()> {
     survivor_result?;
     Ok(())
 }
+
+// ── International encrypt M0/M2/M4 (live differential + round-trips) ───────────
+//
+// Un-audited handler (payShield International Host Commands, inferred layout).
+// M0 encrypts a data block, M2 decrypts one, M4 translates one src→dst — all
+// TDES-ECB under D0 data keys. Wire (M0/M2): Mode(2N '00'=ECB) || InFmt(1N '1') ||
+// OutFmt(1N '1') || KeyType(3H, consumed) || Key || MsgLen(4H byte count) ||
+// Msg(hex). Wire (M4): SrcMode(2N) || DstMode(2N) || InFmt || OutFmt ||
+// SrcKeyType(3H) || SrcKey || DstKeyType(3H) || DstKey || MsgLen(4H) || Msg(hex).
+// Response: MsgLen(4H) || data(hex).
+//
+// M0 IS an encrypt_data ECB call, so the oracle equality proves the wire parse
+// (mode/format/key-type/key/len offsets); a shifted field feeds APC different
+// bytes and proxy ≠ oracle. M2 round-trips the proxy's own ciphertext back to
+// plaintext. M4 translates the M0 ciphertext src→dst, then a direct APC
+// decrypt_data under the dst key must recover the original plaintext — validating
+// the two-key parse and the decrypt-then-encrypt translate (M4 cannot use
+// re_encrypt_data; APC rejects it for D0 keys — see the handler grounding).
+
+const INTL_DEK_LABEL: &str = "U00000000000000000000000000000E01";
+const INTL_DEK_DST_LABEL: &str = "U00000000000000000000000000000E02";
+
+/// Encode an M0/M2 ECB-hex frame. Key type "00B" (DEK) is consumed by the parser.
+fn encode_m0_m2(key_label: &str, msg_hex: &str) -> Vec<u8> {
+    let mut v = b"00".to_vec(); // Mode: ECB
+    v.push(b'1'); // Input format: hex
+    v.push(b'1'); // Output format: hex
+    v.extend_from_slice(b"00B"); // Key type 3H (consumed)
+    v.extend_from_slice(key_label.as_bytes());
+    let byte_count = msg_hex.len() / 2;
+    v.extend_from_slice(format!("{byte_count:04X}").as_bytes());
+    v.extend_from_slice(msg_hex.as_bytes());
+    v
+}
+
+/// Encode an M4 translate ECB-hex frame (src→dst, both ECB).
+fn encode_m4(src_label: &str, dst_label: &str, msg_hex: &str) -> Vec<u8> {
+    let mut v = b"00".to_vec(); // Source mode: ECB
+    v.extend_from_slice(b"00"); // Dest mode: ECB
+    v.push(b'1'); // Input format: hex
+    v.push(b'1'); // Output format: hex
+    v.extend_from_slice(b"00B"); // Src key type 3H (consumed)
+    v.extend_from_slice(src_label.as_bytes());
+    v.extend_from_slice(b"00B"); // Dst key type 3H (consumed)
+    v.extend_from_slice(dst_label.as_bytes());
+    let byte_count = msg_hex.len() / 2;
+    v.extend_from_slice(format!("{byte_count:04X}").as_bytes());
+    v.extend_from_slice(msg_hex.as_bytes());
+    v
+}
+
+/// Strip the 4H byte-length prefix from an M0/M2 response payload, returning the
+/// data hex.
+fn strip_m_len_prefix(payload: &[u8]) -> anyhow::Result<String> {
+    let s = String::from_utf8(payload.to_vec())?;
+    anyhow::ensure!(s.len() >= 4, "M0/M2 response shorter than 4H length prefix");
+    Ok(s[4..].to_string())
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn intl_encrypt_m0_m2_m4_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "intl_encrypt_m0_m2_m4_differential: grounding crypto=apc \
+         wire=diff-xprov(TDES-ECB; M0 vs oracle + M2/M4 round-trips; length-randomised)"
+    );
+
+    use aws_sdk_paymentcryptographydata::types::{
+        EncryptionDecryptionAttributes, EncryptionMode, SymmetricEncryptionAttributes,
+    };
+
+    let (cpc, data) = aws_clients().await;
+    let dek_modes = || KeyModesOfUse::builder().no_restrictions(true).build();
+    let specs = [
+        KeySpec {
+            role: "DEK",
+            wire_label: INTL_DEK_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31D0SymmetricDataEncryptionKey,
+            modes: dek_modes(),
+        },
+        KeySpec {
+            role: "DEK_DST",
+            wire_label: INTL_DEK_DST_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31D0SymmetricDataEncryptionKey,
+            modes: dek_modes(),
+        },
+    ];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let dek_arn = keys.arn("DEK").to_string();
+    let dek_dst_arn = keys.arn("DEK_DST").to_string();
+    let dek_label = keys.wire_label("DEK").to_string();
+    let dek_dst_label = keys.wire_label("DEK_DST").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let m0 = registry.get(b"M0").expect("M0 registered");
+    let m2 = registry.get(b"M2").expect("M2 registered");
+    let m4 = registry.get(b"M4").expect("M4 registered");
+
+    const LABEL: &str = "intl_encrypt_m0_m2_m4";
+    let run = cases_to_run();
+    eprintln!(
+        "intl_encrypt_m0_m2_m4_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let ecb = || -> anyhow::Result<SymmetricEncryptionAttributes> {
+        Ok(SymmetricEncryptionAttributes::builder()
+            .mode(EncryptionMode::Ecb)
+            .build()?)
+    };
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        // TDES-ECB: whole 8-byte blocks. Edge-biased over 1..4 blocks.
+        let blocks = edge_biased(&mut rng, 1, 4, &[1, 2, 4]);
+        let plain_hex = gen_hex_message(&mut rng, blocks * 8);
+
+        // 1) M0 encrypt via proxy.
+        let m0_wire = encode_m0_m2(&dek_label, &plain_hex);
+        let proxy_m0 = m0.handle(b"M0", &m0_wire, &state).await;
+        if &proxy_m0.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("intl_encrypt_m0_m2_m4_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} M0 error_code={} (blocks={blocks})",
+                String::from_utf8_lossy(&proxy_m0.error_code),
+            ));
+            break;
+        }
+        let proxy_cipher = strip_m_len_prefix(&proxy_m0.payload)?;
+
+        // 2) Oracle: APC encrypt_data ECB with the same key + plaintext.
+        let oracle_cipher = data
+            .encrypt_data()
+            .key_identifier(&dek_arn)
+            .plain_text(&plain_hex)
+            .encryption_attributes(EncryptionDecryptionAttributes::Symmetric(ecb()?))
+            .send()
+            .await?
+            .cipher_text()
+            .to_string();
+
+        if !proxy_cipher.eq_ignore_ascii_case(&oracle_cipher) {
+            eprintln!(
+                "{}",
+                replay_hint("intl_encrypt_m0_m2_m4_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} M0 differential mismatch: proxy={proxy_cipher} \
+                 oracle={oracle_cipher} plain={plain_hex}"
+            ));
+            break;
+        }
+
+        // 3) M2 round-trip: the proxy's own M2 must decrypt M0's ciphertext back
+        //    to the original plaintext.
+        let m2_wire = encode_m0_m2(&dek_label, &proxy_cipher);
+        let proxy_m2 = m2.handle(b"M2", &m2_wire, &state).await;
+        if &proxy_m2.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("intl_encrypt_m0_m2_m4_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} M2 error_code={} on proxy M0 ciphertext",
+                String::from_utf8_lossy(&proxy_m2.error_code),
+            ));
+            break;
+        }
+        let proxy_plain = strip_m_len_prefix(&proxy_m2.payload)?;
+        if !proxy_plain.eq_ignore_ascii_case(&plain_hex) {
+            eprintln!(
+                "{}",
+                replay_hint("intl_encrypt_m0_m2_m4_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} M2 round-trip mismatch: proxy={proxy_plain} expected={plain_hex}"
+            ));
+            break;
+        }
+
+        // 4) M4 translate the M0 ciphertext src→dst via proxy; a direct APC
+        //    decrypt under the dst key must recover the original plaintext.
+        let m4_wire = encode_m4(&dek_label, &dek_dst_label, &proxy_cipher);
+        let proxy_m4 = m4.handle(b"M4", &m4_wire, &state).await;
+        if &proxy_m4.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("intl_encrypt_m0_m2_m4_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} M4 error_code={} translating M0 ciphertext",
+                String::from_utf8_lossy(&proxy_m4.error_code),
+            ));
+            break;
+        }
+        let dst_cipher = strip_m_len_prefix(&proxy_m4.payload)?;
+        let recovered = data
+            .decrypt_data()
+            .key_identifier(&dek_dst_arn)
+            .cipher_text(&dst_cipher)
+            .decryption_attributes(EncryptionDecryptionAttributes::Symmetric(ecb()?))
+            .send()
+            .await?
+            .plain_text()
+            .to_string();
+        if !recovered.eq_ignore_ascii_case(&plain_hex) {
+            eprintln!(
+                "{}",
+                replay_hint("intl_encrypt_m0_m2_m4_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} M4 translate mismatch: dst-decrypt={recovered} expected={plain_hex}"
+            ));
+            break;
+        }
+
+        eprintln!("case={case_idx:02} OK blocks={blocks} cipher={proxy_cipher} m4=ok");
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
