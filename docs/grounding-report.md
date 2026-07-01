@@ -5,7 +5,28 @@
 
 Evidence for *why* each handler behaves as it does and *how* it was verified. Generated from `Handler::grounding()` — do not edit by hand. Grounding labels: wire `vec-thru` > `diff-xprov` > `cited` > `none`; crypto `vec` > `2impl` > `apc` > `none`.
 
-**Coverage:** 10 of 26 handlers carry grounding; 16 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
+**Coverage:** 14 of 26 handlers carry grounding; 12 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
+
+## `AQ`, `BA`, `BC`, `BE`, `BK`, `CG`, `DE`, `DG`, `EE`, `EG`, `FW`, `JC`, `JE`, `JG`, `LE`, `LG`, `LO`, `NG`, `EM`, `EU`, `EW`, `EY`, `GM`, `A0`, `A4`, `A6`, `A8`, `AA`, `AC`, `AE`, `AG`, `AK`, `AM`, `AS`, `AU`, `AW`, `BI`, `B0`, `B8`, `BG`, `BU`, `BW`, `BS`, `BY`, `CS`, `DW`, `DY`, `FA`, `FC`, `FE`, `FG`, `FK`, `GC`, `GE`, `GG`, `GK`, `GY`, `HA`, `HC`, `HY`, `IA`, `J6`, `J8`, `JK`, `K8`, `KA`, `KC`, `KG`, `KI`, `L0`, `LU`, `LW`, `MG`, `MI`, `N0`, `NC`, `NI`, `NO`, `Q0`, `Q6`, `Q8`, `QH`, `RA`, `SE`, `TG`, `TY`, `UI`, `VW`, `VY`, `WC`, `WQ`, `WW`, `WY`
+
+- **PIN operations return 68 (AQ, BA, BC, BE, BK, CG, DE, DG, EE, EG, FW, JC, JE, JG, LE, LG, LO, NG).**
+  - wire `none` · crypto `none` · gated (68): no APC equivalent — RSA/LMK/clear-PIN paths
+  - Each needs an APC path that does not exist: RSA-encrypted PIN decrypt, LMK-encrypted PIN I/O, decrypt-and-compare verification, or clear-PIN input/output (rejected under PCI PIN). APC PinVerificationAttributes is IBM3624/VisaPVV only and has no LMK concept.
+- **Encrypt/hash operations return 68 (EM, EU, EW, EY, GM).**
+  - wire `none` · crypto `none` · gated (68): no APC op — key-block conv / RSA sig / hash
+  - Key-block format conversion, RSA signature generate/verify, and generic data hashing have no corresponding APC data-plane operation.
+- **Key-management operations return 68 (A0/A4/A6/A8/AA/AC/AE/AG/AK/AM/AS/AU/AW/BI/B0/B8/BG/BU/BW/BS/BY/CS/DW/DY/FA/FC/FE/FG/FK/GC/GE/GG/GK/GY/HA/HC/HY/IA/J6/J8/JK/K8/KA/KC/KG/KI/L0/LU/LW/MG/MI).**
+  - wire `none` · crypto `none` · gated (68): key management is control-plane / LMK — out of proxy scope
+  - These generate, import, export, translate, or manage keys under an LMK, or compute key check values / derive card-unique keys. APC keys are provisioned externally through the control plane, not minted or wrapped via this transaction proxy, so none map to a data-plane call.
+- **Administrative/diagnostic operations return 68 (N0, NC, NI, NO, Q0, Q6, Q8, QH, RA, SE, TG, TY, UI, VW, VY, WC, WQ, WW, WY).**
+  - wire `none` · crypto `none` · gated (68): admin/diagnostic — no APC data-plane equivalent
+  - Random-value generation, host/connectivity queries, and vendor-specific admin/diagnostic commands have no APC data-plane equivalent.
+
+## `B2`
+
+- **B2 is a heartbeat/echo: returns success with an empty payload and makes no APC call.**
+  - wire `cited` · crypto `none` · manual: PUGD0537-004 B2 — echo/heartbeat, empty success response
+  - PUGD0537-004 B2 (echo). No cryptography and no key material are involved, so the proxy answers locally — host health checks succeed without a data-plane round-trip. Nothing to differentially verify against APC.
 
 ## `C2`, `C4`, `M6`, `M8`
 
@@ -24,6 +45,12 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 - **G0 (BDK DUKPT translate) and BQ (Translate PIN Algorithm) return Unsupported (68).**
   - wire `none` · crypto `none` · gated (68): G0 needs DUKPT validation; BQ has no APC equivalent
   - G0 carries optional source/destination KSNs needing DUKPT validation against APC; BQ is the proprietary Visa→Racal LMK-PIN algorithm with no APC equivalent (PUGD0537-004 p.294). Gated rather than parsed from an unverified layout.
+
+## `CE`, `GA`
+
+- **GA (derive PIN, Diebold method) and CE (generate Diebold PIN offset) return Unsupported (68).**
+  - wire `none` · crypto `none` · gated (68): no APC equivalent — Diebold user-storage conversion table
+  - The Diebold method is not an IBM 3624 variant: instead of a DES encrypt-and-decimalize of the transformed account number, the HSM indexes a randomizing conversion table loaded into its user storage, and the derived PIN depends entirely on that table's contents. APC exposes no user-storage table and no generation attribute that reproduces a Diebold lookup, so it cannot be modeled. Mapping onto Ibm3624NaturalPin/Ibm3624PinOffset would silently produce a DIFFERENT PIN — a correctness failure, not a missing feature — so we reject rather than emit an incorrect APC call. Migration: re-issue affected PINs under IBM 3624 (EE/DE) or Visa PVV (DG/FW).
 
 ## `CK`, `CM`, `CO`, `CQ`
 
@@ -45,6 +72,12 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 - **NY (Mastercard CVC3) and RY (Amex CSC) return Unsupported (68).**
   - wire `none` · crypto `none` · gated (68): no single-call APC equivalent; see handler doc
   - NY's NZ response returns two values (IVCVC3 + CVC3) and RY validates 3 CSC lengths at once / includes AEVV — neither reproducible as APC's single generate/verify_card_validation_data call (PUGD0537-004 p.493 / p.252,316).
+
+## `ECHO`
+
+- **Futurex Excrypt ECHO is a connectivity heartbeat: returns an empty success response, makes no APC call.**
+  - wire `cited` · crypto `none` · manual: Futurex HSM Reference Manual — ECHO returns empty success
+  - Futurex HSM Reference Manual — ECHO confirms the HSM connection is alive. No cryptography or key material is involved, so the proxy answers locally. Nothing to differentially verify against APC.
 
 ## `GO`, `GQ`, `GS`, `GU`
 
@@ -101,12 +134,8 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 
 These handlers have no `grounding()` yet — the open documentation/testing gap. Grounding them is the ongoing work (documentation + test added together).
 
-- `AQ`, `BA`, `BC`, `BE`, `BK`, `CG`, `DE`, `DG`, `EE`, `EG`, `FW`, `JC`, `JE`, `JG`, `LE`, `LG`, `LO`, `NG`, `EM`, `EU`, `EW`, `EY`, `GM`, `A0`, `A4`, `A6`, `A8`, `AA`, `AC`, `AE`, `AG`, `AK`, `AM`, `AS`, `AU`, `AW`, `BI`, `B0`, `B8`, `BG`, `BU`, `BW`, `BS`, `BY`, `CS`, `DW`, `DY`, `FA`, `FC`, `FE`, `FG`, `FK`, `GC`, `GE`, `GG`, `GK`, `GY`, `HA`, `HC`, `HY`, `IA`, `J6`, `J8`, `JK`, `K8`, `KA`, `KC`, `KG`, `KI`, `L0`, `LU`, `LW`, `MG`, `MI`, `N0`, `NC`, `NI`, `NO`, `Q0`, `Q6`, `Q8`, `QH`, `RA`, `SE`, `TG`, `TY`, `UI`, `VW`, `VY`, `WC`, `WQ`, `WW`, `WY`
-- `B2`
-- `CE`, `GA`
 - `CU`, `DU`
 - `DA`, `DC`, `EA`, `EC`
-- `ECHO`
 - `JA`
 - `JS`
 - `JU`, `KU`, `KY`
