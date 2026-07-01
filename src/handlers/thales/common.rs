@@ -25,7 +25,7 @@ pub fn emv_pad(data: &[u8]) -> Vec<u8> {
 
 /// Map a Thales 2-digit PIN Block Format Code to the APC `PinBlockFormatForPinData`.
 ///
-/// Source: PUGD0537-004 ("Only these Thales PIN Block formats are supported"):
+/// Source: PUGD0537-004 Rev A ("Only these Thales PIN Block formats are supported"):
 ///   '01' = ISO 9564-1 & ANSI X9.8 Format 0  -> IsoFormat0
 ///   '05' = ISO 9564-1 Format 1              -> IsoFormat1
 ///   '47' = ISO 9564-1 & ANSI X9.8 Format 3  -> IsoFormat3
@@ -51,7 +51,7 @@ pub fn map_pin_block_format(
 
 /// EMV session-key derivation method selected by a Thales KQ/KW Scheme ID.
 ///
-/// Mapping verified against PUGD0537-004 Core Host Commands (KQ p.468, KW p.471)
+/// Mapping verified against PUGD0537-004 Rev A Core Host Commands (KQ p.468, KW p.471)
 /// and confirmed end-to-end against live AWS Payment Cryptography: the session
 /// method materially changes the derived key, so an incorrect choice causes APC
 /// to reject a valid cryptogram (error 01).

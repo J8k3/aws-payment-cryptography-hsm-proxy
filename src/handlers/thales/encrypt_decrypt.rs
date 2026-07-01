@@ -9,8 +9,8 @@ use crate::handlers::{AppState, Handler, HandlerResult};
 
 /// payShield legacy 64-bit block encryption/decryption.
 ///
-/// HE/HF — Encrypt Data Block → APC encrypt_data (TDES-ECB)
-/// HG/HH — Decrypt Data Block → APC decrypt_data (TDES-ECB)
+/// HE/HF — Encrypt Data Block → APC encrypt_data (TDES-ECB)  (PUGD0538-003 p.107)
+/// HG/HH — Decrypt Data Block → APC decrypt_data (TDES-ECB)  (PUGD0538-003 p.108)
 ///
 /// Both commands operate on a single 64-bit block (16H hex). The TAK key is under
 /// LMK pair 16-17, variant 0. payShield treats TAK as a MAC-class key; in APC the
@@ -42,7 +42,7 @@ impl Handler for EncryptDecryptHandler {
         use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
         &[Evidence {
             decision: "HE encrypts / HG decrypts a single 64-bit block (16H) under a data key (TR31_D0), TDES-ECB. Wire: key then 16H data.",
-            because: "PUGD0538. Verified live: proxy HE ciphertext == APC encrypt_data (TDES-ECB, deterministic), and the HE→HG round-trip recovers the plaintext, over random plus all-zero / all-F blocks. Operational note (verified live): APC rejects encrypt+decrypt alone for a D0 key — the mapped key must use NoRestrictions (or encrypt+decrypt+wrap+unwrap) for both HE and HG to work.",
+            because: "PUGD0538-003 p.107 (HE) / p.108 (HG). Verified live: proxy HE ciphertext == APC encrypt_data (TDES-ECB, deterministic), and the HE→HG round-trip recovers the plaintext, over random plus all-zero / all-F blocks. Operational note (verified live): APC rejects encrypt+decrypt alone for a D0 key — the mapped key must use NoRestrictions (or encrypt+decrypt+wrap+unwrap) for both HE and HG to work.",
             wire: WireGrounding::DiffXprov,
             crypto: CryptoGrounding::Apc,
             proof: Proof::LiveTest("encrypt_decrypt_he_hg_differential"),

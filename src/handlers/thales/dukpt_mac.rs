@@ -9,7 +9,8 @@ use crate::key_map::KeyDescriptor;
 
 /// payShield GW — Generate or Verify MAC (3DES/AES DUKPT).
 ///
-/// Wire format per PUGD0538-003 International Host Commands:
+/// Wire format per PUGD0537-004 Rev A (Core Host Commands) p.361 —
+/// "Generate/Verify a MAC (3DES & AES DUKPT)":
 ///
 ///   Mode Flag     1N  '0'=generate, '1'=verify
 ///   Input Format  1N  '1'=hex-encoded (only '1' supported)
@@ -154,7 +155,7 @@ impl Handler for DukptMacHandler {
         &[
             Evidence {
                 decision: "GW generate/verify a DUKPT MAC (Alg1/Alg3/CMAC, MAC size '0'=4 bytes / '1'=2 bytes). Half MACs (size '1') verify by regenerating the full MAC and comparing the leading bytes, because APC verify_mac only accepts an 8H or 16H MAC.",
-                because: "PUGD0538. Verified live across every algorithm×size combo: proxy MAC == APC generate_mac (Dukpt Alg1/Alg3/CMAC, 3DES), plus the verify round-trip. The live differential caught a bug: GW verify of a 2-byte half MAC was passed straight to APC verify_mac, which rejects it ('valid length of 8 or 16') — fixed with the regenerate-and-compare-prefix path (mirrors M6 CMAC). APC constraints (verified live): DUKPT MAC needs message ≥8 bytes; the CBC-MAC variants (Alg1/Alg3) require a block-aligned (×8 byte) message — APC does not pad — while CMAC accepts any length.",
+                because: "PUGD0537-004 Rev A p.361 (GW). Verified live across every algorithm×size combo: proxy MAC == APC generate_mac (Dukpt Alg1/Alg3/CMAC, 3DES), plus the verify round-trip. The live differential caught a bug: GW verify of a 2-byte half MAC was passed straight to APC verify_mac, which rejects it ('valid length of 8 or 16') — fixed with the regenerate-and-compare-prefix path (mirrors M6 CMAC). APC constraints (verified live): DUKPT MAC needs message ≥8 bytes; the CBC-MAC variants (Alg1/Alg3) require a block-aligned (×8 byte) message — APC does not pad — while CMAC accepts any length.",
                 wire: WireGrounding::DiffXprov,
                 crypto: CryptoGrounding::Apc,
                 proof: Proof::LiveTest("dukpt_mac_gw_differential"),
@@ -164,7 +165,7 @@ impl Handler for DukptMacHandler {
                 because: "payShield GW carries no direction field, so the variant is a documented assumption. The differential proves proxy == APC under Request; it does NOT verify Request is what a real payShield derives. Host-response MACs (Response variant) are a known gap.",
                 wire: WireGrounding::Cited,
                 crypto: CryptoGrounding::Apc,
-                proof: Proof::ManualCite("PUGD0538; direction not in the wire — assumption, not HSM-verified"),
+                proof: Proof::ManualCite("PUGD0537-004 Rev A p.361; direction not in the wire — assumption, not HSM-verified"),
             },
         ]
     }

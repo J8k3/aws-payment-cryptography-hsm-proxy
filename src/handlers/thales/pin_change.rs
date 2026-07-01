@@ -17,7 +17,7 @@ use crate::key_map::KeyDescriptor;
 /// matches is the new verification datum generated. On mismatch the response is
 /// error 01 and no generation data is returned.
 ///
-/// DU field layout (PUGD0537-004 p.255 — AUTHORITATIVE):
+/// DU field layout (PUGD0537-004 Rev A p.255 — AUTHORITATIVE):
 ///   ZPK:              16H | 'U'+32H | 'T'+48H  (parse_legacy_key; P0 key)
 ///   PVK:              16H | 'U'+32H | 'T'+48H  (parse_legacy_key; V1 IBM key)
 ///   Max PIN Length:    2N  consumed
@@ -34,7 +34,7 @@ use crate::key_map::KeyDescriptor;
 ///   [2H]  error code
 ///   [12H] new IBM PIN offset (F-padded)
 ///
-/// CU field layout (PUGD0537-004 p.259 — AUTHORITATIVE):
+/// CU field layout (PUGD0537-004 Rev A p.259 — AUTHORITATIVE):
 ///   ZPK:              16H | 'U'+32H | 'T'+48H  (parse_legacy_key; P0 key)
 ///   PVK-Pair:         32H | 'U'+32H | 'T'+48H  (parse_key_32; V2 Visa double-length key)
 ///   Max PIN Length:    2N  consumed

@@ -11,7 +11,7 @@ use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 use aws_sdk_paymentcryptographydata::types::{DukptDerivationType, PinBlockFormatForPinData};
 
-/// payShield 3DES & AES DUKPT PIN verification (PUGD0537-004 p.349/352/355/358).
+/// payShield 3DES & AES DUKPT PIN verification (PUGD0537-004 Rev A p.349/352/355/358).
 ///
 /// GO — Verify PIN, IBM 3624 method  → APC verify_pin_data (Ibm3624PinVerification)
 /// GQ — Verify PIN, Visa PVV method  → 68 (gated; APC-side limitation, see below)
@@ -188,7 +188,7 @@ impl Handler for DukptPinVerifyAesHandler {
         &[
             Evidence {
                 decision: "GO (IBM3624 DUKPT PIN verify) wire: Mode + BDK + PVK + KSN-descriptor(3H)+KSN + PIN block + fmt code + check len + PAN + decim table + PIN validation data + offset(12H, F-padded). The 12H offset's F-padding is STRIPPED before APC.",
-                because: "PUGD0537-004 p.349. Verified live: proxy GO verdict == APC verify_pin_data verdict (IBM3624 + 3DES DUKPT) for valid PINs across randomized PAN/KSN. The live differential CAUGHT a real bug: APC's pin_offset is ^[0-9]+$, so the wire's F-padded offset was rejected (GO returned 41 for every valid PIN) until the strip was added.",
+                because: "PUGD0537-004 Rev A p.349. Verified live: proxy GO verdict == APC verify_pin_data verdict (IBM3624 + 3DES DUKPT) for valid PINs across randomized PAN/KSN. The live differential CAUGHT a real bug: APC's pin_offset is ^[0-9]+$, so the wire's F-padded offset was rejected (GO returned 41 for every valid PIN) until the strip was added.",
                 wire: WireGrounding::DiffXprov,
                 crypto: CryptoGrounding::Apc,
                 proof: Proof::LiveTest("dukpt_pin_verify_go_differential"),
@@ -202,7 +202,7 @@ impl Handler for DukptPinVerifyAesHandler {
             },
             Evidence {
                 decision: "GS (Diebold) and GU (Encrypted PIN) DUKPT verify return Unsupported (68).",
-                because: "Diebold indexes a conversion table in HSM user storage and GU compares against an LMK-encrypted reference PIN — neither has an APC equivalent (APC verify_pin_data does IBM3624 offset / Visa PVV only). PUGD0537-004 p.355/358.",
+                because: "Diebold indexes a conversion table in HSM user storage and GU compares against an LMK-encrypted reference PIN — neither has an APC equivalent (APC verify_pin_data does IBM3624 offset / Visa PVV only). PUGD0537-004 Rev A p.355/358.",
                 wire: WireGrounding::None,
                 crypto: CryptoGrounding::None,
                 proof: Proof::Gated("no APC equivalent (Diebold table / LMK-compare)"),

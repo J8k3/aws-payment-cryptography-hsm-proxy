@@ -25,26 +25,26 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 ## `B2`
 
 - **B2 is a heartbeat/echo: returns success with an empty payload and makes no APC call.**
-  - wire `cited` · crypto `none` · manual: PUGD0537-004 B2 — echo/heartbeat, empty success response
-  - PUGD0537-004 B2 (echo). No cryptography and no key material are involved, so the proxy answers locally — host health checks succeed without a data-plane round-trip. Nothing to differentially verify against APC.
+  - wire `cited` · crypto `none` · manual: PUGD0537-004 Rev A p.433 — B2 Echo Command, empty success response
+  - PUGD0537-004 Rev A p.433 (B2, "Echo Command"). No cryptography and no key material are involved, so the proxy answers locally — host health checks succeed without a data-plane round-trip. Nothing to differentially verify against APC.
 
 ## `C2`, `C4`, `M6`, `M8`
 
 - **M6/M8 wire: Mode+InputFormat+MACSize+MACAlgo+PadMethod(5×1N)+KeyType(3H) before the key. MAC size '0'=4 bytes, '1'=8 bytes.**
   - wire `diff-xprov` · crypto `apc` · live test `mac_m6_m8_differential`
-  - PUGD0537-004 p.363/368. Verified live: proxy M6 MAC == APC generate_mac (ISO9797 Alg3) over randomized message lengths, plus an M8 verify round-trip. Note: APC returns a 4-byte MAC for ISO9797_ALGORITHM3, so size '0' is the faithful case (verified live).
+  - PUGD0537-004 Rev A p.365/368. Verified live: proxy M6 MAC == APC generate_mac (ISO9797 Alg3) over randomized message lengths, plus an M8 verify round-trip. Note: APC returns a 4-byte MAC for ISO9797_ALGORITHM3, so size '0' is the faithful case (verified live).
 - **C2/C4 wire: BlockNumber+KeyType+MACMode+MessageType(4×1N) before the key — a DISTINCT header from M6. MAC generation Mode selects the algorithm: '0'=X9.9→ISO9797 Alg1, '1'=X9.19→ISO9797 Alg3.**
   - wire `diff-xprov` · crypto `apc` · live test `mac_c2_c4_differential`
-  - PUGD0537-004 p.583. Verified live for both algorithms: proxy C2 MAC == APC generate_mac (Alg1 via M1 key, Alg3 via M3 key) over randomized mode + message length, plus a C4 verify round-trip.
+  - PUGD0537-004 Rev A p.583 (C2) / p.587 (C4). Verified live for both algorithms: proxy C2 MAC == APC generate_mac (Alg1 via M1 key, Alg3 via M3 key) over randomized mode + message length, plus a C4 verify round-trip.
 
 ## `CA`, `CC`, `BQ`, `G0`
 
 - **CA/CC wire: src key, dst key, MaxPINLen(2N), 16H source PIN block, src + dst PIN-block-format codes(2N each: 01=ISO0, 47=ISO3), PAN(12N). Format codes are the standard Thales 2N values, NOT a 00/01/03/04 scheme.**
   - wire `diff-xprov` · crypto `apc` · live test `pin_translate_ca_cc_differential`
-  - PUGD0537-004 p.282/285. Verified live across all src/dst format combos (ISO0/ISO3) and both CA/CC: a valid block is minted via generate_pin_data, translated through the proxy, then BOTH proxy output and original input are canonicalized to deterministic ISO Format 0 under a shared key and compared — immune to ISO-3's random fill.
+  - PUGD0537-004 Rev A p.282/285. Verified live across all src/dst format combos (ISO0/ISO3) and both CA/CC: a valid block is minted via generate_pin_data, translated through the proxy, then BOTH proxy output and original input are canonicalized to deterministic ISO Format 0 under a shared key and compared — immune to ISO-3's random fill.
 - **G0 (BDK DUKPT translate) and BQ (Translate PIN Algorithm) return Unsupported (68).**
   - wire `none` · crypto `none` · gated (68): G0 needs DUKPT validation; BQ has no APC equivalent
-  - G0 carries optional source/destination KSNs needing DUKPT validation against APC; BQ is the proprietary Visa→Racal LMK-PIN algorithm with no APC equivalent (PUGD0537-004 p.294). Gated rather than parsed from an unverified layout.
+  - G0 carries optional source/destination KSNs needing DUKPT validation against APC; BQ is the proprietary Visa→Racal LMK-PIN algorithm with no APC equivalent (PUGD0537-004 Rev A p.294). Gated rather than parsed from an unverified layout.
 
 ## `CE`, `GA`
 
@@ -56,7 +56,7 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 
 - **CK verifies a DUKPT-encrypted PIN against an IBM 3624 offset (original single-length DUKPT, Tdes2Key). The 12H wire offset is F-padded; the padding is stripped before the APC call.**
   - wire `diff-xprov` · crypto `apc` · live test `dukpt_pin_verify_ck_differential`
-  - PUGD0538. Verified live: proxy CK verdict == APC verify_pin_data verdict (IBM3624 + DUKPT) for valid PINs across randomized PAN/KSN. CK had the same offset F-padding bug as GO (APC pin_offset is ^[0-9]+$) — fixed the same way.
+  - PUGD0538-003 p.112 (CK). Verified live: proxy CK verdict == APC verify_pin_data verdict (IBM3624 + DUKPT) for valid PINs across randomized PAN/KSN. CK had the same offset F-padding bug as GO (APC pin_offset is ^[0-9]+$) — fixed the same way.
 - **CM (Visa PVV DUKPT verify) returns Unsupported (68).**
   - wire `none` · crypto `none` · gated (68): same APC single-call DUKPT+VisaPin 500 as GQ
   - CM makes the byte-identical verify_pin_data + DukptAttributes + VisaPin call as GQ, which APC answers with InternalServerException (verified live for GQ, us-east-1 + us-west-2). Gated on that basis; the CM wire parser was removed. Workaround: translate the DUKPT PIN block to a ZPK, then verify the PVV non-DUKPT.
@@ -68,16 +68,16 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 
 - **CW/CY wire: CVK(32H) then a VARIABLE-LENGTH ';'-terminated PAN, then expiry(4N) + service code(3N) — not a fixed-16 PAN.**
   - wire `diff-xprov` · crypto `apc` · live test `cvv_cw_cy_differential`
-  - PUGD0537-004 p.250 (CW) / p.303 (CY). A fixed-16 parse mis-reads Amex(15)/19-digit PANs. Verified live: proxy CVV == APC generate_card_validation_data across randomized PAN lengths (incl. 15) and service codes, plus a CY round-trip.
+  - PUGD0537-004 Rev A p.250 (CW) / p.303 (CY). A fixed-16 parse mis-reads Amex(15)/19-digit PANs. Verified live: proxy CVV == APC generate_card_validation_data across randomized PAN lengths (incl. 15) and service codes, plus a CY round-trip.
 - **NY (Mastercard CVC3) and RY (Amex CSC) return Unsupported (68).**
   - wire `none` · crypto `none` · gated (68): no single-call APC equivalent; see handler doc
-  - NY's NZ response returns two values (IVCVC3 + CVC3) and RY validates 3 CSC lengths at once / includes AEVV — neither reproducible as APC's single generate/verify_card_validation_data call (PUGD0537-004 p.493 / p.252,316).
+  - NY's NZ response returns two values (IVCVC3 + CVC3) and RY validates 3 CSC lengths at once / includes AEVV — neither reproducible as APC's single generate/verify_card_validation_data call (PUGD0537-004 Rev A p.493 (NY) / p.315 (RY)).
 
 ## `DA`, `DC`, `EA`, `EC`
 
 - **DA/EA verify an IBM 3624 PIN and DC/EC a Visa PVV, all via APC verify_pin_data with no DUKPT. DA/DC carry a TPK and EA/EC a ZPK; both are P0 encryption keys in APC, so each pair shares one code path. The IBM 12H offset is F-padded on the wire and trimmed to APC's ^[0-9]+$ before the call (same handling as GO/CK).**
   - wire `diff-xprov` · crypto `apc` · live test `pin_verify_non_dukpt_differential`
-  - PUGD0537-004 p.269/277/279/281. Verified live: the proxy's verify verdict matches a direct APC verify_pin_data verdict across randomized PAN, both methods, and all four command codes. A valid PIN is minted via generate_pin_data (IBM3624 natural PIN offset 0, or Visa PVV read back from PinData::VerificationValue); a wrong field offset would feed APC a different block, which it rejects, so proxy and oracle verdicts diverge.
+  - PUGD0537-004 Rev A p.263 (DA) / p.273 (DC) / p.266 (EA) / p.275 (EC). Verified live: the proxy's verify verdict matches a direct APC verify_pin_data verdict across randomized PAN, both methods, and all four command codes. A valid PIN is minted via generate_pin_data (IBM3624 natural PIN offset 0, or Visa PVV read back from PinData::VerificationValue); a wrong field offset would feed APC a different block, which it rejects, so proxy and oracle verdicts diverge.
 
 ## `ECHO`
 
@@ -89,34 +89,34 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 
 - **GO (IBM3624 DUKPT PIN verify) wire: Mode + BDK + PVK + KSN-descriptor(3H)+KSN + PIN block + fmt code + check len + PAN + decim table + PIN validation data + offset(12H, F-padded). The 12H offset's F-padding is STRIPPED before APC.**
   - wire `diff-xprov` · crypto `apc` · live test `dukpt_pin_verify_go_differential`
-  - PUGD0537-004 p.349. Verified live: proxy GO verdict == APC verify_pin_data verdict (IBM3624 + 3DES DUKPT) for valid PINs across randomized PAN/KSN. The live differential CAUGHT a real bug: APC's pin_offset is ^[0-9]+$, so the wire's F-padded offset was rejected (GO returned 41 for every valid PIN) until the strip was added.
+  - PUGD0537-004 Rev A p.349. Verified live: proxy GO verdict == APC verify_pin_data verdict (IBM3624 + 3DES DUKPT) for valid PINs across randomized PAN/KSN. The live differential CAUGHT a real bug: APC's pin_offset is ^[0-9]+$, so the wire's F-padded offset was rejected (GO returned 41 for every valid PIN) until the strip was added.
 - **GQ (Visa PVV DUKPT verify) returns Unsupported (68).**
   - wire `none` · crypto `none` · gated (68): APC single-call DUKPT+VisaPin verify returns 500; see handler doc
   - APC single-call verify_pin_data + DukptAttributes + VisaPin returns InternalServerException (500), verified live us-east-1 + us-west-2 on schema-valid inputs. Isolated: the IBM3624 sibling (GO) works single-call, non-DUKPT Visa PVV works, and a two-call translate-then-verify works. Gated honestly rather than inject an intermediate interchange key into the PIN path. Repro filed for AWS.
 - **GS (Diebold) and GU (Encrypted PIN) DUKPT verify return Unsupported (68).**
   - wire `none` · crypto `none` · gated (68): no APC equivalent (Diebold table / LMK-compare)
-  - Diebold indexes a conversion table in HSM user storage and GU compares against an LMK-encrypted reference PIN — neither has an APC equivalent (APC verify_pin_data does IBM3624 offset / Visa PVV only). PUGD0537-004 p.355/358.
+  - Diebold indexes a conversion table in HSM user storage and GU compares against an LMK-encrypted reference PIN — neither has an APC equivalent (APC verify_pin_data does IBM3624 offset / Visa PVV only). PUGD0537-004 Rev A p.355/358.
 
 ## `GW`
 
 - **GW generate/verify a DUKPT MAC (Alg1/Alg3/CMAC, MAC size '0'=4 bytes / '1'=2 bytes). Half MACs (size '1') verify by regenerating the full MAC and comparing the leading bytes, because APC verify_mac only accepts an 8H or 16H MAC.**
   - wire `diff-xprov` · crypto `apc` · live test `dukpt_mac_gw_differential`
-  - PUGD0538. Verified live across every algorithm×size combo: proxy MAC == APC generate_mac (Dukpt Alg1/Alg3/CMAC, 3DES), plus the verify round-trip. The live differential caught a bug: GW verify of a 2-byte half MAC was passed straight to APC verify_mac, which rejects it ('valid length of 8 or 16') — fixed with the regenerate-and-compare-prefix path (mirrors M6 CMAC). APC constraints (verified live): DUKPT MAC needs message ≥8 bytes; the CBC-MAC variants (Alg1/Alg3) require a block-aligned (×8 byte) message — APC does not pad — while CMAC accepts any length.
+  - PUGD0537-004 Rev A p.361 (GW). Verified live across every algorithm×size combo: proxy MAC == APC generate_mac (Dukpt Alg1/Alg3/CMAC, 3DES), plus the verify round-trip. The live differential caught a bug: GW verify of a 2-byte half MAC was passed straight to APC verify_mac, which rejects it ('valid length of 8 or 16') — fixed with the regenerate-and-compare-prefix path (mirrors M6 CMAC). APC constraints (verified live): DUKPT MAC needs message ≥8 bytes; the CBC-MAC variants (Alg1/Alg3) require a block-aligned (×8 byte) message — APC does not pad — while CMAC accepts any length.
 - **The APC DukptKeyVariant is hardcoded to Request (terminal MAC direction).**
-  - wire `cited` · crypto `apc` · manual: PUGD0538; direction not in the wire — assumption, not HSM-verified
+  - wire `cited` · crypto `apc` · manual: PUGD0537-004 Rev A p.361; direction not in the wire — assumption, not HSM-verified
   - payShield GW carries no direction field, so the variant is a documented assumption. The differential proves proxy == APC under Request; it does NOT verify Request is what a real payShield derives. Host-response MACs (Response variant) are a known gap.
 
 ## `HE`, `HG`
 
 - **HE encrypts / HG decrypts a single 64-bit block (16H) under a data key (TR31_D0), TDES-ECB. Wire: key then 16H data.**
   - wire `diff-xprov` · crypto `apc` · live test `encrypt_decrypt_he_hg_differential`
-  - PUGD0538. Verified live: proxy HE ciphertext == APC encrypt_data (TDES-ECB, deterministic), and the HE→HG round-trip recovers the plaintext, over random plus all-zero / all-F blocks. Operational note (verified live): APC rejects encrypt+decrypt alone for a D0 key — the mapped key must use NoRestrictions (or encrypt+decrypt+wrap+unwrap) for both HE and HG to work.
+  - PUGD0538-003 p.107 (HE) / p.108 (HG). Verified live: proxy HE ciphertext == APC encrypt_data (TDES-ECB, deterministic), and the HE→HG round-trip recovers the plaintext, over random plus all-zero / all-F blocks. Operational note (verified live): APC rejects encrypt+decrypt alone for a D0 key — the mapped key must use NoRestrictions (or encrypt+decrypt+wrap+unwrap) for both HE and HG to work.
 
 ## `K0`
 
 - **K0 decrypts EMV-encrypted counters / application data under an IMK-ENC (E1) master key. APC derives an EMV session key (Option A) from the master key + PAN/PSN + ATC, then CBC-decrypts. Wire PAN+Seq is 8B BCD (Option-A pre-format); ATC and DataLen are 2B binary; ciphertext is binary and hex-encoded before the APC call. SessionDerivationData = ATC(4H) + 12 zero hex chars.**
   - wire `diff-xprov` · crypto `apc` · live test `emv_decrypt_k0_differential`
-  - PUGD0537-004. Verified live via round-trip: APC encrypt_data (EMV-CBC, built from the same field values) mints the ciphertext, and the proxy's K0 recovers the original plaintext across randomized PAN/PSN/ATC and 1..4 cipher blocks. A wrong PAN/PSN/ATC offset derives a different session key, so the round-trip would not close.
+  - PUGD0537-004 Rev A p.490. Verified live via round-trip: APC encrypt_data (EMV-CBC, built from the same field values) mints the ciphertext, and the proxy's K0 recovers the original plaintext across randomized PAN/PSN/ATC and 1..4 cipher blocks. A wrong PAN/PSN/ATC offset derives a different session key, so the round-trip would not close.
 
 ## `LQ`, `LS`
 
@@ -137,19 +137,19 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 
 - **MA/MC ('~'-terminated) and MK/MM (3H-length-prefixed) generate/verify an ISO 9797-1 Alg1 MAC under a TAK. APC's Alg1 MAC is truncated to the 8H (4-byte) wire width.**
   - wire `diff-xprov` · crypto `apc` · live test `legacy_mac_ma_mc_mk_mm_differential`
-  - PUGD0538 pp.89-104. Verified live across both wire styles and randomized data lengths: proxy MAC == APC generate_mac (Iso9797Algorithm1), and the MC/MM verify round-trip accepts the proxy's MAC. Note: APC returns a 4-byte Alg1 MAC (verified live), so the handler's 8H truncation is a no-op — correcting an earlier comment that claimed APC returns 16H.
+  - PUGD0538-003 pp.90-104. Verified live across both wire styles and randomized data lengths: proxy MAC == APC generate_mac (Iso9797Algorithm1), and the MC/MM verify round-trip accepts the proxy's MAC. Note: APC returns a 4-byte Alg1 MAC (verified live), so the handler's 8H truncation is a no-op — correcting an earlier comment that claimed APC returns 16H.
 - **ME/MO (verify-then-re-MAC), MU/MW (mode-prefixed Alg1), MQ (ZAK Alg1), MS (Alg3 X9.19) share the same generate/verify paths but are not yet covered by a live differential.**
-  - wire `cited` · crypto `none` · manual: PUGD0538 pp.89-104; not yet live-differentialed
-  - PUGD0538 pp.89-104 — manual-cited layout and the same ISO9797 Alg1/Alg3 APC mapping as the live-verified commands; a live differential for these is the tracked next step.
+  - wire `cited` · crypto `none` · manual: PUGD0538-003 pp.90-104; not yet live-differentialed
+  - PUGD0538-003 pp.90-104 — manual-cited layout and the same ISO9797 Alg1/Alg3 APC mapping as the live-verified commands; a live differential for these is the tracked next step.
 
 ## `MY`
 
 - **MY verifies an inbound MAC under one key, then generates an outbound MAC under a second key for the same message (per-direction MAC size/algorithm). A half inbound MAC (size '1' = 2 bytes) is verified by regenerating the full MAC and comparing the leading bytes.**
   - wire `diff-xprov` · crypto `apc` · live test `mac_translate_my_differential`
-  - PUGD0537-004 p.371. Verified live (ISO9797 Alg1) across all inbound×outbound MAC-size combos: proxy outbound MAC == APC generate_mac under the outbound key. The live differential caught the same half-MAC verify bug as GW — the inbound half MAC was handed to APC verify_mac, which rejects it — fixed with the regenerate-and-compare-prefix path.
+  - PUGD0537-004 Rev A p.371. Verified live (ISO9797 Alg1) across all inbound×outbound MAC-size combos: proxy outbound MAC == APC generate_mac under the outbound key. The live differential caught the same half-MAC verify bug as GW — the inbound half MAC was handed to APC verify_mac, which rejects it — fixed with the regenerate-and-compare-prefix path.
 - **ALG3 and CMAC directions, and differing inbound/outbound algorithms, are parsed but not yet covered by a live differential (only ALG1 is).**
-  - wire `cited` · crypto `none` · manual: PUGD0537-004 p.371; ALG3/CMAC not yet live-differentialed
-  - PUGD0537-004 p.371 — same per-direction generate/verify mapping as the live-verified ALG1 path; broadening the differential is the tracked next step.
+  - wire `cited` · crypto `none` · manual: PUGD0537-004 Rev A p.371; ALG3/CMAC not yet live-differentialed
+  - PUGD0537-004 Rev A p.371 — same per-direction generate/verify mapping as the live-verified ALG1 path; broadening the differential is the tracked next step.
 
 ## Not yet grounded
 

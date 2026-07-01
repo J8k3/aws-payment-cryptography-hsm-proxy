@@ -14,7 +14,8 @@ use crate::key_map::KeyDescriptor;
 /// IMK-ENC (E1 usage). Typical use: decrypting Application Unblock Data or
 /// encrypted counters during EMV de-personalization.
 ///
-/// K0 (→ K1) wire format per PUGD0537-004:
+/// K0 (→ K1) wire format per PUGD0537-004 Rev A p.490
+/// ("Decrypt Encrypted Counters (EMV 4.x)"):
 ///   Key Type    3H ASCII    consumed (E1 — IMK-ENC)
 ///   Key         var         16H | 'U'+32H | 'T'+48H
 ///   PAN+Seq     8B binary   BCD — 12 PAN digits + 2 seq digits, right-padded 0xFF
@@ -115,7 +116,7 @@ impl Handler for EmvDecryptHandler {
                        pre-format); ATC and DataLen are 2B binary; ciphertext is binary and \
                        hex-encoded before the APC call. SessionDerivationData = ATC(4H) + 12 zero \
                        hex chars.",
-            because: "PUGD0537-004. Verified live via round-trip: APC encrypt_data (EMV-CBC, built \
+            because: "PUGD0537-004 Rev A p.490. Verified live via round-trip: APC encrypt_data (EMV-CBC, built \
                       from the same field values) mints the ciphertext, and the proxy's K0 recovers \
                       the original plaintext across randomized PAN/PSN/ATC and 1..4 cipher blocks. \
                       A wrong PAN/PSN/ATC offset derives a different session key, so the round-trip \

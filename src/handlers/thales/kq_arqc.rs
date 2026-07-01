@@ -12,7 +12,7 @@ use crate::key_map::KeyDescriptor;
 
 /// payShield KQ — Verify ARQC and optionally generate ARPC.
 ///
-/// Wire format per PUGD0537-004 p.468 (binary, not ASCII hex):
+/// Wire format per PUGD0537-004 Rev A p.468 (binary, not ASCII hex):
 ///
 ///   Mode Flag   1N ASCII  '0'=verify only
 ///                         '1'=verify + ARPC Method 1 (ARC)
@@ -100,7 +100,7 @@ fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
     if payload.len() < pos + 1 {
         return Err(ProxyError::MalformedPayload("KQ: scheme ID missing".into()));
     }
-    // All KQ schemes use EMV Option A major derivation (PUGD0537-004 p.468);
+    // All KQ schemes use EMV Option A major derivation (PUGD0537-004 Rev A p.468);
     // the Scheme ID selects the session-key method.
     let session = match payload[pos] {
         b'1' => EmvSession::Mastercard, // Option A + Mastercard proprietary SKD (M/Chip)
@@ -284,7 +284,7 @@ async fn handle_kq(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
     };
 
     // Every KQ scheme uses EMV Option A major (ICC master key) derivation
-    // (PUGD0537-004 p.468); the Scheme ID selects only the session-key method.
+    // (PUGD0537-004 Rev A p.468); the Scheme ID selects only the session-key method.
     let deriv_mode = MajorKeyDerivationMode::EmvOptionA;
 
     let session_key_attrs = match build_session_key(

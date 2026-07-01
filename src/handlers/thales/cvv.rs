@@ -137,14 +137,14 @@ impl Handler for CvvHandler {
         &[
             Evidence {
                 decision: "CW/CY wire: CVK(32H) then a VARIABLE-LENGTH ';'-terminated PAN, then expiry(4N) + service code(3N) — not a fixed-16 PAN.",
-                because: "PUGD0537-004 p.250 (CW) / p.303 (CY). A fixed-16 parse mis-reads Amex(15)/19-digit PANs. Verified live: proxy CVV == APC generate_card_validation_data across randomized PAN lengths (incl. 15) and service codes, plus a CY round-trip.",
+                because: "PUGD0537-004 Rev A p.250 (CW) / p.303 (CY). A fixed-16 parse mis-reads Amex(15)/19-digit PANs. Verified live: proxy CVV == APC generate_card_validation_data across randomized PAN lengths (incl. 15) and service codes, plus a CY round-trip.",
                 wire: WireGrounding::DiffXprov,
                 crypto: CryptoGrounding::Apc,
                 proof: Proof::LiveTest("cvv_cw_cy_differential"),
             },
             Evidence {
                 decision: "NY (Mastercard CVC3) and RY (Amex CSC) return Unsupported (68).",
-                because: "NY's NZ response returns two values (IVCVC3 + CVC3) and RY validates 3 CSC lengths at once / includes AEVV — neither reproducible as APC's single generate/verify_card_validation_data call (PUGD0537-004 p.493 / p.252,316).",
+                because: "NY's NZ response returns two values (IVCVC3 + CVC3) and RY validates 3 CSC lengths at once / includes AEVV — neither reproducible as APC's single generate/verify_card_validation_data call (PUGD0537-004 Rev A p.493 (NY) / p.315 (RY)).",
                 wire: WireGrounding::None,
                 crypto: CryptoGrounding::None,
                 proof: Proof::Gated("no single-call APC equivalent; see handler doc"),
