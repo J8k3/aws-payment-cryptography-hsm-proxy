@@ -17,6 +17,21 @@ impl Handler for EchoHandler {
         &["ECHO"]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[Evidence {
+            decision: "Futurex Excrypt ECHO is a connectivity heartbeat: returns an empty success \
+                       response, makes no APC call.",
+            because:
+                "Futurex HSM Reference Manual — ECHO confirms the HSM connection is alive. No \
+                      cryptography or key material is involved, so the proxy answers locally. \
+                      Nothing to differentially verify against APC.",
+            wire: WireGrounding::Cited,
+            crypto: CryptoGrounding::None,
+            proof: Proof::ManualCite("Futurex HSM Reference Manual — ECHO returns empty success"),
+        }]
+    }
+
     async fn handle(
         &self,
         _command_code: &[u8],

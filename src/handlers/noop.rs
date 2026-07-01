@@ -60,6 +60,57 @@ impl Handler for NotAvailableHandler {
         ]
     }
 
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        // Category-level evidence; the per-command rationale is the doc-comment on
+        // this struct (in-code, authoritative). Each category is a deliberate,
+        // reasoned gate — not an untested gap.
+        &[
+            Evidence {
+                decision: "PIN operations return 68 (AQ, BA, BC, BE, BK, CG, DE, DG, EE, EG, FW, \
+                           JC, JE, JG, LE, LG, LO, NG).",
+                because: "Each needs an APC path that does not exist: RSA-encrypted PIN decrypt, \
+                          LMK-encrypted PIN I/O, decrypt-and-compare verification, or clear-PIN \
+                          input/output (rejected under PCI PIN). APC PinVerificationAttributes is \
+                          IBM3624/VisaPVV only and has no LMK concept.",
+                wire: WireGrounding::None,
+                crypto: CryptoGrounding::None,
+                proof: Proof::Gated("no APC equivalent — RSA/LMK/clear-PIN paths"),
+            },
+            Evidence {
+                decision: "Encrypt/hash operations return 68 (EM, EU, EW, EY, GM).",
+                because: "Key-block format conversion, RSA signature generate/verify, and generic \
+                          data hashing have no corresponding APC data-plane operation.",
+                wire: WireGrounding::None,
+                crypto: CryptoGrounding::None,
+                proof: Proof::Gated("no APC op — key-block conv / RSA sig / hash"),
+            },
+            Evidence {
+                decision: "Key-management operations return 68 (A0/A4/A6/A8/AA/AC/AE/AG/AK/AM/AS/\
+                           AU/AW/BI/B0/B8/BG/BU/BW/BS/BY/CS/DW/DY/FA/FC/FE/FG/FK/GC/GE/GG/GK/GY/\
+                           HA/HC/HY/IA/J6/J8/JK/K8/KA/KC/KG/KI/L0/LU/LW/MG/MI).",
+                because:
+                    "These generate, import, export, translate, or manage keys under an LMK, or \
+                          compute key check values / derive card-unique keys. APC keys are \
+                          provisioned externally through the control plane, not minted or wrapped \
+                          via this transaction proxy, so none map to a data-plane call.",
+                wire: WireGrounding::None,
+                crypto: CryptoGrounding::None,
+                proof: Proof::Gated("key management is control-plane / LMK — out of proxy scope"),
+            },
+            Evidence {
+                decision:
+                    "Administrative/diagnostic operations return 68 (N0, NC, NI, NO, Q0, Q6, \
+                           Q8, QH, RA, SE, TG, TY, UI, VW, VY, WC, WQ, WW, WY).",
+                because: "Random-value generation, host/connectivity queries, and vendor-specific \
+                          admin/diagnostic commands have no APC data-plane equivalent.",
+                wire: WireGrounding::None,
+                crypto: CryptoGrounding::None,
+                proof: Proof::Gated("admin/diagnostic — no APC data-plane equivalent"),
+            },
+        ]
+    }
+
     async fn handle(
         &self,
         _command_code: &[u8],

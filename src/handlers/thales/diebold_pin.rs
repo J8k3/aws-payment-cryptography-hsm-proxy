@@ -5,36 +5,37 @@ use tracing::warn;
 use crate::error::ProxyError;
 use crate::handlers::{AppState, Handler, HandlerResult};
 
-/// payShield Diebold PIN commands.
+/// payShield Diebold PIN commands — GA (derive PIN) and CE (generate offset).
 ///
-/// GA (→ GB) — Derive a PIN Using the Diebold Method.
-/// CE (→ CF) — Generate a Diebold PIN Offset.
-///
-/// NOT SUPPORTED ON APC.
-///
-/// The Diebold method is frequently mistaken for an IBM 3624 variant, but it is
-/// not. Instead of deriving the PIN by a DES encrypt-and-decimalize of the
-/// transformed account number, the HSM indexes a Diebold conversion
-/// (randomizing) table that the operator has loaded into the device's *user
-/// storage*. The wire request carries an index flag plus a table pointer into
-/// that user-storage table, and the resulting PIN/offset depends entirely on the
-/// table's contents.
-///
-/// AWS Payment Cryptography exposes no user-storage table facility and no
-/// generation attribute that reproduces a Diebold lookup, so neither GA nor CE
-/// can be modeled against APC. Mapping them onto Ibm3624NaturalPin /
-/// Ibm3624PinOffset would silently produce a *different* PIN — a correctness
-/// failure, not merely a missing feature. We therefore return "command disabled"
-/// (payShield 68) rather than emit an incorrect APC call.
-///
-/// Migration path: re-issue affected PINs under a scheme APC supports
-/// (IBM 3624 natural PIN/offset via EE/DE, or Visa PVV via DG/FW).
+/// Both return payShield 68 (not supported on APC). Rationale and migration
+/// path: see `Handler::grounding()`.
 pub struct DieboldPinHandler;
 
 #[async_trait]
 impl Handler for DieboldPinHandler {
     fn command_codes(&self) -> &'static [&'static str] {
         &["CE", "GA"]
+    }
+
+    fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
+        use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
+        &[Evidence {
+            decision:
+                "GA (derive PIN, Diebold method) and CE (generate Diebold PIN offset) return \
+                       Unsupported (68).",
+            because: "The Diebold method is not an IBM 3624 variant: instead of a DES \
+                      encrypt-and-decimalize of the transformed account number, the HSM indexes a \
+                      randomizing conversion table loaded into its user storage, and the derived \
+                      PIN depends entirely on that table's contents. APC exposes no user-storage \
+                      table and no generation attribute that reproduces a Diebold lookup, so it \
+                      cannot be modeled. Mapping onto Ibm3624NaturalPin/Ibm3624PinOffset would \
+                      silently produce a DIFFERENT PIN — a correctness failure, not a missing \
+                      feature — so we reject rather than emit an incorrect APC call. Migration: \
+                      re-issue affected PINs under IBM 3624 (EE/DE) or Visa PVV (DG/FW).",
+            wire: WireGrounding::None,
+            crypto: CryptoGrounding::None,
+            proof: Proof::Gated("no APC equivalent — Diebold user-storage conversion table"),
+        }]
     }
 
     async fn handle(
