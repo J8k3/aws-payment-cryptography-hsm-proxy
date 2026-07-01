@@ -3807,3 +3807,196 @@ fn assert_discriminates(
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn pin_change_du_cu_discrimination_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "pin_change_du_cu_discrimination_differential: correct current PIN changes (00), \
+         wrong current PIN rejected (01) and generates nothing"
+    );
+
+    use aws_sdk_paymentcryptographydata::types::VisaPin;
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [
+        KeySpec {
+            role: "ZPK",
+            wire_label: PC_ZPK_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31P0PinEncryptionKey,
+            modes: KeyModesOfUse::builder()
+                .encrypt(true)
+                .decrypt(true)
+                .wrap(true)
+                .unwrap(true)
+                .build(),
+        },
+        KeySpec {
+            role: "PVK_IBM",
+            wire_label: PC_PVK_IBM_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31V1Ibm3624PinVerificationKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+        KeySpec {
+            role: "PVK_VISA",
+            wire_label: PC_PVK_VISA_LABEL,
+            algorithm: KeyAlgorithm::Tdes2Key,
+            key_usage: KeyUsage::Tr31V2VisaPinVerificationKey,
+            modes: KeyModesOfUse::builder().generate(true).verify(true).build(),
+        },
+    ];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let zpk_arn = keys.arn("ZPK").to_string();
+    let pvk_ibm_arn = keys.arn("PVK_IBM").to_string();
+    let pvk_visa_arn = keys.arn("PVK_VISA").to_string();
+    let zpk_label = keys.wire_label("ZPK").to_string();
+    let pvk_ibm_label = keys.wire_label("PVK_IBM").to_string();
+    let pvk_visa_label = keys.wire_label("PVK_VISA").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let du = registry.get(b"DU").expect("DU registered");
+    let cu = registry.get(b"CU").expect("CU registered");
+    let iso0 = || PinBlockFormatForPinData::IsoFormat0;
+
+    const LABEL: &str = "pin_change_du_cu_discrimination";
+    let run = cases_to_run();
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let use_ibm = rng.random_bool(0.5);
+        // A "new PIN" block (any valid ISO0 block for the PAN).
+        let new_block = data
+            .generate_pin_data()
+            .generation_key_identifier(&pvk_ibm_arn)
+            .encryption_key_identifier(&zpk_arn)
+            .primary_account_number(&pan)
+            .pin_block_format(iso0())
+            .generation_attributes(PinGenerationAttributes::Ibm3624NaturalPin(
+                Ibm3624NaturalPin::builder()
+                    .decimalization_table(GO_DECIM_TABLE)
+                    .pin_validation_data("999999999999")
+                    .pin_validation_data_pad_character("F")
+                    .build()?,
+            ))
+            .send()
+            .await?
+            .encrypted_pin_block()
+            .to_string();
+
+        let (label, accept_code, reject_code): (&str, [u8; 2], [u8; 2]) = if use_ibm {
+            // Current natural PIN (offset 0); change with correct then wrong current offset.
+            let cur_block = data
+                .generate_pin_data()
+                .generation_key_identifier(&pvk_ibm_arn)
+                .encryption_key_identifier(&zpk_arn)
+                .primary_account_number(&pan)
+                .pin_block_format(iso0())
+                .generation_attributes(PinGenerationAttributes::Ibm3624NaturalPin(
+                    Ibm3624NaturalPin::builder()
+                        .decimalization_table(GO_DECIM_TABLE)
+                        .pin_validation_data(&pan)
+                        .pin_validation_data_pad_character("F")
+                        .build()?,
+                ))
+                .send()
+                .await?
+                .encrypted_pin_block()
+                .to_string();
+            let good = encode_du(
+                &zpk_label,
+                &pvk_ibm_label,
+                &cur_block,
+                &pan,
+                GO_DECIM_TABLE,
+                &pan,
+                "0000FFFFFFFF",
+                &new_block,
+            );
+            let bad = encode_du(
+                &zpk_label,
+                &pvk_ibm_label,
+                &cur_block,
+                &pan,
+                GO_DECIM_TABLE,
+                &pan,
+                "0001FFFFFFFF",
+                &new_block,
+            );
+            let a = du.handle(b"DU", &good, &state).await.error_code;
+            let r = du.handle(b"DU", &bad, &state).await.error_code;
+            ("DU/IBM", a, r)
+        } else {
+            // Current Visa PVV; change with correct then corrupted current PVV.
+            let gen = data
+                .generate_pin_data()
+                .generation_key_identifier(&pvk_visa_arn)
+                .encryption_key_identifier(&zpk_arn)
+                .primary_account_number(&pan)
+                .pin_block_format(iso0())
+                .generation_attributes(PinGenerationAttributes::VisaPin(
+                    VisaPin::builder().pin_verification_key_index(1).build()?,
+                ))
+                .send()
+                .await?;
+            let cur_block = gen.encrypted_pin_block().to_string();
+            let pvv = gen
+                .pin_data()
+                .and_then(|d| d.as_verification_value().ok().cloned())
+                .ok_or_else(|| anyhow::anyhow!("no Visa PVV"))?;
+            let good = encode_cu(
+                &zpk_label,
+                &pvk_visa_label,
+                &cur_block,
+                &pan,
+                "1",
+                &pvv,
+                &new_block,
+            );
+            let bad = encode_cu(
+                &zpk_label,
+                &pvk_visa_label,
+                &cur_block,
+                &pan,
+                "1",
+                &corrupt_first(&pvv),
+                &new_block,
+            );
+            let a = cu.handle(b"CU", &good, &state).await.error_code;
+            let r = cu.handle(b"CU", &bad, &state).await.error_code;
+            ("CU/Visa", a, r)
+        };
+
+        if let Err(e) = assert_discriminates(label, case_idx, accept_code, reject_code, &pan) {
+            eprintln!(
+                "{}",
+                replay_hint(
+                    "pin_change_du_cu_discrimination_differential",
+                    LABEL,
+                    case_idx
+                )
+            );
+            result = Err(e);
+            break;
+        }
+        eprintln!(
+            "case={case_idx:02} OK {label} correct-current-PIN=00 wrong-current-PIN=01 pan={pan}"
+        );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
