@@ -282,19 +282,18 @@ impl Handler for KwArqcHandler {
                        Option B for odd) plus the session method (EMV2000 / EMV Common). Cloud / \
                        LUK / Option-C / JCB / UnionPay SKD schemes are rejected as having no APC \
                        equivalent.",
-            because: "PUGD0537-004 Rev A p.471 (KW). Wire parse is manual-cited and unit-tested; \
-                      the APC mapping (verify_auth_request_cryptogram, Option A/B + EMV2000 / EMV \
-                      Common, ARPC Method 1/2) and result plumbing are exercised via the mock-APC \
-                      tests (shared with KQ). A live ACCEPT-path differential is not yet included: \
-                      it needs a valid ARQC, and ARQC generation is a terminal-side operation not \
-                      exposed by APC's public data plane, so it requires an external EMV generator \
-                      (Tier-2). Hence wire=cited, not diff-xprov.",
-            wire: WireGrounding::Cited,
-            crypto: CryptoGrounding::None,
-            proof: Proof::ManualCite(
-                "PUGD0537-004 Rev A p.471; APC verify_auth_request_cryptogram; plumbing \
-                 mock-tested; live accept-path needs an external ARQC generator",
-            ),
+            because: "PUGD0537-004 Rev A p.471 (KW). Verified live for the Option-A schemes: APC \
+                      mints a valid ARQC via generate_auth_request_cryptogram under a created E0 IMK \
+                      (DeriveKey mode), the proxy's KW handler verifies it through APC and ACCEPTS \
+                      (00), and a one-bit-corrupted ARQC is REJECTED (01), across randomized inputs \
+                      — sweeping scheme '0' (EMV2000) and '2' (EMV Common), both Option A \
+                      (arqc_verify_kw_differential). The Option-B schemes ('1'/'3') need a PAN > 16 \
+                      digits, which the 8-byte BCD PAN field can't carry (see the EMV PAN-length \
+                      gap), and the ARPC Method 1/2 generation path stays mock-tested; those are the \
+                      next step.",
+            wire: WireGrounding::DiffXprov,
+            crypto: CryptoGrounding::Apc,
+            proof: Proof::LiveTest("arqc_verify_kw_differential"),
         }]
     }
 

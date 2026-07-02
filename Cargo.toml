@@ -24,7 +24,7 @@ tokio = { version = "1", features = ["full"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-credential-types = "1"
 aws-sdk-paymentcryptography = "1"
-aws-sdk-paymentcryptographydata = "1"
+aws-sdk-paymentcryptographydata = "1.110" # >=1.110 for generate_auth_request_cryptogram (ARQC accept-path test)
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 zeroize = { version = "1", features = ["derive"] }

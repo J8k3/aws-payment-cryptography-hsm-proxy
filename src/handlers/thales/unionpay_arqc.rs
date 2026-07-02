@@ -178,18 +178,14 @@ impl Handler for UnionPayArqcHandler {
         &[Evidence {
             decision: "JS verifies a UnionPay (CUP) Authorisation Request Cryptogram → APC \
                        verify_auth_request_cryptogram. Response code JT.",
-            because: "PUGD0538-003 §7 p.122. Wire parse is manual-cited and unit-tested; the APC \
-                      mapping (verify_auth_request_cryptogram) is exercised via unit tests. A live \
-                      ACCEPT-path differential is not yet included: it needs a valid ARQC, and ARQC \
-                      generation is a terminal-side operation not exposed by APC's public data \
-                      plane, so it requires an external EMV generator (Tier-2). Hence wire=cited, \
-                      not diff-xprov.",
-            wire: WireGrounding::Cited,
-            crypto: CryptoGrounding::None,
-            proof: Proof::ManualCite(
-                "PUGD0538-003 §7 p.122; APC verify_auth_request_cryptogram; live accept-path needs \
-                 an external ARQC generator",
-            ),
+            because: "PUGD0538-003 §7 p.122. Verified live end-to-end: APC mints a valid ARQC via \
+                      generate_auth_request_cryptogram (Emv2000, Option A) under a created IMK-AC \
+                      (E0, DeriveKey mode), the proxy's JS handler verifies it through APC and \
+                      ACCEPTS (00), and a one-bit-corrupted ARQC is REJECTED (01), across \
+                      randomized PAN / PSN / ATC / txn length.",
+            wire: WireGrounding::DiffXprov,
+            crypto: CryptoGrounding::Apc,
+            proof: Proof::LiveTest("arqc_verify_js_differential"),
         }]
     }
 
