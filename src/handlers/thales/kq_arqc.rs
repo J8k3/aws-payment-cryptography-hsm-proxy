@@ -265,20 +265,19 @@ impl Handler for KqArqcHandler {
                        (Mastercard M/Chip, Amex AEIPS) on EMV Option A; Visa VIS (static, Scheme \
                        '0') and skip-verify modes 3/4 are rejected as having no APC equivalent. \
                        Mode 1/2 map to ARPC Method 1 (ARC) / Method 2 (CSU + proprietary data).",
-            because: "PUGD0537-004 Rev A p.468 (KQ). Wire parse is manual-cited and unit-tested; \
-                      the APC mapping (verify_auth_request_cryptogram, ARPC Method 1/2) and its \
-                      result plumbing — verdict, ARQC-mismatch → 01, key-not-found → 10, \
-                      unsupported-mode → 15 — are exercised by the mock-APC integration tests. A \
-                      live ACCEPT-path differential is not yet included: it requires a valid ARQC, \
-                      and ARQC generation is a terminal-side operation not exposed by APC's public \
-                      data plane, so it needs an external/terminal EMV generator (the Tier-2 \
-                      published-vector path). Hence wire=cited, not diff-xprov.",
-            wire: WireGrounding::Cited,
-            crypto: CryptoGrounding::None,
-            proof: Proof::ManualCite(
-                "PUGD0537-004 Rev A p.468; APC verify_auth_request_cryptogram; plumbing \
-                 mock-tested; live accept-path needs an external ARQC generator",
-            ),
+            because: "PUGD0537-004 Rev A p.468 (KQ). Verified live for the Mastercard scheme ('1', \
+                      Option A + Mastercard proprietary SKD): APC mints a valid ARQC via \
+                      generate_auth_request_cryptogram under a created E0 IMK (DeriveKey mode), the \
+                      proxy's KQ handler verifies it through APC and ACCEPTS (00), and a \
+                      one-bit-corrupted ARQC is REJECTED (01), across randomized PAN / PSN / ATC / \
+                      Unpredictable Number / txn length — the differential confirms the UN is \
+                      forwarded to APC's Mastercard session-key derivation. The Amex scheme ('2', \
+                      Option A + Amex SKD) is verified the same way in arqc_verify_kq_amex_differential. \
+                      The ARPC Method 1/2 generation path stays mock-tested (verdict, ARQC-mismatch \
+                      → 01, key-not-found → 10, unsupported-mode → 15).",
+            wire: WireGrounding::DiffXprov,
+            crypto: CryptoGrounding::Apc,
+            proof: Proof::LiveTest("arqc_verify_kq_differential"),
         }]
     }
 

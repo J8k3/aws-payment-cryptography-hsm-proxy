@@ -136,8 +136,8 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 ## `JS`
 
 - **JS verifies a UnionPay (CUP) Authorisation Request Cryptogram → APC verify_auth_request_cryptogram. Response code JT.**
-  - wire `cited` · crypto `none` · manual: PUGD0538-003 §7 p.122; APC verify_auth_request_cryptogram; live accept-path needs an external ARQC generator
-  - PUGD0538-003 §7 p.122. Wire parse is manual-cited and unit-tested; the APC mapping (verify_auth_request_cryptogram) is exercised via unit tests. A live ACCEPT-path differential is not yet included: it needs a valid ARQC, and ARQC generation is a terminal-side operation not exposed by APC's public data plane, so it requires an external EMV generator (Tier-2). Hence wire=cited, not diff-xprov.
+  - wire `diff-xprov` · crypto `apc` · live test `arqc_verify_js_differential`
+  - PUGD0538-003 §7 p.122. Verified live end-to-end: APC mints a valid ARQC via generate_auth_request_cryptogram (Emv2000, Option A) under a created IMK-AC (E0, DeriveKey mode), the proxy's JS handler verifies it through APC and ACCEPTS (00), and a one-bit-corrupted ARQC is REJECTED (01), across randomized PAN / PSN / ATC / txn length.
 
 ## `JU`, `KU`, `KY`
 
@@ -153,21 +153,24 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 
 ## `K2`, `KS`
 
-- **K2/KS verify a CAP/EMV Authorisation Request Cryptogram → APC verify_auth_request_cryptogram. KS carries an extra field vs K2. ARQC mismatch → 01.**
-  - wire `cited` · crypto `none` · manual: PUGD0537-004 Rev A p.485 (K2) / p.488 (KS); APC verify_auth_request_cryptogram; live accept-path needs an external ARQC generator
-  - PUGD0537-004 Rev A p.485 (K2) / p.488 (KS). Wire parse is manual-cited and unit-tested; the APC mapping (verify_auth_request_cryptogram) and its result plumbing are exercised by unit tests. A live ACCEPT-path differential is not yet included: it needs a valid ARQC, and ARQC generation is a terminal-side operation not exposed by APC's public data plane, so it requires an external EMV generator (Tier-2). Hence wire=cited, not diff-xprov.
+- **KS verifies a CAP/EMV Authorisation Request Cryptogram → APC verify_auth_request_cryptogram (SessionKeyDerivation::Emv2000, MajorKeyDerivationMode::EmvOptionA). ARQC mismatch → 01.**
+  - wire `diff-xprov` · crypto `apc` · live test `arqc_verify_ks_differential`
+  - PUGD0537-004 Rev A p.488 (KS). Verified live end-to-end: APC mints a valid ARQC via generate_auth_request_cryptogram (available in aws-sdk-paymentcryptographydata >= 1.110) under a created IMK-AC (E0, DeriveKey mode), the proxy's KS handler verifies it through APC and ACCEPTS (00), and a one-bit-corrupted ARQC is REJECTED (01), across randomized PAN / PSN / ATC / txn length.
+- **K2 verifies a Mastercard CAP cryptogram → APC verify_auth_request_cryptogram (SessionKeyDerivation::Mastercard + UN, MajorKeyDerivationMode::EmvOptionB). ARQC mismatch → 01.**
+  - wire `cited` · crypto `none` · manual: PUGD0537-004 Rev A p.485 (K2); APC verify_auth_request_cryptogram; K2 live accept-path pending Mastercard/Option-B (PAN > 16) coverage
+  - PUGD0537-004 Rev A p.485 (K2). Wire parse is manual-cited and unit-tested; the APC mapping and result plumbing are exercised by unit tests. A live accept-path differential is not yet included for K2 specifically: it needs Mastercard SKD (with the Unpredictable Number) and Option B, and APC only accepts Option B for PANs > 16 digits while the 8-byte BCD PAN field decodes to 12 (see the EMV PAN-length gap). APC's generate op is available; the differential is straightforward to add once Option-B PAN handling is resolved. Hence K2 wire=cited, not diff-xprov.
 
 ## `KQ`
 
 - **KQ verifies an ARQC and optionally generates an ARPC → APC verify_auth_request_cryptogram. Scheme ID selects the session-key method (Mastercard M/Chip, Amex AEIPS) on EMV Option A; Visa VIS (static, Scheme '0') and skip-verify modes 3/4 are rejected as having no APC equivalent. Mode 1/2 map to ARPC Method 1 (ARC) / Method 2 (CSU + proprietary data).**
-  - wire `cited` · crypto `none` · manual: PUGD0537-004 Rev A p.468; APC verify_auth_request_cryptogram; plumbing mock-tested; live accept-path needs an external ARQC generator
-  - PUGD0537-004 Rev A p.468 (KQ). Wire parse is manual-cited and unit-tested; the APC mapping (verify_auth_request_cryptogram, ARPC Method 1/2) and its result plumbing — verdict, ARQC-mismatch → 01, key-not-found → 10, unsupported-mode → 15 — are exercised by the mock-APC integration tests. A live ACCEPT-path differential is not yet included: it requires a valid ARQC, and ARQC generation is a terminal-side operation not exposed by APC's public data plane, so it needs an external/terminal EMV generator (the Tier-2 published-vector path). Hence wire=cited, not diff-xprov.
+  - wire `diff-xprov` · crypto `apc` · live test `arqc_verify_kq_differential`
+  - PUGD0537-004 Rev A p.468 (KQ). Verified live for the Mastercard scheme ('1', Option A + Mastercard proprietary SKD): APC mints a valid ARQC via generate_auth_request_cryptogram under a created E0 IMK (DeriveKey mode), the proxy's KQ handler verifies it through APC and ACCEPTS (00), and a one-bit-corrupted ARQC is REJECTED (01), across randomized PAN / PSN / ATC / Unpredictable Number / txn length — the differential confirms the UN is forwarded to APC's Mastercard session-key derivation. The Amex scheme ('2', Option A + Amex SKD) is verified the same way in arqc_verify_kq_amex_differential. The ARPC Method 1/2 generation path stays mock-tested (verdict, ARQC-mismatch → 01, key-not-found → 10, unsupported-mode → 15).
 
 ## `KW`
 
 - **KW verifies an ARQC and optionally generates an ARPC for the EMV / Cloud-Based SKD methods → APC verify_auth_request_cryptogram. Unlike KQ, the Scheme ID encodes the major derivation mode too (Option A for even codes, Option B for odd) plus the session method (EMV2000 / EMV Common). Cloud / LUK / Option-C / JCB / UnionPay SKD schemes are rejected as having no APC equivalent.**
-  - wire `cited` · crypto `none` · manual: PUGD0537-004 Rev A p.471; APC verify_auth_request_cryptogram; plumbing mock-tested; live accept-path needs an external ARQC generator
-  - PUGD0537-004 Rev A p.471 (KW). Wire parse is manual-cited and unit-tested; the APC mapping (verify_auth_request_cryptogram, Option A/B + EMV2000 / EMV Common, ARPC Method 1/2) and result plumbing are exercised via the mock-APC tests (shared with KQ). A live ACCEPT-path differential is not yet included: it needs a valid ARQC, and ARQC generation is a terminal-side operation not exposed by APC's public data plane, so it requires an external EMV generator (Tier-2). Hence wire=cited, not diff-xprov.
+  - wire `diff-xprov` · crypto `apc` · live test `arqc_verify_kw_differential`
+  - PUGD0537-004 Rev A p.471 (KW). Verified live for the Option-A schemes: APC mints a valid ARQC via generate_auth_request_cryptogram under a created E0 IMK (DeriveKey mode), the proxy's KW handler verifies it through APC and ACCEPTS (00), and a one-bit-corrupted ARQC is REJECTED (01), across randomized inputs — sweeping scheme '0' (EMV2000) and '2' (EMV Common), both Option A (arqc_verify_kw_differential). The Option-B schemes ('1'/'3') need a PAN > 16 digits, which the 8-byte BCD PAN field can't carry (see the EMV PAN-length gap), and the ARPC Method 1/2 generation path stays mock-tested; those are the next step.
 
 ## `LQ`, `LS`
 

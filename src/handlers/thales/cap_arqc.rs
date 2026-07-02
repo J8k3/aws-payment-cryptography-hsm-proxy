@@ -154,23 +154,41 @@ impl Handler for CapArqcHandler {
 
     fn grounding(&self) -> &'static [crate::handlers::grounding::Evidence] {
         use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
-        &[Evidence {
-            decision: "K2/KS verify a CAP/EMV Authorisation Request Cryptogram → APC \
-                       verify_auth_request_cryptogram. KS carries an extra field vs K2. ARQC \
-                       mismatch → 01.",
-            because: "PUGD0537-004 Rev A p.485 (K2) / p.488 (KS). Wire parse is manual-cited and \
-                      unit-tested; the APC mapping (verify_auth_request_cryptogram) and its result \
-                      plumbing are exercised by unit tests. A live ACCEPT-path differential is not \
-                      yet included: it needs a valid ARQC, and ARQC generation is a terminal-side \
-                      operation not exposed by APC's public data plane, so it requires an external \
-                      EMV generator (Tier-2). Hence wire=cited, not diff-xprov.",
-            wire: WireGrounding::Cited,
-            crypto: CryptoGrounding::None,
-            proof: Proof::ManualCite(
-                "PUGD0537-004 Rev A p.485 (K2) / p.488 (KS); APC verify_auth_request_cryptogram; \
-                 live accept-path needs an external ARQC generator",
-            ),
-        }]
+        &[
+            Evidence {
+                decision: "KS verifies a CAP/EMV Authorisation Request Cryptogram → APC \
+                           verify_auth_request_cryptogram (SessionKeyDerivation::Emv2000, \
+                           MajorKeyDerivationMode::EmvOptionA). ARQC mismatch → 01.",
+                because: "PUGD0537-004 Rev A p.488 (KS). Verified live end-to-end: APC mints a valid \
+                          ARQC via generate_auth_request_cryptogram (available in \
+                          aws-sdk-paymentcryptographydata >= 1.110) under a created IMK-AC (E0, \
+                          DeriveKey mode), the proxy's KS handler verifies it through APC and \
+                          ACCEPTS (00), and a one-bit-corrupted ARQC is REJECTED (01), across \
+                          randomized PAN / PSN / ATC / txn length.",
+                wire: WireGrounding::DiffXprov,
+                crypto: CryptoGrounding::Apc,
+                proof: Proof::LiveTest("arqc_verify_ks_differential"),
+            },
+            Evidence {
+                decision: "K2 verifies a Mastercard CAP cryptogram → APC \
+                           verify_auth_request_cryptogram (SessionKeyDerivation::Mastercard + UN, \
+                           MajorKeyDerivationMode::EmvOptionB). ARQC mismatch → 01.",
+                because: "PUGD0537-004 Rev A p.485 (K2). Wire parse is manual-cited and unit-tested; \
+                          the APC mapping and result plumbing are exercised by unit tests. A live \
+                          accept-path differential is not yet included for K2 specifically: it needs \
+                          Mastercard SKD (with the Unpredictable Number) and Option B, and APC only \
+                          accepts Option B for PANs > 16 digits while the 8-byte BCD PAN field \
+                          decodes to 12 (see the EMV PAN-length gap). APC's generate op is available; \
+                          the differential is straightforward to add once Option-B PAN handling is \
+                          resolved. Hence K2 wire=cited, not diff-xprov.",
+                wire: WireGrounding::Cited,
+                crypto: CryptoGrounding::None,
+                proof: Proof::ManualCite(
+                    "PUGD0537-004 Rev A p.485 (K2); APC verify_auth_request_cryptogram; K2 live \
+                     accept-path pending Mastercard/Option-B (PAN > 16) coverage",
+                ),
+            },
+        ]
     }
 
     async fn handle(

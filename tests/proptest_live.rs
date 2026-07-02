@@ -4167,3 +4167,805 @@ async fn verify_rejects_malformed_differential() -> anyhow::Result<()> {
     survivor_result?;
     Ok(())
 }
+
+// ── ARQC accept-path KS (live differential) ──────────────────────────────────
+//
+// The ARQC-verify family (K2/KS/KQ/KW) had no live accept-path: verifying needs a
+// VALID ARQC. APC's generate_auth_request_cryptogram mints one from an IMK-AC (E0)
+// — available in aws-sdk-paymentcryptographydata >= 1.110. So the oracle is APC
+// itself: APC mints a valid ARQC under a created E0 key, the proxy's KS handler
+// verifies it through APC, and we assert ACCEPT — plus a corrupted ARQC must be
+// rejected (01). KS uses SessionKeyDerivation::Emv2000 + EmvOptionA (no UN), so the
+// mint uses the same attributes. The handler EMV-pads the txn before the APC call,
+// so we mint over the padded txn to keep both sides byte-identical.
+const KS_E0_WIRE_LABEL: &str = "U0000000000000000000000000000KSE0";
+
+/// Encode a KS wire frame per PUGD0537-004 Rev A p.488. Binary fields.
+fn encode_ks(key_label: &str, pan_seq: &[u8], atc: [u8; 2], txn: &[u8], arqc: &[u8]) -> Vec<u8> {
+    let mut v = b"00E".to_vec(); // key type 3H ASCII — consumed
+    v.extend_from_slice(key_label.as_bytes());
+    v.extend_from_slice(pan_seq); // 8B BCD
+    v.extend_from_slice(&atc); // 2B ATC (no UN for KS)
+    let len = u16::try_from(txn.len()).expect("txn < 64KiB");
+    v.extend_from_slice(&len.to_be_bytes()); // 2B BE TxnLen
+    v.extend_from_slice(txn); // nB txn data
+    v.push(0x3B); // delimiter
+    v.extend_from_slice(arqc); // 8B cryptogram
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn arqc_verify_ks_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "arqc_verify_ks_differential: grounding crypto=apc \
+         wire=diff-xprov(APC generate_auth_request_cryptogram -> proxy KS verify)"
+    );
+
+    use apc_proxy::handlers::thales::common::emv_pad;
+    use aws_sdk_paymentcryptographydata::types::{
+        MajorKeyDerivationMode, SessionKeyDerivation, SessionKeyEmv2000,
+    };
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "E0",
+        wire_label: KS_E0_WIRE_LABEL,
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31E0EmvMkeyAppCryptograms,
+        modes: KeyModesOfUse::builder().derive_key(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let e0_arn = keys.arn("E0").to_string();
+    let e0_label = keys.wire_label("E0").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let ks = registry.get(b"KS").expect("KS handler registered");
+
+    const LABEL: &str = "arqc_verify_ks";
+    let run = cases_to_run();
+    eprintln!(
+        "arqc_verify_ks_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let seq = format!("{:02}", edge_biased(&mut rng, 0, 99, &[0, 1, 99]));
+        let atc_val = edge_biased(&mut rng, 0, 0xFFFF, &[1, 0x2A, 0xFFFF]) as u16;
+        let atc = atc_val.to_be_bytes();
+        let atc_hex = hex_upper(&atc);
+
+        // Raw txn (1..24 bytes); the KS handler EMV-pads it, so mint over the pad.
+        let txn_len = edge_biased(&mut rng, 1, 24, &[1, 7, 8, 16]);
+        let txn = hex_str_to_bytes(&gen_hex_message(&mut rng, txn_len));
+        let padded_txn_hex = hex_upper(&emv_pad(&txn));
+
+        let session = SessionKeyDerivation::Emv2000(
+            SessionKeyEmv2000::builder()
+                .primary_account_number(&pan)
+                .pan_sequence_number(&seq)
+                .application_transaction_counter(&atc_hex)
+                .build()?,
+        );
+
+        // 1) APC mints a valid ARQC over the padded txn.
+        let arqc_hex = data
+            .generate_auth_request_cryptogram()
+            .key_identifier(&e0_arn)
+            .transaction_data(&padded_txn_hex)
+            .major_key_derivation_mode(MajorKeyDerivationMode::EmvOptionA)
+            .session_key_derivation_attributes(session)
+            .send()
+            .await?
+            .auth_request_cryptogram()
+            .to_string();
+        let arqc = hex_str_to_bytes(&arqc_hex);
+
+        // 2) Proxy KS verify — must ACCEPT (error_code 00).
+        let wire = encode_ks(&e0_label, &pan_seq_bcd(&pan, &seq), atc, &txn, &arqc);
+        let proxy = ks.handle(b"KS", &wire, &state).await;
+        if &proxy.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_ks_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} KS rejected a VALID ARQC: error_code={} \
+                 (pan={pan} seq={seq} atc={atc_hex} arqc={arqc_hex})",
+                String::from_utf8_lossy(&proxy.error_code),
+            ));
+            break;
+        }
+
+        // 3) Corrupted ARQC (flip one bit) — must be REJECTED (01).
+        let mut bad = arqc.clone();
+        bad[0] ^= 0x01;
+        let wire_bad = encode_ks(&e0_label, &pan_seq_bcd(&pan, &seq), atc, &txn, &bad);
+        let proxy_bad = ks.handle(b"KS", &wire_bad, &state).await;
+        if &proxy_bad.error_code != b"01" {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_ks_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} KS accepted a CORRUPTED ARQC: error_code={} (expected 01)",
+                String::from_utf8_lossy(&proxy_bad.error_code),
+            ));
+            break;
+        }
+
+        eprintln!("case={case_idx:02} OK pan={pan} seq={seq} atc={atc_hex} txn_len={txn_len} arqc={arqc_hex}");
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+// ── ARQC accept-path JS (UnionPay, live differential) ────────────────────────
+//
+// JS uses the SAME Emv2000 + Option A derivation as KS, so the ARQC is minted the
+// same way; only the wire frame differs (UnionPay/CUP layout, per PUGD0538-003
+// §7 p.122). APC mints a valid ARQC, the proxy JS handler verifies it and ACCEPTS,
+// and a corrupted ARQC is rejected (JT / error 01).
+const JS_E0_WIRE_LABEL: &str = "U0000000000000000000000000000JSE0";
+
+/// Encode a JS (UnionPay) verify-only wire frame. Binary fields except TxnLen (2H
+/// ASCII) and the mode/scheme/padding flags.
+fn encode_js(key_label: &str, pan_seq: &[u8], atc: [u8; 2], txn: &[u8], arqc: &[u8]) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.push(b'0'); // mode: verify only
+    v.push(b'1'); // scheme ID: CUP (consumed)
+    v.extend_from_slice(key_label.as_bytes()); // 'U'+32H (no key-type prefix)
+    v.extend_from_slice(pan_seq); // 8B BCD
+    v.extend_from_slice(&atc); // 2B ATC
+    v.push(b'0'); // padding flag: none (consumed)
+    v.extend_from_slice(format!("{:02X}", txn.len()).as_bytes()); // TxnLen 2H ASCII
+    v.extend_from_slice(txn); // nB txn data
+    v.push(0x3B); // delimiter
+    v.extend_from_slice(arqc); // 8B cryptogram
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn arqc_verify_js_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "arqc_verify_js_differential: grounding crypto=apc \
+         wire=diff-xprov(APC generate_auth_request_cryptogram -> proxy JS verify)"
+    );
+
+    use apc_proxy::handlers::thales::common::emv_pad;
+    use aws_sdk_paymentcryptographydata::types::{
+        MajorKeyDerivationMode, SessionKeyDerivation, SessionKeyEmv2000,
+    };
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "E0",
+        wire_label: JS_E0_WIRE_LABEL,
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31E0EmvMkeyAppCryptograms,
+        modes: KeyModesOfUse::builder().derive_key(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let e0_arn = keys.arn("E0").to_string();
+    let e0_label = keys.wire_label("E0").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let js = registry.get(b"JS").expect("JS handler registered");
+
+    const LABEL: &str = "arqc_verify_js";
+    let run = cases_to_run();
+    eprintln!(
+        "arqc_verify_js_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let seq = format!("{:02}", edge_biased(&mut rng, 0, 99, &[0, 1, 99]));
+        let atc_val = edge_biased(&mut rng, 0, 0xFFFF, &[1, 0x2A, 0xFFFF]) as u16;
+        let atc = atc_val.to_be_bytes();
+        let atc_hex = hex_upper(&atc);
+
+        let txn_len = edge_biased(&mut rng, 1, 24, &[1, 7, 8, 16]);
+        let txn = hex_str_to_bytes(&gen_hex_message(&mut rng, txn_len));
+        let padded_txn_hex = hex_upper(&emv_pad(&txn));
+
+        let session = SessionKeyDerivation::Emv2000(
+            SessionKeyEmv2000::builder()
+                .primary_account_number(&pan)
+                .pan_sequence_number(&seq)
+                .application_transaction_counter(&atc_hex)
+                .build()?,
+        );
+
+        let arqc_hex = data
+            .generate_auth_request_cryptogram()
+            .key_identifier(&e0_arn)
+            .transaction_data(&padded_txn_hex)
+            .major_key_derivation_mode(MajorKeyDerivationMode::EmvOptionA)
+            .session_key_derivation_attributes(session)
+            .send()
+            .await?
+            .auth_request_cryptogram()
+            .to_string();
+        let arqc = hex_str_to_bytes(&arqc_hex);
+
+        let wire = encode_js(&e0_label, &pan_seq_bcd(&pan, &seq), atc, &txn, &arqc);
+        let proxy = js.handle(b"JS", &wire, &state).await;
+        if &proxy.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_js_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} JS rejected a VALID ARQC: error_code={} \
+                 (pan={pan} seq={seq} atc={atc_hex} arqc={arqc_hex})",
+                String::from_utf8_lossy(&proxy.error_code),
+            ));
+            break;
+        }
+
+        let mut bad = arqc.clone();
+        bad[0] ^= 0x01;
+        let wire_bad = encode_js(&e0_label, &pan_seq_bcd(&pan, &seq), atc, &txn, &bad);
+        let proxy_bad = js.handle(b"JS", &wire_bad, &state).await;
+        if &proxy_bad.error_code != b"01" {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_js_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} JS accepted a CORRUPTED ARQC: error_code={} (expected 01)",
+                String::from_utf8_lossy(&proxy_bad.error_code),
+            ));
+            break;
+        }
+
+        eprintln!("case={case_idx:02} OK pan={pan} seq={seq} atc={atc_hex} txn_len={txn_len} arqc={arqc_hex}");
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+// ── ARQC accept-path KQ (Mastercard M/Chip, live differential) ───────────────
+//
+// KQ scheme '1' = Mastercard proprietary SKD (Option A + UN). Confirms the proxy
+// forwards the Unpredictable Number to APC's SessionKeyDerivation::Mastercard: APC
+// mints a valid ARQC (Mastercard, Option A) under a created E0 IMK, the proxy KQ
+// handler verifies it and ACCEPTS, and a corrupted ARQC is rejected (01).
+const KQ_E0_WIRE_LABEL: &str = "U0000000000000000000000000000KQE0";
+
+/// Encode a KQ verify-only wire frame per PUGD0537-004 Rev A p.468. Binary fields.
+fn encode_kq(
+    scheme: u8,
+    key_label: &str,
+    pan_seq: &[u8],
+    atc: [u8; 2],
+    un: [u8; 4],
+    txn: &[u8],
+    arqc: &[u8],
+) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.push(b'0'); // mode: verify only
+    v.push(scheme); // scheme ID ('1'=Mastercard, '2'=Amex)
+    v.extend_from_slice(b"00E"); // key type 3H ASCII — consumed
+    v.extend_from_slice(key_label.as_bytes());
+    v.extend_from_slice(pan_seq); // 8B BCD
+    v.extend_from_slice(&atc); // 2B ATC
+    v.extend_from_slice(&un); // 4B UN
+    let len = u16::try_from(txn.len()).expect("txn < 64KiB");
+    v.extend_from_slice(&len.to_be_bytes()); // 2B BE TxnLen
+    v.extend_from_slice(txn); // nB txn data
+    v.push(0x3B); // delimiter
+    v.extend_from_slice(arqc); // 8B cryptogram
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn arqc_verify_kq_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "arqc_verify_kq_differential: grounding crypto=apc \
+         wire=diff-xprov(APC generate_auth_request_cryptogram Mastercard -> proxy KQ verify)"
+    );
+
+    use apc_proxy::handlers::thales::common::emv_pad;
+    use aws_sdk_paymentcryptographydata::types::{
+        MajorKeyDerivationMode, SessionKeyDerivation, SessionKeyMastercard,
+    };
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "E0",
+        wire_label: KQ_E0_WIRE_LABEL,
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31E0EmvMkeyAppCryptograms,
+        modes: KeyModesOfUse::builder().derive_key(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let e0_arn = keys.arn("E0").to_string();
+    let e0_label = keys.wire_label("E0").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let kq = registry.get(b"KQ").expect("KQ handler registered");
+
+    const LABEL: &str = "arqc_verify_kq";
+    let run = cases_to_run();
+    eprintln!(
+        "arqc_verify_kq_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let seq = format!("{:02}", edge_biased(&mut rng, 0, 99, &[0, 1, 99]));
+        let atc_val = edge_biased(&mut rng, 0, 0xFFFF, &[1, 0x2A, 0xFFFF]) as u16;
+        let atc = atc_val.to_be_bytes();
+        let atc_hex = hex_upper(&atc);
+
+        let un: [u8; 4] = hex_str_to_bytes(&gen_hex_message(&mut rng, 4))
+            .try_into()
+            .expect("4 bytes");
+        let un_hex = hex_upper(&un);
+
+        let txn_len = edge_biased(&mut rng, 1, 24, &[1, 7, 8, 16]);
+        let txn = hex_str_to_bytes(&gen_hex_message(&mut rng, txn_len));
+        let padded_txn_hex = hex_upper(&emv_pad(&txn));
+
+        let session = SessionKeyDerivation::Mastercard(
+            SessionKeyMastercard::builder()
+                .primary_account_number(&pan)
+                .pan_sequence_number(&seq)
+                .application_transaction_counter(&atc_hex)
+                .unpredictable_number(&un_hex)
+                .build()?,
+        );
+
+        let arqc_hex = data
+            .generate_auth_request_cryptogram()
+            .key_identifier(&e0_arn)
+            .transaction_data(&padded_txn_hex)
+            .major_key_derivation_mode(MajorKeyDerivationMode::EmvOptionA)
+            .session_key_derivation_attributes(session)
+            .send()
+            .await?
+            .auth_request_cryptogram()
+            .to_string();
+        let arqc = hex_str_to_bytes(&arqc_hex);
+
+        // scheme '1' = Mastercard
+        let wire = encode_kq(
+            b'1',
+            &e0_label,
+            &pan_seq_bcd(&pan, &seq),
+            atc,
+            un,
+            &txn,
+            &arqc,
+        );
+        let proxy = kq.handle(b"KQ", &wire, &state).await;
+        if &proxy.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_kq_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} KQ rejected a VALID Mastercard ARQC: error_code={} \
+                 (pan={pan} seq={seq} atc={atc_hex} un={un_hex} arqc={arqc_hex})",
+                String::from_utf8_lossy(&proxy.error_code),
+            ));
+            break;
+        }
+
+        let mut bad = arqc.clone();
+        bad[0] ^= 0x01;
+        let wire_bad = encode_kq(
+            b'1',
+            &e0_label,
+            &pan_seq_bcd(&pan, &seq),
+            atc,
+            un,
+            &txn,
+            &bad,
+        );
+        let proxy_bad = kq.handle(b"KQ", &wire_bad, &state).await;
+        if &proxy_bad.error_code != b"01" {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_kq_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} KQ accepted a CORRUPTED ARQC: error_code={} (expected 01)",
+                String::from_utf8_lossy(&proxy_bad.error_code),
+            ));
+            break;
+        }
+
+        eprintln!("case={case_idx:02} OK pan={pan} seq={seq} atc={atc_hex} un={un_hex} txn_len={txn_len} arqc={arqc_hex}");
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+// ── ARQC accept-path KQ / Amex (scheme '2', live differential) ───────────────
+//
+// KQ scheme '2' = Amex AEIPS (Option A + Amex SKD; SessionKeyAmex = PAN + PSN, no
+// ATC/UN). The wire still carries ATC and UN fields (ignored by the Amex method).
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn arqc_verify_kq_amex_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "arqc_verify_kq_amex_differential: grounding crypto=apc \
+         wire=diff-xprov(APC generate_auth_request_cryptogram Amex -> proxy KQ verify)"
+    );
+
+    use apc_proxy::handlers::thales::common::emv_pad;
+    use aws_sdk_paymentcryptographydata::types::{
+        MajorKeyDerivationMode, SessionKeyAmex, SessionKeyDerivation,
+    };
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "E0",
+        wire_label: "U0000000000000000000000000000QAE0",
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31E0EmvMkeyAppCryptograms,
+        modes: KeyModesOfUse::builder().derive_key(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let e0_arn = keys.arn("E0").to_string();
+    let e0_label = keys.wire_label("E0").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let kq = registry.get(b"KQ").expect("KQ handler registered");
+
+    const LABEL: &str = "arqc_verify_kq_amex";
+    let run = cases_to_run();
+    eprintln!(
+        "arqc_verify_kq_amex_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let seq = format!("{:02}", edge_biased(&mut rng, 0, 99, &[0, 1, 99]));
+        let atc_val = edge_biased(&mut rng, 0, 0xFFFF, &[1, 0x2A, 0xFFFF]) as u16;
+        let atc = atc_val.to_be_bytes();
+        let un: [u8; 4] = hex_str_to_bytes(&gen_hex_message(&mut rng, 4))
+            .try_into()
+            .expect("4 bytes");
+
+        let txn_len = edge_biased(&mut rng, 1, 24, &[1, 7, 8, 16]);
+        let txn = hex_str_to_bytes(&gen_hex_message(&mut rng, txn_len));
+        let padded_txn_hex = hex_upper(&emv_pad(&txn));
+
+        // Amex session: PAN + PSN only.
+        let session = SessionKeyDerivation::Amex(
+            SessionKeyAmex::builder()
+                .primary_account_number(&pan)
+                .pan_sequence_number(&seq)
+                .build()?,
+        );
+
+        let arqc_hex = data
+            .generate_auth_request_cryptogram()
+            .key_identifier(&e0_arn)
+            .transaction_data(&padded_txn_hex)
+            .major_key_derivation_mode(MajorKeyDerivationMode::EmvOptionA)
+            .session_key_derivation_attributes(session)
+            .send()
+            .await?
+            .auth_request_cryptogram()
+            .to_string();
+        let arqc = hex_str_to_bytes(&arqc_hex);
+
+        // scheme '2' = Amex
+        let wire = encode_kq(
+            b'2',
+            &e0_label,
+            &pan_seq_bcd(&pan, &seq),
+            atc,
+            un,
+            &txn,
+            &arqc,
+        );
+        let proxy = kq.handle(b"KQ", &wire, &state).await;
+        if &proxy.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_kq_amex_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} KQ rejected a VALID Amex ARQC: error_code={} \
+                 (pan={pan} seq={seq} arqc={arqc_hex})",
+                String::from_utf8_lossy(&proxy.error_code),
+            ));
+            break;
+        }
+
+        let mut bad = arqc.clone();
+        bad[0] ^= 0x01;
+        let wire_bad = encode_kq(
+            b'2',
+            &e0_label,
+            &pan_seq_bcd(&pan, &seq),
+            atc,
+            un,
+            &txn,
+            &bad,
+        );
+        let proxy_bad = kq.handle(b"KQ", &wire_bad, &state).await;
+        if &proxy_bad.error_code != b"01" {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_kq_amex_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} KQ accepted a CORRUPTED Amex ARQC: error_code={} (expected 01)",
+                String::from_utf8_lossy(&proxy_bad.error_code),
+            ));
+            break;
+        }
+
+        eprintln!(
+            "case={case_idx:02} OK (Amex) pan={pan} seq={seq} txn_len={txn_len} arqc={arqc_hex}"
+        );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
+// ── ARQC accept-path KW (Option A: EMV2000 + EMV Common, live differential) ───
+//
+// KW's Scheme ID selects major mode + session method. This sweeps the two Option-A
+// schemes: '0' = Option A + EMV2000, '2' = Option A + EMV Common. (Option B schemes
+// '1'/'3' need a PAN > 16 digits, which the 8-byte BCD PAN field can't carry — see
+// the EMV PAN-length gap — so they stay uncovered.)
+#[allow(clippy::too_many_arguments)]
+fn encode_kw(
+    scheme: u8,
+    deriv_method: u8,
+    key_label: &str,
+    pan_seq: &[u8],
+    atc: [u8; 2],
+    un: [u8; 4],
+    txn: &[u8],
+    arqc: &[u8],
+) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.push(b'0'); // mode: verify only
+    v.push(scheme); // scheme ID
+    v.push(deriv_method); // derivation method 'A'/'B' (consumed)
+    v.extend_from_slice(b"00E"); // key type 3H ASCII
+    v.extend_from_slice(key_label.as_bytes());
+    v.extend_from_slice(pan_seq); // 8B BCD
+    v.extend_from_slice(&atc); // 2B ATC
+    v.extend_from_slice(&un); // 4B UN
+    let len = u16::try_from(txn.len()).expect("txn < 64KiB");
+    v.extend_from_slice(&len.to_be_bytes()); // 2B BE TxnLen
+    v.extend_from_slice(txn); // nB txn data
+    v.push(0x3B); // delimiter
+    v.extend_from_slice(arqc); // 8B cryptogram
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn arqc_verify_kw_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "arqc_verify_kw_differential: grounding crypto=apc \
+         wire=diff-xprov(APC generate_auth_request_cryptogram Option-A EMV2000/EMV-Common -> proxy KW verify)"
+    );
+
+    use apc_proxy::handlers::thales::common::emv_pad;
+    use aws_sdk_paymentcryptographydata::types::{
+        MajorKeyDerivationMode, SessionKeyDerivation, SessionKeyEmv2000, SessionKeyEmvCommon,
+    };
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "E0",
+        wire_label: "U0000000000000000000000000000KWE0",
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31E0EmvMkeyAppCryptograms,
+        modes: KeyModesOfUse::builder().derive_key(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let e0_arn = keys.arn("E0").to_string();
+    let e0_label = keys.wire_label("E0").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let kw = registry.get(b"KW").expect("KW handler registered");
+
+    const LABEL: &str = "arqc_verify_kw";
+    let run = cases_to_run();
+    eprintln!(
+        "arqc_verify_kw_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let seq = format!("{:02}", edge_biased(&mut rng, 0, 99, &[0, 1, 99]));
+        let atc_val = edge_biased(&mut rng, 0, 0xFFFF, &[1, 0x2A, 0xFFFF]) as u16;
+        let atc = atc_val.to_be_bytes();
+        let atc_hex = hex_upper(&atc);
+        let un: [u8; 4] = hex_str_to_bytes(&gen_hex_message(&mut rng, 4))
+            .try_into()
+            .expect("4 bytes");
+        let txn_len = edge_biased(&mut rng, 1, 24, &[1, 7, 8, 16]);
+        let txn = hex_str_to_bytes(&gen_hex_message(&mut rng, txn_len));
+        let padded_txn_hex = hex_upper(&emv_pad(&txn));
+
+        // Alternate the two Option-A schemes: '0' EMV2000, '2' EMV Common.
+        let use_common = case_idx % 2 == 1;
+        let (scheme, method_label, session) = if use_common {
+            (
+                b'2',
+                "EMV-Common",
+                SessionKeyDerivation::EmvCommon(
+                    SessionKeyEmvCommon::builder()
+                        .primary_account_number(&pan)
+                        .pan_sequence_number(&seq)
+                        .application_transaction_counter(&atc_hex)
+                        .build()?,
+                ),
+            )
+        } else {
+            (
+                b'0',
+                "EMV2000",
+                SessionKeyDerivation::Emv2000(
+                    SessionKeyEmv2000::builder()
+                        .primary_account_number(&pan)
+                        .pan_sequence_number(&seq)
+                        .application_transaction_counter(&atc_hex)
+                        .build()?,
+                ),
+            )
+        };
+
+        let arqc_hex = data
+            .generate_auth_request_cryptogram()
+            .key_identifier(&e0_arn)
+            .transaction_data(&padded_txn_hex)
+            .major_key_derivation_mode(MajorKeyDerivationMode::EmvOptionA)
+            .session_key_derivation_attributes(session)
+            .send()
+            .await?
+            .auth_request_cryptogram()
+            .to_string();
+        let arqc = hex_str_to_bytes(&arqc_hex);
+
+        // Derivation-method byte 'A' (Option A) — consumed by the handler.
+        let wire = encode_kw(
+            scheme,
+            b'A',
+            &e0_label,
+            &pan_seq_bcd(&pan, &seq),
+            atc,
+            un,
+            &txn,
+            &arqc,
+        );
+        let proxy = kw.handle(b"KW", &wire, &state).await;
+        if &proxy.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_kw_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} KW rejected a VALID {method_label} ARQC: error_code={} \
+                 (pan={pan} seq={seq} atc={atc_hex} arqc={arqc_hex})",
+                String::from_utf8_lossy(&proxy.error_code),
+            ));
+            break;
+        }
+
+        let mut bad = arqc.clone();
+        bad[0] ^= 0x01;
+        let wire_bad = encode_kw(
+            scheme,
+            b'A',
+            &e0_label,
+            &pan_seq_bcd(&pan, &seq),
+            atc,
+            un,
+            &txn,
+            &bad,
+        );
+        let proxy_bad = kw.handle(b"KW", &wire_bad, &state).await;
+        if &proxy_bad.error_code != b"01" {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_kw_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} KW accepted a CORRUPTED {method_label} ARQC: error_code={} (expected 01)",
+                String::from_utf8_lossy(&proxy_bad.error_code),
+            ));
+            break;
+        }
+
+        eprintln!("case={case_idx:02} OK ({method_label}) pan={pan} seq={seq} atc={atc_hex} txn_len={txn_len} arqc={arqc_hex}");
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
