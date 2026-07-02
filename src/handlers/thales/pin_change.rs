@@ -203,6 +203,30 @@ impl Handler for PinChangeHandler {
             wire: WireGrounding::DiffXprov,
             crypto: CryptoGrounding::Apc,
             proof: Proof::LiveTest("pin_change_du_cu_differential"),
+        }, Evidence {
+            decision: "The Visa PVV primitive — APC's generate_pin_data VisaPinVerificationValue, \
+                       the exact call CU makes to mint a new PVV, and the same algorithm APC uses \
+                       to verify a PVV (DC/EC) — is additionally cross-validated against a second \
+                       implementation (2impl), beyond agreement with APC alone.",
+            because: "APC's generate_pin_data VisaPinVerificationValue agrees with CyberChef \
+                      Payments — a purpose-built, inspectable payment-cryptography implementation, \
+                      a separate codebase in a different language — over randomized PAN / PVKI / \
+                      PIN with a shared clear PVK: both derive the same 4-digit PVV (verified live, \
+                      8/8). The PIN is carried to APC as an ISO-0 block encrypted under a shared \
+                      PEK, so a match also confirms the PIN-block encoding round-trips through \
+                      APC. Combined with the proxy==APC differential above, the proxy's Visa PVV \
+                      agrees with a second implementation. Honest strength: CyberChef Payments \
+                      shares an author with this proxy, so it cross-checks the implementation \
+                      (catching coding-level divergence) rather than being a neutral third-party \
+                      oracle, and it is less battle-tested than APC — so this is corroboration; \
+                      APC (AWS) is the independent reference. Run separately from this \
+                      repository's automated tests.",
+            wire: WireGrounding::None,
+            crypto: CryptoGrounding::TwoImpl,
+            proof: Proof::ManualCite(
+                "cross-validated against CyberChef Payments (a second implementation by the same \
+                 author); run separately",
+            ),
         }]
     }
 
