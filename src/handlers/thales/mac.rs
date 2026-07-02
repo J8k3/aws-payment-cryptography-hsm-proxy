@@ -253,6 +253,28 @@ impl Handler for MacHandler {
                 crypto: CryptoGrounding::Apc,
                 proof: Proof::LiveTest("mac_c2_c4_differential"),
             },
+            Evidence {
+                decision: "The ISO 9797-1 Algorithm 3 (Retail MAC) primitive is additionally \
+                           cross-validated against a second implementation (2impl). This covers the \
+                           Alg3 path — M6/M8 and the C2/C4 Alg3 mode. The Alg1 mode (C2/C4 mode \
+                           '0') is NOT yet cross-validated.",
+                because: "APC's generate_mac ISO9797_ALGORITHM3 agrees with CyberChef Payments — a \
+                          purpose-built payment-cryptography implementation, a separate codebase — \
+                          over randomized TDES key and block-aligned message, and BOTH match a \
+                          from-spec Retail-MAC computation written directly from ISO 9797-1. \
+                          Combined with the proxy==APC differentials above, the proxy's ISO9797-Alg3 \
+                          MAC agrees with a second implementation plus a genuinely independent \
+                          from-spec check. Honest strength: CyberChef Payments shares an author with \
+                          this proxy (so it cross-checks the implementation, not a neutral oracle) \
+                          and is less battle-tested than APC — but the from-spec agreement is an \
+                          author-independent anchor, and APC (AWS) is independent too. Run \
+                          separately from this repository's automated tests; Alg1 out of scope.",
+                wire: WireGrounding::None,
+                crypto: CryptoGrounding::TwoImpl,
+                proof: Proof::ManualCite(
+                    "cross-validated against CyberChef Payments + a from-spec ISO 9797-1 computation (Alg3 only); run separately",
+                ),
+            },
         ]
     }
 

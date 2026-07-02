@@ -143,6 +143,26 @@ impl Handler for CvvHandler {
                 proof: Proof::LiveTest("cvv_cw_cy_differential"),
             },
             Evidence {
+                decision: "The CVV primitive is additionally cross-validated against a second \
+                           implementation (2impl) — beyond agreement with APC alone.",
+                because: "APC's generate_card_validation_data agrees with CyberChef Payments — a \
+                          purpose-built, inspectable payment-cryptography implementation, a \
+                          separate codebase in a different language — over randomized PAN / expiry \
+                          / service code with a shared clear CVK. Combined with the proxy==APC \
+                          differential above, the proxy's CVV agrees with a second implementation. \
+                          Honest strength: CyberChef Payments shares an author with this proxy, so \
+                          it cross-checks the implementation (catching coding-level divergence) \
+                          rather than being a neutral third-party oracle, and it is less \
+                          battle-tested than APC — so this is corroboration; APC (AWS) is the \
+                          independent reference. Run separately from this repository's automated \
+                          tests.",
+                wire: WireGrounding::None,
+                crypto: CryptoGrounding::TwoImpl,
+                proof: Proof::ManualCite(
+                    "cross-validated against CyberChef Payments (a second implementation by the same author); run separately",
+                ),
+            },
+            Evidence {
                 decision: "NY (Mastercard CVC3) and RY (Amex CSC) return Unsupported (68).",
                 because: "NY's NZ response returns two values (IVCVC3 + CVC3) and RY validates 3 CSC lengths at once / includes AEVV — neither reproducible as APC's single generate/verify_card_validation_data call (PUGD0537-004 Rev A p.493 (NY) / p.315 (RY)).",
                 wire: WireGrounding::None,
