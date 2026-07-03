@@ -5137,3 +5137,177 @@ async fn arqc_verify_kq_arpc_method1_differential() -> anyhow::Result<()> {
     survivor_result?;
     Ok(())
 }
+
+// ── ARPC generation KQ Method 2 (CSU, live differential) ─────────────────────
+//
+// KQ mode '2' generates an ARPC (Method 2, CSU + optional proprietary auth data)
+// via APC's verify_auth_request_cryptogram AuthResponseAttributes. The proxy's
+// ARPC must equal a direct APC verify with the same CSU/PAD. Sweeps the PAD length
+// (including 0, where proprietary_authentication_data is omitted). Mastercard '1'.
+const KQ_ARPC2_E0_WIRE_LABEL: &str = "U0000000000000000000000000000QP2E";
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn arqc_verify_kq_arpc_method2_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "arqc_verify_kq_arpc_method2_differential: grounding crypto=apc \
+         wire=diff-xprov(proxy KQ mode2 ARPC == APC verify AuthResponseAttributes)"
+    );
+
+    use apc_proxy::handlers::thales::common::emv_pad;
+    use aws_sdk_paymentcryptographydata::types::{
+        CryptogramAuthResponse, CryptogramVerificationArpcMethod2, MajorKeyDerivationMode,
+        SessionKeyDerivation, SessionKeyMastercard,
+    };
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "E0",
+        wire_label: KQ_ARPC2_E0_WIRE_LABEL,
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31E0EmvMkeyAppCryptograms,
+        modes: KeyModesOfUse::builder().derive_key(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let e0_arn = keys.arn("E0").to_string();
+    let e0_label = keys.wire_label("E0").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let kq = registry.get(b"KQ").expect("KQ handler registered");
+
+    const LABEL: &str = "arqc_verify_kq_arpc_m2";
+    let run = cases_to_run();
+    eprintln!(
+        "arqc_verify_kq_arpc_method2_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let seq = format!("{:02}", edge_biased(&mut rng, 0, 99, &[0, 1, 99]));
+        let atc_val = edge_biased(&mut rng, 0, 0xFFFF, &[1, 0x2A, 0xFFFF]) as u16;
+        let atc = atc_val.to_be_bytes();
+        let atc_hex = hex_upper(&atc);
+        let un: [u8; 4] = hex_str_to_bytes(&gen_hex_message(&mut rng, 4))
+            .try_into()
+            .expect("4 bytes");
+        let un_hex = hex_upper(&un);
+        let csu: [u8; 4] = hex_str_to_bytes(&gen_hex_message(&mut rng, 4))
+            .try_into()
+            .expect("4 bytes");
+        let csu_hex = hex_upper(&csu);
+        // Proprietary auth data: 0..8 bytes (edge-biased over empty / partial / full).
+        let pad_len = edge_biased(&mut rng, 0, 8, &[0, 4, 8]);
+        let pad = hex_str_to_bytes(&gen_hex_message(&mut rng, pad_len));
+        let pad_hex = hex_upper(&pad);
+
+        let txn_len = edge_biased(&mut rng, 1, 24, &[1, 8, 16]);
+        let txn = hex_str_to_bytes(&gen_hex_message(&mut rng, txn_len));
+        let padded_txn_hex = hex_upper(&emv_pad(&txn));
+
+        let session = || {
+            SessionKeyDerivation::Mastercard(
+                SessionKeyMastercard::builder()
+                    .primary_account_number(&pan)
+                    .pan_sequence_number(&seq)
+                    .application_transaction_counter(&atc_hex)
+                    .unpredictable_number(&un_hex)
+                    .build()
+                    .expect("mastercard session"),
+            )
+        };
+
+        let arqc_hex = data
+            .generate_auth_request_cryptogram()
+            .key_identifier(&e0_arn)
+            .transaction_data(&padded_txn_hex)
+            .major_key_derivation_mode(MajorKeyDerivationMode::EmvOptionA)
+            .session_key_derivation_attributes(session())
+            .send()
+            .await?
+            .auth_request_cryptogram()
+            .to_string();
+        let arqc = hex_str_to_bytes(&arqc_hex);
+
+        // Oracle: direct APC verify + ARPC Method 2 (proprietary data only if non-empty).
+        let mut m2b = CryptogramVerificationArpcMethod2::builder().card_status_update(&csu_hex);
+        if !pad.is_empty() {
+            m2b = m2b.proprietary_authentication_data(&pad_hex);
+        }
+        let ara = CryptogramAuthResponse::ArpcMethod2(m2b.build()?);
+        let apc_arpc = data
+            .verify_auth_request_cryptogram()
+            .key_identifier(&e0_arn)
+            .transaction_data(&padded_txn_hex)
+            .auth_request_cryptogram(&arqc_hex)
+            .major_key_derivation_mode(MajorKeyDerivationMode::EmvOptionA)
+            .session_key_derivation_attributes(session())
+            .auth_response_attributes(ara)
+            .send()
+            .await?
+            .auth_response_value()
+            .map(str::to_string)
+            .unwrap_or_default();
+
+        // Proxy KQ mode '2': ... 0x3B + arqc(8B) + CSU(4B) + PAD_len(1B) + PAD(nB).
+        let mut wire = vec![b'2', b'1'];
+        wire.extend_from_slice(b"00E");
+        wire.extend_from_slice(e0_label.as_bytes());
+        wire.extend_from_slice(&pan_seq_bcd(&pan, &seq));
+        wire.extend_from_slice(&atc);
+        wire.extend_from_slice(&un);
+        wire.extend_from_slice(&(txn.len() as u16).to_be_bytes());
+        wire.extend_from_slice(&txn);
+        wire.push(0x3B);
+        wire.extend_from_slice(&arqc);
+        wire.extend_from_slice(&csu);
+        wire.push(pad.len() as u8);
+        wire.extend_from_slice(&pad);
+
+        let proxy = kq.handle(b"KQ", &wire, &state).await;
+        if &proxy.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_kq_arpc_method2_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} KQ mode2 error_code={} (pan={pan} csu={csu_hex} pad={pad_hex} arqc={arqc_hex})",
+                String::from_utf8_lossy(&proxy.error_code),
+            ));
+            break;
+        }
+        let proxy_arpc = String::from_utf8(proxy.payload.to_vec())?;
+        if !proxy_arpc.eq_ignore_ascii_case(&apc_arpc) || proxy_arpc.is_empty() {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_kq_arpc_method2_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} ARPC(M2) mismatch: proxy={proxy_arpc} apc={apc_arpc} \
+                 (pan={pan} csu={csu_hex} pad={pad_hex} arqc={arqc_hex})"
+            ));
+            break;
+        }
+
+        eprintln!(
+            "case={case_idx:02} OK pan={pan} csu={csu_hex} pad_len={pad_len} arpc={proxy_arpc}"
+        );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
