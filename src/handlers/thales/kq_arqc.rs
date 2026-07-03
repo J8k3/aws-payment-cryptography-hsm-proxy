@@ -273,8 +273,11 @@ impl Handler for KqArqcHandler {
                       Unpredictable Number / txn length — the differential confirms the UN is \
                       forwarded to APC's Mastercard session-key derivation. The Amex scheme ('2', \
                       Option A + Amex SKD) is verified the same way in arqc_verify_kq_amex_differential. \
-                      The ARPC Method 1/2 generation path stays mock-tested (verdict, ARQC-mismatch \
-                      → 01, key-not-found → 10, unsupported-mode → 15).",
+                      ARPC Method 1 (ARC) generation is also verified live: the proxy's ARPC \
+                      equals a direct APC verify with the same ARC \
+                      (arqc_verify_kq_arpc_method1_differential). ARPC Method 2 (CSU) generation \
+                      and the error plumbing (key-not-found → 10, unsupported-mode → 15) stay \
+                      mock-tested.",
             wire: WireGrounding::DiffXprov,
             crypto: CryptoGrounding::Apc,
             proof: Proof::LiveTest("arqc_verify_kq_differential"),
