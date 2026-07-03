@@ -95,6 +95,7 @@ async fn forward_tls_happy_path() {
         hsm_host: "localhost",
         hsm_port: mock.addr.port(),
         hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: None,
         tls: None,
         forward_tls: Some(ForwardTlsInput {
             ca_file: certs.ca_cert_pem_path.clone(),
@@ -153,6 +154,7 @@ async fn forward_mtls_happy_path() {
         hsm_host: "localhost",
         hsm_port: mock.addr.port(),
         hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: None,
         tls: None,
         forward_tls: Some(ForwardTlsInput {
             ca_file: certs.ca_cert_pem_path.clone(),
@@ -206,6 +208,7 @@ async fn forward_tls_rejects_untrusted_hsm_cert() {
         hsm_host: "localhost",
         hsm_port: mock.addr.port(),
         hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: None,
         tls: None,
         forward_tls: Some(ForwardTlsInput {
             // Wrong CA — proxy will reject the mock's cert.

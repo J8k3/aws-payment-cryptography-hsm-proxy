@@ -58,6 +58,7 @@ async fn thales_unhandled_command_is_forwarded_and_logged() {
         hsm_host: "127.0.0.1",
         hsm_port: mock.addr.port(),
         hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: None,
         tls: None,
         forward_tls: None,
     });
@@ -114,6 +115,7 @@ async fn futurex_unhandled_command_is_forwarded_and_log_redacts_sensitive_params
         hsm_host: "127.0.0.1",
         hsm_port: mock.addr.port(),
         hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: None,
         tls: None,
         forward_tls: None,
     });
@@ -178,6 +180,7 @@ async fn thales_unhandled_command_returns_error_when_hsm_unreachable() {
         hsm_host: "127.0.0.1",
         hsm_port: unreachable_port,
         hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: None,
         tls: None,
         forward_tls: None,
     });
@@ -218,6 +221,7 @@ async fn thales_unhandled_command_returns_error_on_hsm_read_timeout() {
         hsm_host: "127.0.0.1",
         hsm_port: mock.addr.port(),
         hsm_read_timeout_secs: Some(1),
+        listen_read_timeout_secs: None,
         tls: None,
         forward_tls: None,
     });

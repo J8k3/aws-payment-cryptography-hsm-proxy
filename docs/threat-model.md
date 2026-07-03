@@ -77,7 +77,9 @@ listener on a trusted, access-controlled network segment regardless.
 *warning*, which does not fail the check — so a cleartext config can pass
 verification. Hardening the proxy to warn at runtime and to fail `--verify-only`
 under a strict/production profile is a candidate improvement; until then this is
-entirely the deployer's control.
+entirely the deployer's control. One accidental route to plaintext *is* closed:
+a misspelled `tls` block (or a typo'd field inside it) is now a hard config
+error rather than being silently dropped to a plaintext listener.
 
 ### T2 — Plaintext passthrough leg to the source HSM (MITM)
 
@@ -140,19 +142,27 @@ authentication boundary. This is a deployment control by design.
 
 ### T6 — Network denial of service
 
-**Impact.** The accept loop spawns one task per connection with no concurrency
-cap, and the read paths have limited buffer bounds. A flood of connections, or a
-single malicious connection, can exhaust host resources. (Reachable
-resource-exhaustion bugs in the parsers are tracked separately as code defects;
-this entry is about the deployment-level exposure that remains even after those
-are fixed.)
+**Impact.** Connection floods and slow/idle connections can tie up host
+resources. The proxy now bounds several of these, but the network edge remains
+the deployer's responsibility for volumetric protection.
 
 **Deployer mitigation.** Rate-limit and connection-limit at the network edge
 (load balancer, firewall, service mesh). Do not expose the listener to untrusted
-networks.
+networks. Set `listen.read_timeout_secs` to evict idle/slow connections on an
+untrusted network (it closes a connection that sends nothing within the window;
+it does not interrupt one that is actively sending, so a persistent client that
+sends periodic traffic is unaffected).
 
-**Proxy today.** No built-in connection cap or rate limiting. Per-command latency
-is logged at `info` for observability.
+**Proxy today.** Bounds per-connection memory (a 256 KiB accumulation cap) and
+total concurrency (a hard ceiling of 1024 in-flight connections; further
+connections wait in the kernel backlog rather than growing tasks/FDs/memory).
+The accept loop logs and continues on a transient `accept()` error — notably
+`EMFILE`/`ENFILE` under descriptor pressure — instead of propagating it and
+crashing the process, so resource pressure degrades rather than kills.
+Inbound TLS handshakes time out (10s). An idle read timeout is available but
+**off by default** (`listen.read_timeout_secs`), so a truly-idle connection is
+held until closed unless the operator enables it; that residual, and volumetric
+flooding, remain edge concerns.
 
 ### T7 — Discovery log is sensitive data at rest
 

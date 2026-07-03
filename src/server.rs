@@ -5,6 +5,8 @@ use std::io::{BufWriter, Write};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
+use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, warn};
 
 use crate::config::{DiscoverConfig, ProxyConfig, TlsConfig};
@@ -177,8 +179,33 @@ pub async fn run(cfg: ProxyConfig) -> Result<()> {
     };
     info!(addr = %addr, vendor = %cfg.vendor, %mode, %disc_mode, "proxy listening");
 
+    let idle_timeout = cfg.listen.read_timeout_secs.map(Duration::from_secs);
+    let conn_limit = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+
     loop {
-        let (socket, peer) = listener.accept().await?;
+        // Bound concurrent connections: hold one permit per connection for its
+        // whole lifetime. When all permits are out we stop accepting and the
+        // kernel backlog applies backpressure until one frees — capping tasks,
+        // FDs, and buffer memory instead of growing them without limit.
+        let permit = Arc::clone(&conn_limit)
+            .acquire_owned()
+            .await
+            .expect("connection semaphore is never closed");
+
+        let (socket, peer) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                // Do NOT propagate: a transient accept error — notably
+                // EMFILE/ENFILE under descriptor pressure — must not tear down
+                // the whole proxy and every in-flight transaction. Log, release
+                // the permit, back off briefly to avoid a hot spin while FDs are
+                // exhausted, and keep serving.
+                error!(err = %e, "accept failed; continuing");
+                drop(permit);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+        };
         info!(%peer, "connection accepted");
 
         let state = Arc::clone(&state);
@@ -189,9 +216,11 @@ pub async fn run(cfg: ProxyConfig) -> Result<()> {
 
         let discovery_log = discovery_log.clone();
         tokio::spawn(async move {
+            // Held for the connection's lifetime; released on task exit.
+            let _permit = permit;
             let result = if let Some(acceptor) = tls_acceptor {
-                match acceptor.accept(socket).await {
-                    Ok(stream) => {
+                match timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(socket)).await {
+                    Ok(Ok(stream)) => {
                         handle_connection(
                             stream,
                             state,
@@ -199,16 +228,30 @@ pub async fn run(cfg: ProxyConfig) -> Result<()> {
                             protocol,
                             discover,
                             discovery_log,
+                            idle_timeout,
                         )
                         .await
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         error!(%peer, err = %e, "TLS handshake failed");
+                        return;
+                    }
+                    Err(_) => {
+                        warn!(%peer, "TLS handshake timed out; closing");
                         return;
                     }
                 }
             } else {
-                handle_connection(socket, state, registry, protocol, discover, discovery_log).await
+                handle_connection(
+                    socket,
+                    state,
+                    registry,
+                    protocol,
+                    discover,
+                    discovery_log,
+                    idle_timeout,
+                )
+                .await
             };
 
             if let Err(e) = result {
@@ -282,6 +325,20 @@ fn build_tls_config(tls: &TlsConfig) -> Result<rustls::ServerConfig> {
 /// tuning parameter.
 const MAX_INBOUND_ACCUMULATION: usize = 256 * 1024;
 
+/// Ceiling on concurrent inbound connections. A safety limit, not a tuning
+/// knob: bounds total tasks, file descriptors, and buffer memory so a
+/// connection flood cannot exhaust the process (the per-connection
+/// accumulation cap bounds one connection; this bounds their number).
+/// Legitimate deployments serve a bounded set of application instances well
+/// under this.
+const MAX_CONCURRENT_CONNECTIONS: usize = 1024;
+
+/// Maximum time allowed for an inbound TLS handshake. A real client completes
+/// in well under a second; this evicts a peer that opens TCP and then stalls
+/// the handshake (a slow-loris before any application byte). Mirrors the
+/// outbound handshake timeout in `hsm_client`.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 async fn handle_connection<S>(
     mut socket: S,
     state: Arc<AppState>,
@@ -289,6 +346,7 @@ async fn handle_connection<S>(
     protocol: Arc<dyn Protocol>,
     discover: Option<Arc<DiscoverConfig>>,
     discovery_log: Option<Arc<DiscoveryLog>>,
+    idle_timeout: Option<Duration>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -297,7 +355,20 @@ where
     let mut read_buf = [0u8; 4096];
 
     loop {
-        let n = socket.read(&mut read_buf).await?;
+        // Optional idle timeout: close a connection that goes silent. Off by
+        // default (no timeout) so a persistent client that sends traffic
+        // sporadically is never dropped; enable `listen.read_timeout_secs` to
+        // evict idle/slow-loris connections on untrusted networks.
+        let n = match idle_timeout {
+            Some(t) => {
+                let Ok(read) = timeout(t, socket.read(&mut read_buf)).await else {
+                    debug!("inbound connection idle past read timeout; closing");
+                    return Ok(());
+                };
+                read?
+            }
+            None => socket.read(&mut read_buf).await?,
+        };
         if n == 0 {
             return Ok(());
         }

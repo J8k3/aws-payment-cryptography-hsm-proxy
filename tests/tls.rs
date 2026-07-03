@@ -60,6 +60,7 @@ async fn inbound_tls_b2_heartbeat() {
         hsm_host: "127.0.0.1",
         hsm_port: 1, // unused — B2 is handled locally
         hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: None,
         tls: Some(TlsInput {
             cert_path: certs.cert_path.clone(),
             key_path: certs.key_path.clone(),
@@ -115,6 +116,7 @@ async fn inbound_tls_rejects_plaintext_client() {
         hsm_host: "127.0.0.1",
         hsm_port: 1,
         hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: None,
         tls: Some(TlsInput {
             cert_path: certs.cert_path.clone(),
             key_path: certs.key_path.clone(),
@@ -181,6 +183,7 @@ async fn inbound_mtls_b2_heartbeat_with_valid_client_cert() {
         hsm_host: "127.0.0.1",
         hsm_port: 1,
         hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: None,
         tls: Some(TlsInput {
             cert_path: server_certs.cert_path.clone(),
             key_path: server_certs.key_path.clone(),
@@ -230,6 +233,7 @@ async fn inbound_mtls_rejects_client_without_cert() {
         hsm_host: "127.0.0.1",
         hsm_port: 1,
         hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: None,
         tls: Some(TlsInput {
             cert_path: server_certs.cert_path.clone(),
             key_path: server_certs.key_path.clone(),
@@ -290,6 +294,7 @@ async fn inbound_mtls_rejects_client_with_wrong_ca_cert() {
         hsm_host: "127.0.0.1",
         hsm_port: 1,
         hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: None,
         tls: Some(TlsInput {
             cert_path: server_certs.cert_path.clone(),
             key_path: server_certs.key_path.clone(),

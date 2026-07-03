@@ -22,6 +22,7 @@ fn oversized_futurex_stream_is_capped_without_killing_process() {
         hsm_host: "127.0.0.1",
         hsm_port: 9,
         hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: None,
         tls: None,
         forward_tls: None,
     });
@@ -66,5 +67,46 @@ fn oversized_futurex_stream_is_capped_without_killing_process() {
         resp.ends_with(b"]"),
         "unexpected ECHO response: {:?}",
         String::from_utf8_lossy(&resp)
+    );
+}
+
+#[test]
+fn idle_connection_is_closed_when_read_timeout_configured() {
+    // With listen.read_timeout_secs set, a connection that opens and then goes
+    // silent must be evicted (slow-loris defense), not held open forever.
+    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+        vendor: "futurex_excrypt",
+        hsm_host: "127.0.0.1",
+        hsm_port: 9,
+        hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: Some(1),
+        tls: None,
+        forward_tls: None,
+    });
+
+    let mut idle = TcpStream::connect(proxy.addr).expect("connect idle conn");
+    // Read ceiling well above the 1s idle timeout: the proxy should close the
+    // connection (read returns 0) shortly after ~1s of silence.
+    idle.set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("set read timeout");
+    let start = std::time::Instant::now();
+    let mut sink = [0u8; 16];
+    let n = idle.read(&mut sink).expect("read on idle conn");
+    assert_eq!(n, 0, "proxy should have closed the idle connection (EOF)");
+    assert!(
+        start.elapsed() < Duration::from_secs(8),
+        "idle connection was not closed promptly by the read timeout"
+    );
+
+    // Process still healthy: a fresh ECHO is served.
+    let mut echo = TcpStream::connect(proxy.addr).expect("reconnect");
+    echo.set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("set read timeout");
+    echo.write_all(b"[AOECHO;]").expect("write ECHO");
+    let mut resp = vec![0u8; 64];
+    let n = echo.read(&mut resp).expect("read ECHO");
+    assert!(
+        n > 0 && resp[..n].ends_with(b"]"),
+        "ECHO not served after idle close"
     );
 }

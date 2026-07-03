@@ -3,7 +3,12 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+// `deny_unknown_fields` on every config struct: a misspelled key (e.g. `tsl:`
+// or `cert_flie:`) must be a hard error, not silently ignored — silently
+// dropping a `tls` block would leave a plaintext listener carrying PIN/key
+// material with no signal. (Safe to apply: no struct here uses `#[serde(flatten)]`.)
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProxyConfig {
     #[serde(default)]
     pub listen: ListenConfig,
@@ -18,6 +23,7 @@ pub struct ProxyConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListenConfig {
     #[serde(default = "default_host")]
     pub host: String,
@@ -25,6 +31,14 @@ pub struct ListenConfig {
     pub port: u16,
     /// TLS configuration. Omit for plaintext (development only).
     pub tls: Option<TlsConfig>,
+    /// Idle timeout in seconds for an inbound connection: if no bytes arrive
+    /// within this window, the connection is closed. Omit to disable (default).
+    /// Enable it to evict slow/idle connections on untrusted networks — it does
+    /// not interrupt a connection that is actively sending, only truly idle
+    /// ones, so it can safely bound slow-loris without breaking a persistent
+    /// client that sends periodic traffic within the window.
+    #[serde(default)]
+    pub read_timeout_secs: Option<u64>,
 }
 
 /// TLS configuration for the inbound listener.
@@ -35,6 +49,7 @@ pub struct ListenConfig {
 /// For FIPS-compliant TLS, replace the `ring` feature in Cargo.toml with
 /// `aws-lc-rs` and recompile.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     /// PEM file containing the server certificate chain (leaf first).
     pub cert_file: PathBuf,
@@ -45,6 +60,7 @@ pub struct TlsConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AwsConfig {
     pub region: String,
     /// Named AWS credential profile. Omit to use the default chain (IAM role, env, instance metadata).
@@ -59,6 +75,7 @@ pub struct AwsConfig {
 /// redacted. Use this to build a map of what commands your application
 /// actually uses before writing plugins for them.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DiscoverConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -86,6 +103,7 @@ pub struct DiscoverConfig {
 /// a CA the operator has decided to trust. `client_cert_file` +
 /// `client_key_file` together enable mTLS; provide both or neither.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ForwardTlsConfig {
     /// PEM file containing the CA(s) that signed the HSM's server cert.
     pub ca_file: PathBuf,
@@ -114,6 +132,7 @@ impl Default for ListenConfig {
             host: default_host(),
             port: default_port(),
             tls: None,
+            read_timeout_secs: None,
         }
     }
 }
@@ -122,5 +141,52 @@ impl ProxyConfig {
     pub fn from_yaml(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         Ok(serde_yaml::from_str(&content)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MINIMAL: &str = "vendor: thales_payshield\naws:\n  region: us-east-1\n";
+
+    #[test]
+    fn minimal_config_parses() {
+        let cfg: ProxyConfig = serde_yaml::from_str(MINIMAL).expect("minimal config parses");
+        assert_eq!(cfg.vendor, "thales_payshield");
+        assert!(cfg.listen.tls.is_none());
+        assert!(cfg.listen.read_timeout_secs.is_none());
+    }
+
+    #[test]
+    fn misspelled_tls_block_is_rejected_not_silently_plaintext() {
+        // `tsl` instead of `tls`: without deny_unknown_fields this would parse
+        // as a plaintext listener (tls = None) with no error — shipping a
+        // cleartext PIN/key interface. It must be a hard error instead.
+        let yaml = "vendor: thales_payshield\naws:\n  region: us-east-1\n\
+                    listen:\n  host: 127.0.0.1\n  tsl:\n    cert_file: /x\n    key_file: /y\n";
+        let err = serde_yaml::from_str::<ProxyConfig>(yaml).expect_err("must reject unknown key");
+        assert!(
+            err.to_string().contains("tsl") || err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn misspelled_nested_tls_field_is_rejected() {
+        // Typo inside the tls block (`cert_flie`) must also be caught, not
+        // dropped (which would leave the cert unset).
+        let yaml = "vendor: thales_payshield\naws:\n  region: us-east-1\n\
+                    listen:\n  tls:\n    cert_flie: /x\n    key_file: /y\n";
+        assert!(
+            serde_yaml::from_str::<ProxyConfig>(yaml).is_err(),
+            "misspelled nested tls field must be rejected"
+        );
+    }
+
+    #[test]
+    fn unknown_top_level_key_is_rejected() {
+        let yaml = format!("{MINIMAL}not_a_real_key: 1\n");
+        assert!(serde_yaml::from_str::<ProxyConfig>(&yaml).is_err());
     }
 }
