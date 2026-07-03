@@ -234,7 +234,9 @@ Exit code is 0 only if every entry is `ok`. Run this after every `proxy.yaml` ed
 
 ## Production hardening checklist
 
-Before exposing the proxy to production traffic:
+Before exposing the proxy to production traffic. For the threats behind these
+items — and the ones that are the deploying entity's responsibility to mitigate —
+see the [Threat Model](threat-model.md).
 
 - [ ] Inbound TLS configured (`listen.tls.cert_file` + `listen.tls.key_file`). mTLS (`listen.tls.ca_file`) if your application supports it.
 - [ ] Outbound TLS configured if `discover.enabled=true` and the HSM is on a TLS-only port (`discover.tls.ca_file`, with `client_cert_file` + `client_key_file` for mTLS).
