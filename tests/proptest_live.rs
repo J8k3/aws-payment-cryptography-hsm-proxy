@@ -4459,6 +4459,229 @@ async fn arqc_verify_js_differential() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── Issuer-script MAC JU/KU (EMV secure messaging integrity, live differential) ─
+//
+// JU/KU Mode-0 generate an issuer-script integrity MAC. The proxy maps the wire
+// onto APC generate_mac with EmvMac attributes (APC does the IMK-SMI -> SK-SMI
+// derivation). This differential confirms the proxy's wire parse + EmvMac mapping
+// equals a direct APC generate_mac(EmvMac) with the same fields, swept across the
+// reachable Scheme IDs:
+//   idx%5==0  JU '1' UnionPay  -> EMV2000    + ATC
+//         1  KU '0' Visa       -> VISA       + ATC
+//         2  KU '1' Mastercard -> MASTERCARD + AC (8-byte RANDi)
+//         3  KU '2' Amex       -> AMEX       + ATC
+//         4  KU '5' JCB CVN04  -> EMV_COMMON + AC (length-prefixed message)
+const SMI_E2_WIRE_LABEL: &str = "U0000000000000000000000000000SME2";
+
+/// Encode a JU Mode-0 wire: mode '0' scheme '1' key PAN/Seq(8B) ATC(2B)
+/// padflag '0' MacMsgLen(4H) msg ';'.
+fn encode_ju(key_label: &str, pan_seq: &[u8], atc: [u8; 2], msg: &[u8]) -> Vec<u8> {
+    let mut v = vec![b'0', b'1'];
+    v.extend_from_slice(key_label.as_bytes());
+    v.extend_from_slice(pan_seq);
+    v.extend_from_slice(&atc);
+    v.push(b'0'); // padding flag: proxy pads
+    v.extend_from_slice(format!("{:04X}", msg.len()).as_bytes());
+    v.extend_from_slice(msg);
+    v.push(0x3B);
+    v
+}
+
+/// Encode a KU Mode-0 wire for schemes 0/1/2/5. `length_prefixed` (scheme '5')
+/// adds a 4H message-length field; the others are delimited only.
+fn encode_ku(
+    key_label: &str,
+    scheme: u8,
+    pan_seq: &[u8],
+    skd: [u8; 8],
+    msg: &[u8],
+    length_prefixed: bool,
+) -> Vec<u8> {
+    let mut v = vec![b'0', scheme];
+    v.extend_from_slice(key_label.as_bytes());
+    v.extend_from_slice(pan_seq);
+    v.extend_from_slice(&skd);
+    if length_prefixed {
+        v.extend_from_slice(format!("{:04X}", msg.len()).as_bytes());
+    }
+    v.extend_from_slice(msg);
+    v.push(0x3B);
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn issuer_script_mac_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "issuer_script_mac_differential: grounding crypto=apc \
+         wire=diff-xprov(proxy JU/KU generate MAC == direct APC generate_mac EmvMac)"
+    );
+
+    use apc_proxy::handlers::thales::common::emv_pad;
+    use aws_sdk_paymentcryptographydata::types::{
+        MacAlgorithmEmv, MacAttributes, MajorKeyDerivationMode, SessionKeyDerivationMode,
+        SessionKeyDerivationValue,
+    };
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "E2",
+        wire_label: SMI_E2_WIRE_LABEL,
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31E2EmvMkeyIntegrity,
+        modes: KeyModesOfUse::builder().derive_key(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let e2_arn = keys.arn("E2").to_string();
+    let e2_label = keys.wire_label("E2").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+
+    const LABEL: &str = "issuer_script_mac";
+    let run = cases_to_run();
+    eprintln!(
+        "issuer_script_mac_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let seq = format!("{:02}", edge_biased(&mut rng, 0, 99, &[0, 1, 99]));
+        let pan_seq = pan_seq_bcd(&pan, &seq);
+        let atc_val = edge_biased(&mut rng, 0, 0xFFFF, &[1, 0x2A, 0xFFFF]) as u16;
+        let atc = atc_val.to_be_bytes();
+        let atc_hex = hex_upper(&atc);
+        // 8-byte AC / RANDi seed for the AC-based schemes.
+        let ac_seed = hex_str_to_bytes(&gen_hex_message(&mut rng, 8));
+        let ac_hex = hex_upper(&ac_seed);
+        let ac_8: [u8; 8] = ac_seed.clone().try_into().unwrap();
+        // ATC left-zero-padded to 8 bytes for the KU session-key-data field.
+        let atc_skd: [u8; 8] = [0, 0, 0, 0, 0, 0, atc[0], atc[1]];
+
+        let msg_len = edge_biased(&mut rng, 1, 24, &[1, 7, 8, 16]);
+        // The KU schemes 0/1/2 frame the message by a ';' (0x3B) delimiter with no
+        // length, so a 0x3B byte inside the message is not representable in that
+        // wire (a payShield limitation, not a proxy bug). Sanitize it out here so
+        // the differential exercises the mapping rather than that framing edge.
+        let msg: Vec<u8> = hex_str_to_bytes(&gen_hex_message(&mut rng, msg_len))
+            .into_iter()
+            .map(|b| if b == 0x3B { 0x3A } else { b })
+            .collect();
+        let padded_msg_hex = hex_upper(&emv_pad(&msg));
+
+        // (command, wire, session_mode, session_value) per swept scheme.
+        let variant = case_idx % 5;
+        let (cmd, wire, session_mode, session_value): (
+            &[u8],
+            Vec<u8>,
+            SessionKeyDerivationMode,
+            SessionKeyDerivationValue,
+        ) = match variant {
+            0 => (
+                b"JU",
+                encode_ju(&e2_label, &pan_seq, atc, &msg),
+                SessionKeyDerivationMode::Emv2000,
+                SessionKeyDerivationValue::ApplicationTransactionCounter(atc_hex.clone()),
+            ),
+            1 => (
+                b"KU",
+                encode_ku(&e2_label, b'0', &pan_seq, atc_skd, &msg, false),
+                SessionKeyDerivationMode::Visa,
+                SessionKeyDerivationValue::ApplicationTransactionCounter(atc_hex.clone()),
+            ),
+            2 => (
+                b"KU",
+                encode_ku(&e2_label, b'1', &pan_seq, ac_8, &msg, false),
+                SessionKeyDerivationMode::MastercardSessionKey,
+                SessionKeyDerivationValue::ApplicationCryptogram(ac_hex.clone()),
+            ),
+            3 => (
+                b"KU",
+                encode_ku(&e2_label, b'2', &pan_seq, atc_skd, &msg, false),
+                SessionKeyDerivationMode::Amex,
+                SessionKeyDerivationValue::ApplicationTransactionCounter(atc_hex.clone()),
+            ),
+            _ => (
+                b"KU",
+                encode_ku(&e2_label, b'5', &pan_seq, ac_8, &msg, true),
+                SessionKeyDerivationMode::EmvCommonSessionKey,
+                SessionKeyDerivationValue::ApplicationCryptogram(ac_hex.clone()),
+            ),
+        };
+
+        // 1) Proxy generates the MAC.
+        let handler = registry.get(cmd).expect("JU/KU handler registered");
+        let proxy = handler.handle(cmd, &wire, &state).await;
+        if &proxy.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("issuer_script_mac_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} {} rejected a valid script: error_code={} (pan={pan} seq={seq})",
+                String::from_utf8_lossy(cmd),
+                String::from_utf8_lossy(&proxy.error_code),
+            ));
+            break;
+        }
+        let proxy_mac = String::from_utf8(proxy.payload.to_vec())?;
+
+        // 2) Oracle: direct APC generate_mac with EmvMac and the same mapped fields.
+        let emv = MacAlgorithmEmv::builder()
+            .major_key_derivation_mode(MajorKeyDerivationMode::EmvOptionA)
+            .primary_account_number(&pan)
+            .pan_sequence_number(&seq)
+            .session_key_derivation_mode(session_mode)
+            .session_key_derivation_value(session_value)
+            .build()?;
+        let oracle_mac = data
+            .generate_mac()
+            .key_identifier(&e2_arn)
+            .message_data(&padded_msg_hex)
+            .generation_attributes(MacAttributes::EmvMac(emv))
+            .mac_length(4)
+            .send()
+            .await?
+            .mac()
+            .to_string();
+
+        if !proxy_mac.eq_ignore_ascii_case(&oracle_mac) {
+            eprintln!(
+                "{}",
+                replay_hint("issuer_script_mac_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} {} MAC mismatch: proxy={proxy_mac} oracle={oracle_mac} \
+                 (variant={variant} pan={pan} seq={seq} atc={atc_hex})",
+                String::from_utf8_lossy(cmd),
+            ));
+            break;
+        }
+
+        eprintln!(
+            "case={case_idx:02} OK cmd={} variant={variant} pan={pan} seq={seq} MAC={proxy_mac}",
+            String::from_utf8_lossy(cmd)
+        );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
 // ── ARQC accept-path KQ (Mastercard M/Chip, live differential) ───────────────
 //
 // KQ scheme '1' = Mastercard proprietary SKD (Option A + UN). Confirms the proxy
