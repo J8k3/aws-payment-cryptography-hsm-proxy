@@ -99,20 +99,13 @@ Before importing anything, build a spreadsheet of every key your application use
 
 ### payShield
 
-```
-> KA <label>
-```
+Host command `BU` ("Generate a Key Check Value", response `BV`, PUGD0537-004) returns the KCV for a key given the LMK-encrypted key material — the same hex your application presents on the wire and that you put in `key_mappings`. The legacy `KA` (PUGD0538) does the same for a narrower key-type set; its own spec marks it superseded by `BU`, and it is disabled under the PCI-HSM key-type-separation setting. There is no slot-enumeration command on payShield — the operator walks their own key list.
 
-returns the KCV. Repeat for every label in your application's `key_mappings` (or use `BU` for International Host Commands). There is no `KMAP`-equivalent enumeration on payShield — operator has to walk the list.
+`--verify-only` automates exactly this check when `discover.hsm_host` is configured — see Phase 5.
 
 ### Futurex
 
-```
-[AOKMAP;AK100;]   → bitmap of occupied symmetric slots
-[AOGPKR;BD<slot>;] → per-slot KCV / key type / usage / modifier
-```
-
-Walk every occupied slot. The KB entry in the [MCP repo](https://github.com/J8k3/aws-payment-cryptography-mcp) documents both commands in detail.
+Futurex documents `GPKR` ("General Purpose Key settings get, read only") in its command permission lists, and slot enumeration is expected to pair it with `KMAP` — but the wire field layout of both commands is not published anywhere this project can verify against. Until a capture from a real unit or the Excrypt command reference grounds them, build the inventory from Excrypt Manager / your key ceremony records instead. Automating this is [#13](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/issues/13).
 
 ### Migration target per key
 
@@ -204,6 +197,7 @@ What it checks:
 - AWS credentials resolve
 - `list_keys` scan succeeds (the same scan the proxy runs at startup for wrapped-key resolution)
 - Every `key_mappings` entry resolves to a `CREATE_COMPLETE`, enabled APC key. Reports KCV / usage / algorithm per entry.
+- **HSM-side KCV cross-check** (Thales, when `discover.hsm_host` is configured): asks the source HSM for the KCV of each LMK-encrypted mapping key (`BU` over the same TLS config as the forward leg) and compares it to APC's KCV. This catches the case a clean APC inventory cannot: a mapping that points at a *valid* APC key holding *different* clear material than the HSM key the application actually uses. Key mismatch is a `FAIL`; an unreachable HSM degrades to a single warning and the APC-side checks still run. Futurex is not yet covered (see Phase 2 note on `GPKR`).
 - TLS file paths exist (parse happens at startup)
 - mTLS config is internally consistent (client cert + key paired)
 - Warns if inbound TLS is missing (plaintext listener) or if `discover.enabled=true` without `discover.tls` (plaintext forward leg)
@@ -215,13 +209,12 @@ apc-proxy verify-only against us-east-1
 ─────────────────────────────────────────────────────────────
   ok    AWS credentials resolved
   ok    APC list_keys scan succeeded
-  ok    LIVETEST_DEK_001                     → key/mbnnew5hljwmrelc (TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY/TDES_2KEY, KCV=57860B)
-  ok    LTEST_P0SRC_0001                     → key/idjhww6xxgz4gggd (TR31_P0_PIN_ENCRYPTION_KEY/TDES_2KEY, KCV=D5D44F)
-  FAIL  LTEST_OLD_LABEL                      → key/abc123xyz0000000 NOT FOUND in APC
-  ok    listen.tls.cert_file: /etc/apc-proxy/server.crt
-  ok    listen.tls.key_file:  /etc/apc-proxy/server.key
+  ok    HSM-side KCV cross-check enabled against 10.0.4.20:1500 (BU probe)
+  ok    LIVETEST_DEK_001                     → key/mbnnew5hljwmrelc (TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY/TDES_2KEY, KCV=57860B, HSM=57860B ✓)
+  ok    LTEST_P0SRC_0001                     → key/idjhww6xxgz4gggd (TR31_P0_PIN_ENCRYPTION_KEY/TDES_2KEY, KCV=D5D44F, HSM=D5D44F ✓)
+  FAIL  LTEST_OLD_LABEL                      → key/abc123xyz0000000 APC KCV=A68CDC, HSM KCV=B12345 — KEY MISMATCH
 ─────────────────────────────────────────────────────────────
-6 ok, 0 warning(s), 1 error(s)
+5 ok, 0 warning(s), 1 error(s)
 Verification FAILED — fix errors before starting the proxy.
 ```
 

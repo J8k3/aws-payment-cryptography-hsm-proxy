@@ -7,8 +7,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{DiscoverConfig, ForwardTlsConfig, ProxyConfig, TlsConfig};
+use crate::config::{DiscoverConfig, ProxyConfig, TlsConfig};
 use crate::handlers::{AppState, Registry};
+use crate::hsm_client::{default_crypto_provider, forward_to_hsm};
 use crate::key_map::KeyMap;
 use crate::protocol::{futurex::FuturexExcrypt, thales::ThalesPayShield, Protocol};
 
@@ -218,15 +219,6 @@ pub async fn run(cfg: ProxyConfig) -> Result<()> {
     }
 }
 
-fn default_crypto_provider() -> std::sync::Arc<rustls::crypto::CryptoProvider> {
-    #[cfg(feature = "ring")]
-    return std::sync::Arc::new(rustls::crypto::ring::default_provider());
-    #[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
-    return std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    #[cfg(not(any(feature = "ring", feature = "aws-lc-rs")))]
-    compile_error!("one of features 'ring' or 'aws-lc-rs' must be enabled");
-}
-
 fn build_tls_config(tls: &TlsConfig) -> Result<rustls::ServerConfig> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use rustls_pemfile::{certs, private_key};
@@ -387,148 +379,4 @@ fn log_discovery_command(command_code: &[u8], payload: &[u8], log: Option<&Disco
             dl.record_thales(command_code, payload.len());
         }
     }
-}
-
-/// Forward a raw frame to the real HSM and return its response bytes.
-///
-/// Opens a fresh TCP connection per call. If `cfg.tls` is configured, wraps
-/// the connection in TLS before sending. In production, consider a connection
-/// pool to the real HSM to avoid connection setup overhead on every forwarded command.
-async fn forward_to_hsm(
-    frame: &[u8],
-    cfg: &DiscoverConfig,
-    protocol: &dyn Protocol,
-) -> Result<Vec<u8>> {
-    use tokio::net::TcpStream;
-    use tokio::time::{timeout, Duration};
-
-    let tcp = timeout(
-        Duration::from_secs(10),
-        TcpStream::connect((&*cfg.hsm_host, cfg.hsm_port)),
-    )
-    .await
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "timeout connecting to real HSM {}:{}",
-            cfg.hsm_host,
-            cfg.hsm_port
-        )
-    })?
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "connecting to real HSM {}:{}: {e}",
-            cfg.hsm_host,
-            cfg.hsm_port
-        )
-    })?;
-
-    let read_timeout = Duration::from_secs(cfg.hsm_read_timeout_secs.unwrap_or(30));
-
-    match &cfg.tls {
-        None => exchange_with_hsm(tcp, frame, read_timeout, protocol).await,
-        Some(tls_cfg) => {
-            let connector = build_forward_tls_connector(tls_cfg)?;
-            let server_name_str = tls_cfg
-                .server_name
-                .as_deref()
-                .unwrap_or(cfg.hsm_host.as_str())
-                .to_string();
-            let server_name = rustls::pki_types::ServerName::try_from(server_name_str)
-                .map_err(|e| anyhow::anyhow!("invalid server_name for forward TLS: {e}"))?;
-            let tls_stream = timeout(Duration::from_secs(10), connector.connect(server_name, tcp))
-                .await
-                .map_err(|_| anyhow::anyhow!("timeout during TLS handshake to real HSM"))?
-                .map_err(|e| anyhow::anyhow!("TLS handshake to real HSM failed: {e}"))?;
-            exchange_with_hsm(tls_stream, frame, read_timeout, protocol).await
-        }
-    }
-}
-
-/// Send the frame, read until the protocol says the response is complete or
-/// the connection closes. Generic over the stream type so the same logic
-/// runs for plain TCP and TLS-wrapped TCP.
-async fn exchange_with_hsm<S>(
-    mut stream: S,
-    frame: &[u8],
-    read_timeout: tokio::time::Duration,
-    protocol: &dyn Protocol,
-) -> Result<Vec<u8>>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    use tokio::time::{timeout, Duration};
-
-    timeout(Duration::from_secs(10), stream.write_all(frame))
-        .await
-        .map_err(|_| anyhow::anyhow!("timeout sending to real HSM"))?
-        .map_err(|e| anyhow::anyhow!("sending to real HSM: {e}"))?;
-
-    let mut resp = Vec::with_capacity(4096);
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = timeout(read_timeout, stream.read(&mut buf))
-            .await
-            .map_err(|_| anyhow::anyhow!("timeout reading from real HSM"))?
-            .map_err(|e| anyhow::anyhow!("reading from real HSM: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        resp.extend_from_slice(&buf[..n]);
-        if protocol.is_response_complete(&resp) {
-            break;
-        }
-    }
-    Ok(resp)
-}
-
-/// Build a `TlsConnector` for the outbound forward leg from the operator's
-/// `ForwardTlsConfig`. Requires CA file; client cert + key are optional and
-/// must be provided together when present (for mTLS).
-fn build_forward_tls_connector(cfg: &ForwardTlsConfig) -> Result<tokio_rustls::TlsConnector> {
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    use rustls_pemfile::{certs, private_key};
-    use std::fs::File;
-    use std::io::BufReader;
-
-    let provider = default_crypto_provider();
-
-    let mut root_store = rustls::RootCertStore::empty();
-    for cert in certs(&mut BufReader::new(File::open(&cfg.ca_file).map_err(
-        |e| anyhow::anyhow!("opening ca_file {}: {e}", cfg.ca_file.display()),
-    )?)) {
-        root_store
-            .add(cert.map_err(|e| anyhow::anyhow!("reading CA cert: {e}"))?)
-            .map_err(|e| anyhow::anyhow!("adding CA cert to root store: {e}"))?;
-    }
-
-    let builder = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|e| anyhow::anyhow!("forward TLS protocol versions: {e}"))?
-        .with_root_certificates(root_store);
-
-    let client_cfg = match (&cfg.client_cert_file, &cfg.client_key_file) {
-        (Some(cert_path), Some(key_path)) => {
-            let cert_chain: Vec<CertificateDer<'static>> =
-                certs(&mut BufReader::new(File::open(cert_path).map_err(|e| {
-                    anyhow::anyhow!("opening client_cert_file {}: {e}", cert_path.display())
-                })?))
-                .collect::<Result<_, _>>()
-                .map_err(|e| anyhow::anyhow!("parsing client_cert_file: {e}"))?;
-            let key_der: PrivateKeyDer<'static> =
-                private_key(&mut BufReader::new(File::open(key_path).map_err(|e| {
-                    anyhow::anyhow!("opening client_key_file {}: {e}", key_path.display())
-                })?))
-                .map_err(|e| anyhow::anyhow!("parsing client_key_file: {e}"))?
-                .ok_or_else(|| anyhow::anyhow!("no private key found in {}", key_path.display()))?;
-            builder
-                .with_client_auth_cert(cert_chain, key_der)
-                .map_err(|e| anyhow::anyhow!("building forward mTLS client config: {e}"))?
-        }
-        (None, None) => builder.with_no_client_auth(),
-        _ => anyhow::bail!(
-            "discover.tls: client_cert_file and client_key_file must be provided together"
-        ),
-    };
-
-    Ok(tokio_rustls::TlsConnector::from(Arc::new(client_cfg)))
 }

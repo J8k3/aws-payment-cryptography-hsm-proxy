@@ -18,6 +18,18 @@ use bytes::Bytes;
 /// e.g. CA→CB, CC→CD, M6→M7. Error code "00" = success.
 pub struct ThalesPayShield;
 
+impl ThalesPayShield {
+    /// Frame an outbound host command: [2B BE length][2B header][2B command
+    /// code][payload]. The wire layout is the same as `frame_response` with no
+    /// error-code field — kept next to it so the framing convention (including
+    /// the length-field variant documented above) lives in exactly one module.
+    /// Used by the outbound probe (`hsm_probe`); responses come back through
+    /// `parse`, which is direction-agnostic.
+    pub fn frame_request(&self, header: [u8; 2], command_code: &[u8], payload: &[u8]) -> Vec<u8> {
+        self.frame_response(header, command_code, &[], payload)
+    }
+}
+
 impl Protocol for ThalesPayShield {
     fn parse(&self, buf: &[u8]) -> Option<ParsedCommand> {
         if buf.len() < 6 {

@@ -29,14 +29,31 @@ pub struct MockHsm {
     _task: JoinHandle<()>,
 }
 
+/// Computes a mock response from the received frame (`RespondWith`).
+pub type ResponseFn = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
+
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum MockBehavior {
     /// Read inbound frame, immediately write the canned response, close.
     Respond(Vec<u8>),
+    /// Read inbound frame, compute the response from it, write it, close.
+    /// For tests where the reply depends on the request (e.g. the KCV probe's
+    /// per-key-type candidates).
+    RespondWith(ResponseFn),
     /// Accept the connection, read the frame, then hang indefinitely
     /// (no response). Use to exercise proxy's read-timeout path.
     AcceptThenHang,
+}
+
+impl std::fmt::Debug for MockBehavior {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Respond(r) => f.debug_tuple("Respond").field(r).finish(),
+            Self::RespondWith(_) => f.write_str("RespondWith(<fn>)"),
+            Self::AcceptThenHang => f.write_str("AcceptThenHang"),
+        }
+    }
 }
 
 /// How the mock should accept connections. `Plaintext` is the default;
@@ -120,6 +137,11 @@ where
     match behavior {
         MockBehavior::Respond(reply) => {
             let _ = stream.write_all(reply).await;
+            let _ = stream.shutdown().await;
+        }
+        MockBehavior::RespondWith(f) => {
+            let reply = f(received.lock().await.last().expect("frame just pushed"));
+            let _ = stream.write_all(&reply).await;
             let _ = stream.shutdown().await;
         }
         MockBehavior::AcceptThenHang => {
