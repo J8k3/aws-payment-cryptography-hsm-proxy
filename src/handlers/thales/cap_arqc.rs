@@ -25,7 +25,7 @@ use crate::key_map::KeyDescriptor;
 ///   Cryptogram  8B binary
 ///
 /// K2 → APC verify_auth_request_cryptogram, SessionKeyDerivation::Mastercard
-///       (PAN + PanSeq + ATC + UN), MajorKeyDerivationMode::EmvOptionB, verify-only.
+///       (PAN + PanSeq + ATC + UN), MajorKeyDerivationMode::EmvOptionA, verify-only.
 ///
 /// KS (→ KT) wire format per PUGD0537-004 Rev A p.488:
 ///   Key Type    3H ASCII  consumed (E0 — IMK-AC)
@@ -172,21 +172,17 @@ impl Handler for CapArqcHandler {
             Evidence {
                 decision: "K2 verifies a Mastercard CAP cryptogram → APC \
                            verify_auth_request_cryptogram (SessionKeyDerivation::Mastercard + UN, \
-                           MajorKeyDerivationMode::EmvOptionB). ARQC mismatch → 01.",
-                because: "PUGD0537-004 Rev A p.485 (K2). Wire parse is manual-cited and unit-tested; \
-                          the APC mapping and result plumbing are exercised by unit tests. A live \
-                          accept-path differential is not yet included for K2 specifically: it needs \
-                          Mastercard SKD (with the Unpredictable Number) and Option B, and APC only \
-                          accepts Option B for PANs > 16 digits while the 8-byte BCD PAN field \
-                          decodes to 12 (see the EMV PAN-length gap). APC's generate op is available; \
-                          the differential is straightforward to add once Option-B PAN handling is \
-                          resolved. Hence K2 wire=cited, not diff-xprov.",
-                wire: WireGrounding::Cited,
-                crypto: CryptoGrounding::None,
-                proof: Proof::ManualCite(
-                    "PUGD0537-004 Rev A p.485 (K2); APC verify_auth_request_cryptogram; K2 live \
-                     accept-path pending Mastercard/Option-B (PAN > 16) coverage",
-                ),
+                           MajorKeyDerivationMode::EmvOptionA). ARQC mismatch → 01.",
+                because: "PUGD0537-004 Rev A p.485 (K2). Verified live: APC mints a valid Mastercard \
+                          ARQC via generate_auth_request_cryptogram under a created E0 IMK (DeriveKey \
+                          mode), the proxy's K2 handler verifies it through APC and ACCEPTS (00), and \
+                          a one-bit-corrupted ARQC is REJECTED (01), across randomized PAN / PSN / \
+                          ATC / UN / txn length. The ICC master key is derived with Option A because \
+                          the 8-byte BCD PAN field carries ≤14 digits and APC rejects Option B for \
+                          any PAN ≤ 16 (see #42).",
+                wire: WireGrounding::DiffXprov,
+                crypto: CryptoGrounding::Apc,
+                proof: Proof::LiveTest("arqc_verify_k2_differential"),
             },
         ]
     }
@@ -247,11 +243,13 @@ async fn handle_cap(payload: &[u8], is_k2: bool, state: &Arc<AppState>) -> Handl
         }
     };
 
-    let deriv_mode = if is_k2 {
-        MajorKeyDerivationMode::EmvOptionB
-    } else {
-        MajorKeyDerivationMode::EmvOptionA
-    };
+    // The 8-byte BCD PAN+Seq field carries at most 14 PAN digits, so the ICC
+    // master key is always derived with EMV Option A. Option B requires a PAN
+    // longer than 16 significant digits, which this wire cannot represent, and APC
+    // rejects Option B for any shorter PAN ("PAN length is invalid for EMV major
+    // key derivation mode EMV_OPTION_B") — so hardcoding Option B made every K2
+    // verify fail. See #42.
+    let deriv_mode = MajorKeyDerivationMode::EmvOptionA;
 
     debug!(
         key = %key_arn,

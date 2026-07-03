@@ -5311,3 +5311,153 @@ async fn arqc_verify_kq_arpc_method2_differential() -> anyhow::Result<()> {
     survivor_result?;
     Ok(())
 }
+
+// ── ARQC accept-path K2 (Mastercard, live differential) ──────────────────────
+//
+// After the #42 fix, K2 derives the ICC master key with Option A (the only mode
+// its ≤14-digit PAN field can represent) + SessionKeyDerivation::Mastercard (UN).
+// APC mints a valid Mastercard ARQC, the proxy K2 handler verifies it and ACCEPTS,
+// and a corrupted ARQC is rejected (01). K2 has no mode/scheme bytes and no ARPC.
+const K2_E0_WIRE_LABEL: &str = "U0000000000000000000000000000K2E0";
+
+/// Encode a K2 wire frame per PUGD0537-004 Rev A p.485. Binary fields; UN present.
+fn encode_k2(
+    key_label: &str,
+    pan_seq: &[u8],
+    atc: [u8; 2],
+    un: [u8; 4],
+    txn: &[u8],
+    arqc: &[u8],
+) -> Vec<u8> {
+    let mut v = b"00E".to_vec(); // key type 3H ASCII — consumed
+    v.extend_from_slice(key_label.as_bytes());
+    v.extend_from_slice(pan_seq); // 8B BCD
+    v.extend_from_slice(&atc); // 2B ATC
+    v.extend_from_slice(&un); // 4B UN (K2 only)
+    v.extend_from_slice(&(txn.len() as u16).to_be_bytes()); // 2B BE TxnLen
+    v.extend_from_slice(txn); // nB txn data
+    v.push(0x3B); // delimiter
+    v.extend_from_slice(arqc); // 8B cryptogram
+    v
+}
+
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn arqc_verify_k2_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "arqc_verify_k2_differential: grounding crypto=apc \
+         wire=diff-xprov(APC generate_auth_request_cryptogram Mastercard -> proxy K2 verify)"
+    );
+
+    use apc_proxy::handlers::thales::common::emv_pad;
+    use aws_sdk_paymentcryptographydata::types::{
+        MajorKeyDerivationMode, SessionKeyDerivation, SessionKeyMastercard,
+    };
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "E0",
+        wire_label: K2_E0_WIRE_LABEL,
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31E0EmvMkeyAppCryptograms,
+        modes: KeyModesOfUse::builder().derive_key(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let e0_arn = keys.arn("E0").to_string();
+    let e0_label = keys.wire_label("E0").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let k2 = registry.get(b"K2").expect("K2 handler registered");
+
+    const LABEL: &str = "arqc_verify_k2";
+    let run = cases_to_run();
+    eprintln!(
+        "arqc_verify_k2_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let seq = format!("{:02}", edge_biased(&mut rng, 0, 99, &[0, 1, 99]));
+        let atc_val = edge_biased(&mut rng, 0, 0xFFFF, &[1, 0x2A, 0xFFFF]) as u16;
+        let atc = atc_val.to_be_bytes();
+        let atc_hex = hex_upper(&atc);
+        let un: [u8; 4] = hex_str_to_bytes(&gen_hex_message(&mut rng, 4))
+            .try_into()
+            .expect("4 bytes");
+        let un_hex = hex_upper(&un);
+        let txn_len = edge_biased(&mut rng, 1, 24, &[1, 8, 16]);
+        let txn = hex_str_to_bytes(&gen_hex_message(&mut rng, txn_len));
+        let padded_txn_hex = hex_upper(&emv_pad(&txn));
+
+        let session = SessionKeyDerivation::Mastercard(
+            SessionKeyMastercard::builder()
+                .primary_account_number(&pan)
+                .pan_sequence_number(&seq)
+                .application_transaction_counter(&atc_hex)
+                .unpredictable_number(&un_hex)
+                .build()?,
+        );
+
+        let arqc_hex = data
+            .generate_auth_request_cryptogram()
+            .key_identifier(&e0_arn)
+            .transaction_data(&padded_txn_hex)
+            .major_key_derivation_mode(MajorKeyDerivationMode::EmvOptionA)
+            .session_key_derivation_attributes(session)
+            .send()
+            .await?
+            .auth_request_cryptogram()
+            .to_string();
+        let arqc = hex_str_to_bytes(&arqc_hex);
+
+        let wire = encode_k2(&e0_label, &pan_seq_bcd(&pan, &seq), atc, un, &txn, &arqc);
+        let proxy = k2.handle(b"K2", &wire, &state).await;
+        if &proxy.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_k2_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} K2 rejected a VALID ARQC: error_code={} (pan={pan} un={un_hex} arqc={arqc_hex})",
+                String::from_utf8_lossy(&proxy.error_code),
+            ));
+            break;
+        }
+
+        let mut bad = arqc.clone();
+        bad[0] ^= 0x01;
+        let wire_bad = encode_k2(&e0_label, &pan_seq_bcd(&pan, &seq), atc, un, &txn, &bad);
+        let proxy_bad = k2.handle(b"K2", &wire_bad, &state).await;
+        if &proxy_bad.error_code != b"01" {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_k2_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} K2 accepted a CORRUPTED ARQC: error_code={} (expected 01)",
+                String::from_utf8_lossy(&proxy_bad.error_code),
+            ));
+            break;
+        }
+
+        eprintln!("case={case_idx:02} OK pan={pan} un={un_hex} txn_len={txn_len} arqc={arqc_hex}");
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
