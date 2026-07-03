@@ -7,18 +7,24 @@
 //!   - AWS credentials resolve at all
 //!   - For each `key_mappings` entry: APC `get_key(arn)` succeeds, the key is
 //!     in `CREATE_COMPLETE` state, and `Enabled=true`
+//!   - When `discover.hsm_host` is configured (Thales): the source HSM's KCV
+//!     for each LMK-encrypted mapping key matches APC's KCV (`BU` probe — see
+//!     `hsm_probe`). HSM unreachable degrades to a single warning; the APC-side
+//!     checks still run.
 //!   - Inbound TLS config files exist (parse happens at server start)
 //!   - Outbound TLS config files exist (same approach)
 //!   - The startup APC `list_keys` scan succeeds and reports its index size
 //!
 //! What we don't check yet:
-//!   - HSM-side KCV reachable through `discover.hsm_host` (KA / GPKR query)
+//!   - Futurex HSM-side KCV (`GPKR` field layout unverified — see `hsm_probe`
+//!     module docs and #13)
 //!   - Cert validity windows (expiry)
 
 use anyhow::Result;
 use std::collections::BTreeMap;
 
 use crate::config::ProxyConfig;
+use crate::hsm_probe::{self, ProbeOutcome};
 use crate::key_map::KeyMap;
 
 #[derive(Debug, Default)]
@@ -83,7 +89,12 @@ pub async fn run(cfg: &ProxyConfig) -> Result<bool> {
         report.pass("APC list_keys scan succeeded".to_string());
     }
 
-    // 3. key_mappings: every entry must resolve to a CREATE_COMPLETE, enabled key
+    // 3. key_mappings: every entry must resolve to a CREATE_COMPLETE, enabled key.
+    // When discover.hsm_host is configured, additionally cross-check the KCV the
+    // source HSM computes for the mapping key against the KCV APC reports — a
+    // matching APC inventory can still point at different clear key material,
+    // and without this check the first live transaction is what finds out.
+    let mut probe: HsmKcvProbe = HsmKcvProbe::from_config(cfg, &mut report);
     let mut per_arn_checked: BTreeMap<String, KeyCheck> = BTreeMap::new();
     for (label, arn_or_alias) in &cfg.key_mappings {
         if !per_arn_checked.contains_key(arn_or_alias) {
@@ -96,10 +107,50 @@ pub async fn run(cfg: &ProxyConfig) -> Result<bool> {
             .clone()
         {
             KeyCheck::Ok { kcv, usage, algo } => {
-                report.pass(format!(
-                    "{label:<36} → {} ({usage}/{algo}, KCV={kcv})",
+                let base = format!(
+                    "{label:<36} → {} ({usage}/{algo}, KCV={kcv}",
                     short(arn_or_alias)
-                ));
+                );
+                match probe.run(label).await {
+                    None => report.pass(format!("{base})")),
+                    Some(ProbeOutcome::Kcv(h)) if hsm_probe::kcv_matches(&kcv, &h) => {
+                        report.pass(format!("{base}, HSM={h} ✓)"));
+                    }
+                    Some(ProbeOutcome::Kcv(h)) => {
+                        report.fail(format!(
+                            "{label:<36} → {} APC KCV={kcv}, HSM KCV={h} — KEY MISMATCH",
+                            short(arn_or_alias)
+                        ));
+                    }
+                    Some(ProbeOutcome::UnsupportedForm) => {
+                        report.warn(format!(
+                            "{base}, HSM: not probeable — mapping key is not an LMK-encrypted wire form)"
+                        ));
+                    }
+                    Some(ProbeOutcome::KeyTypeUnknown) => {
+                        report.warn(format!(
+                            "{base}, HSM: BU rejected all blind-probeable key types (ZPK/TMK-TPK-PVK/TAK/ZMK))"
+                        ));
+                    }
+                    Some(ProbeOutcome::HsmError(e)) => {
+                        report.warn(format!("{base}, HSM probe error: {e})"));
+                    }
+                    Some(ProbeOutcome::CommandDisabled) => {
+                        probe.stop(
+                            "HSM refused BU (error 68 — command disabled by security settings) \
+                             — skipping HSM-side KCV checks",
+                            &mut report,
+                        );
+                        report.pass(format!("{base})"));
+                    }
+                    Some(ProbeOutcome::Unreachable(e)) => {
+                        probe.stop(
+                            &format!("HSM unreachable — skipping HSM-side KCV checks: {e}"),
+                            &mut report,
+                        );
+                        report.pass(format!("{base})"));
+                    }
+                }
             }
             KeyCheck::NotFound => {
                 report.fail(format!(
@@ -209,6 +260,49 @@ async fn check_one_key(client: &aws_sdk_paymentcryptography::Client, identifier:
                 KeyCheck::ApiError(msg)
             }
         }
+    }
+}
+
+/// Per-run state for the HSM-side KCV cross-check. Probing is active only for
+/// the Thales vendor with `discover` configured. It switches off for the rest
+/// of the run after the first unreachable / command-disabled outcome, so a dead
+/// HSM produces one warning instead of one per mapping — and the APC-side
+/// checks always run regardless.
+struct HsmKcvProbe<'a> {
+    discover: Option<&'a crate::config::DiscoverConfig>,
+}
+
+impl<'a> HsmKcvProbe<'a> {
+    fn from_config(cfg: &'a ProxyConfig, report: &mut Report) -> Self {
+        match (&cfg.discover, cfg.vendor.as_str()) {
+            (Some(d), "thales_payshield") => {
+                report.pass(format!(
+                    "HSM-side KCV cross-check enabled against {}:{} (BU probe)",
+                    d.hsm_host, d.hsm_port
+                ));
+                Self { discover: Some(d) }
+            }
+            (Some(_), "futurex_excrypt") => {
+                report.warn(
+                    "HSM-side KCV cross-check is gated for Futurex: the GPKR field layout \
+                     is not verified against any available Excrypt reference — see the \
+                     hsm_probe module docs and #13"
+                        .to_string(),
+                );
+                Self { discover: None }
+            }
+            _ => Self { discover: None },
+        }
+    }
+
+    async fn run(&self, label: &str) -> Option<ProbeOutcome> {
+        let d = self.discover?;
+        Some(hsm_probe::thales_kcv(d, label).await)
+    }
+
+    fn stop(&mut self, why: &str, report: &mut Report) {
+        self.discover = None;
+        report.warn(why.to_string());
     }
 }
 

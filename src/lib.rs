@@ -14,6 +14,7 @@
 pub mod config;
 pub mod error;
 pub mod handlers;
+pub mod hsm_probe;
 pub mod key_map;
 pub mod protocol;
 pub mod server;

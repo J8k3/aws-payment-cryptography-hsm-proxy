@@ -394,7 +394,8 @@ fn log_discovery_command(command_code: &[u8], payload: &[u8], log: Option<&Disco
 /// Opens a fresh TCP connection per call. If `cfg.tls` is configured, wraps
 /// the connection in TLS before sending. In production, consider a connection
 /// pool to the real HSM to avoid connection setup overhead on every forwarded command.
-async fn forward_to_hsm(
+/// Also used by `hsm_probe` for the `--verify-only` KCV cross-check.
+pub(crate) async fn forward_to_hsm(
     frame: &[u8],
     cfg: &DiscoverConfig,
     protocol: &dyn Protocol,
