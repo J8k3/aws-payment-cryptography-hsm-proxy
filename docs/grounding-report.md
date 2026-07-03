@@ -168,7 +168,7 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 
 ## `KW`
 
-- **KW verifies an ARQC and optionally generates an ARPC for the EMV / Cloud-Based SKD methods → APC verify_auth_request_cryptogram. Unlike KQ, the Scheme ID encodes the major derivation mode too (Option A for even codes, Option B for odd) plus the session method (EMV2000 / EMV Common). Cloud / LUK / Option-C / JCB / UnionPay SKD schemes are rejected as having no APC equivalent.**
+- **KW verifies an ARQC and optionally generates an ARPC for the EMV / Cloud-Based SKD methods → APC verify_auth_request_cryptogram. The Scheme ID selects the session method (EMV2000 / EMV Common); the explicit Derivation Method byte ('A'/'B') selects the EMV Option A/B major key and is authoritative (#23) rather than inferring it from the Scheme ID's even/odd convention. Cloud / LUK / Option-C / JCB / UnionPay SKD schemes are rejected as having no APC equivalent.**
   - wire `diff-xprov` · crypto `apc` · live test `arqc_verify_kw_differential`
   - PUGD0537-004 Rev A p.471 (KW). Verified live for the Option-A schemes: APC mints a valid ARQC via generate_auth_request_cryptogram under a created E0 IMK (DeriveKey mode), the proxy's KW handler verifies it through APC and ACCEPTS (00), and a one-bit-corrupted ARQC is REJECTED (01), across randomized inputs — sweeping scheme '0' (EMV2000) and '2' (EMV Common), both Option A (arqc_verify_kw_differential). The Option-B schemes ('1'/'3') need a PAN > 16 digits, which the 8-byte BCD PAN field can't carry (see the EMV PAN-length gap), and the ARPC Method 1/2 generation path stays mock-tested; those are the next step.
 
