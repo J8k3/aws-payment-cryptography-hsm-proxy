@@ -11,6 +11,11 @@
 //! actually contain the same clear key, before the first live transaction does
 //! the confirming for us.
 //!
+//! Connections go through [`HsmClient`] (built once per verify run); framing
+//! goes through `ThalesPayShield` so the wire convention lives in one module.
+//! Only the `BU`-specific knowledge is here: candidate payloads, error-code
+//! semantics, and KCV comparison.
+//!
 //! # Grounding (verified against manuals; see docs/grounding-report.md conventions)
 //!
 //! - `BU` (`BV`): PUGD0537-004 Rev A — "Generate a check value for a key
@@ -42,13 +47,13 @@
 //! payShield in the test environment, so unlike the handler differentials this
 //! is framing-level verification only — the KCV semantics rest on the manual.
 
-use crate::config::DiscoverConfig;
+use crate::hsm_client::HsmClient;
 use crate::protocol::thales::ThalesPayShield;
-use crate::server::forward_to_hsm;
+use crate::protocol::Protocol;
 
 /// Message header used on probe frames; the HSM echoes it back and we check
 /// the echo to catch cross-talk on the connection.
-const PROBE_HEADER: &[u8; 2] = b"PB";
+const PROBE_HEADER: [u8; 2] = *b"PB";
 
 /// Outcome of one HSM-side KCV probe for a single `key_mappings` entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,17 +76,15 @@ pub enum ProbeOutcome {
 }
 
 /// Probe the source payShield for the KCV of one `key_mappings` key form.
-pub async fn thales_kcv(cfg: &DiscoverConfig, key_form: &str) -> ProbeOutcome {
+pub async fn thales_kcv(client: &HsmClient, key_form: &str) -> ProbeOutcome {
     let Some(candidates) = bu_candidates(key_form) else {
         return ProbeOutcome::UnsupportedForm;
     };
 
     let protocol = ThalesPayShield;
-    let mut last_error: Option<String> = None;
-
     for payload in candidates {
-        let frame = frame_command(*b"BU", payload.as_bytes());
-        let resp = match forward_to_hsm(&frame, cfg, &protocol).await {
+        let frame = protocol.frame_request(PROBE_HEADER, b"BU", payload.as_bytes());
+        let resp = match client.exchange(&frame, &protocol).await {
             Ok(bytes) => bytes,
             Err(e) => return ProbeOutcome::Unreachable(e.to_string()),
         };
@@ -90,16 +93,11 @@ pub async fn thales_kcv(cfg: &DiscoverConfig, key_form: &str) -> ProbeOutcome {
             BvParse::Error(code) if code == "68" => return ProbeOutcome::CommandDisabled,
             // Any other error (parity '10', bad key type, …): this candidate
             // type code was wrong for this key — try the next one.
-            BvParse::Error(code) => last_error = Some(format!("HSM error {code}")),
+            BvParse::Error(_) => {}
             BvParse::Malformed(why) => return ProbeOutcome::HsmError(why),
         }
     }
-
-    match last_error {
-        Some(_) => ProbeOutcome::KeyTypeUnknown,
-        // Unreachable in practice: bu_candidates never returns an empty list.
-        None => ProbeOutcome::HsmError("no BU candidates produced".into()),
-    }
+    ProbeOutcome::KeyTypeUnknown
 }
 
 /// True when an APC `KeyCheckValue` and an HSM-returned KCV agree. APC KCVs
@@ -107,10 +105,8 @@ pub async fn thales_kcv(cfg: &DiscoverConfig, key_form: &str) -> ProbeOutcome {
 /// AES); `BU` returns 6 or, in the legacy 16-digit mode, 16 of which the
 /// leftmost 6 are the comparable part.
 pub fn kcv_matches(apc: &str, hsm: &str) -> bool {
-    let a = apc.to_ascii_uppercase();
-    let h = hsm.to_ascii_uppercase();
-    let n = a.len().min(h.len()).min(6);
-    n > 0 && a.as_bytes()[..n] == h.as_bytes()[..n]
+    let n = apc.len().min(hsm.len()).min(6);
+    n > 0 && apc.as_bytes()[..n].eq_ignore_ascii_case(&hsm.as_bytes()[..n])
 }
 
 /// Build the ordered `BU` payload candidates for a wire key form, or `None`
@@ -148,48 +144,44 @@ fn bu_candidates(key_form: &str) -> Option<Vec<String>> {
     )
 }
 
-/// Frame a host command: [2B BE length][2B header][2B command][payload].
-fn frame_command(cmd: [u8; 2], payload: &[u8]) -> Vec<u8> {
-    let body_len = 2 + 2 + payload.len();
-    let mut out = Vec::with_capacity(2 + body_len);
-    out.extend_from_slice(&(body_len as u16).to_be_bytes());
-    out.extend_from_slice(PROBE_HEADER);
-    out.extend_from_slice(&cmd);
-    out.extend_from_slice(payload);
-    out
-}
-
 enum BvParse {
     Kcv(String),
     Error(String),
     Malformed(String),
 }
 
-/// Parse a `BV` response: [2B len][2B header]['B''V'][2A error][KCV 6/16 H].
+/// Interpret a `BV` response. Frame-level decoding is `ThalesPayShield::parse`
+/// (direction-agnostic: [2B len][2B header][2B code][rest]); this layer checks
+/// the header echo, the `BV` code, and the error-code / KCV fields.
 fn parse_bv(resp: &[u8]) -> BvParse {
-    if resp.len() < 8 {
-        return BvParse::Malformed(format!("response too short ({} bytes)", resp.len()));
-    }
-    let body_len = u16::from_be_bytes([resp[0], resp[1]]) as usize;
-    if resp.len() < 2 + body_len || body_len < 6 {
-        return BvParse::Malformed("response length prefix inconsistent".into());
-    }
-    let body = &resp[2..2 + body_len];
-    if &body[..2] != PROBE_HEADER {
+    let Some(parsed) = ThalesPayShield.parse(resp) else {
+        return BvParse::Malformed(format!(
+            "not a complete Thales frame ({} bytes)",
+            resp.len()
+        ));
+    };
+    if parsed.header != PROBE_HEADER {
         return BvParse::Malformed("response header does not echo probe header".into());
     }
-    if &body[2..4] != b"BV" {
+    if parsed.command_code != b"BV" {
         return BvParse::Malformed(format!(
             "expected response code BV, got {:?}",
-            String::from_utf8_lossy(&body[2..4])
+            String::from_utf8_lossy(&parsed.command_code)
         ));
     }
-    let error_code = String::from_utf8_lossy(&body[4..6]).to_string();
+    let Some((error_code, kcv_field)) = parsed
+        .payload
+        .split_at_checked(2)
+        .map(|(e, k)| (String::from_utf8_lossy(e).to_string(), k))
+    else {
+        return BvParse::Malformed("BV response missing error code".into());
+    };
     if error_code != "00" {
         return BvParse::Error(error_code);
     }
-    let kcv: String = String::from_utf8_lossy(&body[6..]).to_string();
-    let kcv = kcv.trim_end().to_ascii_uppercase();
+    let kcv = String::from_utf8_lossy(kcv_field)
+        .trim_end()
+        .to_ascii_uppercase();
     if (kcv.len() != 6 && kcv.len() != 16) || !kcv.bytes().all(|b| b.is_ascii_hexdigit()) {
         return BvParse::Malformed(format!("KCV field not 6/16 hex digits: {kcv:?}"));
     }
@@ -199,6 +191,11 @@ fn parse_bv(resp: &[u8]) -> BvParse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `BV` reply as the HSM would frame it.
+    fn bv_response(error: &[u8], kcv: &[u8]) -> Vec<u8> {
+        ThalesPayShield.frame_response(PROBE_HEADER, b"BV", error, kcv)
+    }
 
     #[test]
     fn keyblock_form_single_candidate() {
@@ -244,13 +241,13 @@ mod tests {
 
     #[test]
     fn parse_bv_happy_and_error_paths() {
-        let ok = ThalesPayShieldFrame::response(*b"00", b"D5D44F");
+        let ok = bv_response(b"00", b"D5D44F");
         assert!(matches!(parse_bv(&ok), BvParse::Kcv(k) if k == "D5D44F"));
 
-        let parity = ThalesPayShieldFrame::response(*b"10", b"");
+        let parity = bv_response(b"10", b"");
         assert!(matches!(parse_bv(&parity), BvParse::Error(c) if c == "10"));
 
-        let sixteen = ThalesPayShieldFrame::response(*b"00", b"D5D44F0000000000");
+        let sixteen = bv_response(b"00", b"D5D44F0000000000");
         assert!(matches!(parse_bv(&sixteen), BvParse::Kcv(k) if k.len() == 16));
 
         assert!(matches!(parse_bv(b"\x00\x01x"), BvParse::Malformed(_)));
@@ -262,20 +259,5 @@ mod tests {
         assert!(kcv_matches("D5D44F", "D5D44F0000000000")); // 16-digit HSM reply
         assert!(!kcv_matches("D5D44F", "B12345"));
         assert!(!kcv_matches("", "D5D44F"));
-    }
-
-    /// Test helper mirroring the HSM's response framing.
-    struct ThalesPayShieldFrame;
-    impl ThalesPayShieldFrame {
-        fn response(error: [u8; 2], kcv: &[u8]) -> Vec<u8> {
-            let body_len = 2 + 2 + 2 + kcv.len();
-            let mut out = Vec::new();
-            out.extend_from_slice(&(body_len as u16).to_be_bytes());
-            out.extend_from_slice(PROBE_HEADER);
-            out.extend_from_slice(b"BV");
-            out.extend_from_slice(&error);
-            out.extend_from_slice(kcv);
-            out
-        }
     }
 }
