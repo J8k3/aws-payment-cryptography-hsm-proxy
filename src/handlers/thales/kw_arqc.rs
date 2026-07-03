@@ -39,9 +39,10 @@ use crate::key_map::KeyDescriptor;
 ///            PAD     nB binary
 ///
 /// KW covers the EMV / Cloud-Based SKD methods (EMV2000 and EMV Common Session
-/// Key). Unlike KQ, the Scheme ID encodes the major derivation mode too (Option A
-/// for even codes, Option B for odd), so both are taken from Scheme ID. The
-/// Derivation Method byte is still consumed for wire compatibility.
+/// Key). The Scheme ID selects the session-key method; the explicit Derivation
+/// Method byte ('A'/'B') selects the major derivation mode (EMV Option A/B) and is
+/// authoritative — the Scheme ID's even/odd Option-A/B convention is not used for
+/// the major key, so an inconsistent host gets the mode it stated explicitly (#23).
 pub struct KwArqcHandler;
 
 #[derive(Debug)]
@@ -100,17 +101,16 @@ fn parse_kw(payload: &[u8]) -> Result<KwFields, ProxyError> {
     };
     pos += 1;
 
-    // Scheme ID (1N ASCII) → MajorKeyDerivationMode
+    // Scheme ID (1A ASCII) — selects the session-key method only. The major
+    // derivation mode comes from the explicit Derivation Method byte below (#23):
+    // the Scheme ID's even/odd Option-A/B convention is not used for the mode, so a
+    // host that sets them inconsistently gets the mode it asked for explicitly.
     if payload.len() < pos + 1 {
         return Err(ProxyError::MalformedPayload("KW: scheme ID missing".into()));
     }
-    // Scheme ID selects BOTH major mode and session method (PUGD0537-004 Rev A p.471).
-    let (deriv_mode_a, session) = match payload[pos] {
-        b'0' => (true, EmvSession::Emv2000),  // Option A + EMV2000
-        b'1' => (false, EmvSession::Emv2000), // Option B + EMV2000
-        // '2' = Option A + EMV Common; '5' = Mastercard cloud (also Option A + EMV Common)
-        b'2' | b'5' => (true, EmvSession::EmvCommon),
-        b'3' => (false, EmvSession::EmvCommon), // Option B + EMV Common
+    let session = match payload[pos] {
+        b'0' | b'1' => EmvSession::Emv2000,
+        b'2' | b'3' | b'5' => EmvSession::EmvCommon, // '5' = Mastercard cloud
         b'4' | b'6' | b'7' | b'8' | b'9' | b'A' | b'B' | b'C' => {
             return Err(ProxyError::Unsupported(format!(
                 "KW scheme '{}' (cloud/LUK/Option-C/JCB/UnionPay SKD) has no APC equivalent",
@@ -126,18 +126,23 @@ fn parse_kw(payload: &[u8]) -> Result<KwFields, ProxyError> {
     };
     pos += 1;
 
-    // Derivation Method (1A ASCII) — consumed for wire compatibility
+    // Derivation Method (1A ASCII) → MajorKeyDerivationMode. This is the host's
+    // explicit EMV Option A/B selector and is authoritative for the major key (#23).
     if payload.len() < pos + 1 {
         return Err(ProxyError::MalformedPayload(
             "KW: derivation method missing".into(),
         ));
     }
-    if !matches!(payload[pos], b'A' | b'B') {
-        return Err(ProxyError::MalformedPayload(format!(
-            "KW: invalid derivation method '{}' ('A' or 'B')",
-            payload[pos] as char
-        )));
-    }
+    let deriv_mode_a = match payload[pos] {
+        b'A' => true,
+        b'B' => false,
+        other => {
+            return Err(ProxyError::MalformedPayload(format!(
+                "KW: invalid derivation method '{}' ('A' or 'B')",
+                other as char
+            )))
+        }
+    };
     pos += 1;
 
     // Key Type (3H ASCII) — consumed
@@ -277,11 +282,12 @@ impl Handler for KwArqcHandler {
         use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
         &[Evidence {
             decision: "KW verifies an ARQC and optionally generates an ARPC for the EMV / \
-                       Cloud-Based SKD methods → APC verify_auth_request_cryptogram. Unlike KQ, the \
-                       Scheme ID encodes the major derivation mode too (Option A for even codes, \
-                       Option B for odd) plus the session method (EMV2000 / EMV Common). Cloud / \
-                       LUK / Option-C / JCB / UnionPay SKD schemes are rejected as having no APC \
-                       equivalent.",
+                       Cloud-Based SKD methods → APC verify_auth_request_cryptogram. The Scheme ID \
+                       selects the session method (EMV2000 / EMV Common); the explicit Derivation \
+                       Method byte ('A'/'B') selects the EMV Option A/B major key and is \
+                       authoritative (#23) rather than inferring it from the Scheme ID's even/odd \
+                       convention. Cloud / LUK / Option-C / JCB / UnionPay SKD schemes are rejected \
+                       as having no APC equivalent.",
             because: "PUGD0537-004 Rev A p.471 (KW). Verified live for the Option-A schemes: APC \
                       mints a valid ARQC via generate_auth_request_cryptogram under a created E0 IMK \
                       (DeriveKey mode), the proxy's KW handler verifies it through APC and ACCEPTS \

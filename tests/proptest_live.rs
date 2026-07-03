@@ -4869,31 +4869,32 @@ async fn arqc_verify_kw_differential() -> anyhow::Result<()> {
         let txn = hex_str_to_bytes(&gen_hex_message(&mut rng, txn_len));
         let padded_txn_hex = hex_upper(&emv_pad(&txn));
 
-        // Alternate the two Option-A schemes: '0' EMV2000, '2' EMV Common.
-        let use_common = case_idx % 2 == 1;
-        let (scheme, method_label, session) = if use_common {
-            (
-                b'2',
-                "EMV-Common",
-                SessionKeyDerivation::EmvCommon(
-                    SessionKeyEmvCommon::builder()
-                        .primary_account_number(&pan)
-                        .pan_sequence_number(&seq)
-                        .application_transaction_counter(&atc_hex)
-                        .build()?,
-                ),
+        // Sweep all four A/B-convention schemes with an explicit Derivation Method
+        // byte of 'A'. Under the Scheme-ID even/odd convention, '1' and '3' (odd)
+        // would derive Option B and fail (no >16-digit PAN); honoring the explicit
+        // byte (#23) gives Option A, so they verify. The Scheme ID selects only the
+        // session-key method: '0'/'1' → EMV2000, '2'/'3' → EMV Common.
+        let (scheme, method_label) = match case_idx % 4 {
+            0 => (b'0', "sch0 EMV2000"),
+            1 => (b'1', "sch1 EMV2000 (odd, byte=A)"),
+            2 => (b'2', "sch2 EMV-Common"),
+            _ => (b'3', "sch3 EMV-Common (odd, byte=A)"),
+        };
+        let session = if scheme == b'2' || scheme == b'3' {
+            SessionKeyDerivation::EmvCommon(
+                SessionKeyEmvCommon::builder()
+                    .primary_account_number(&pan)
+                    .pan_sequence_number(&seq)
+                    .application_transaction_counter(&atc_hex)
+                    .build()?,
             )
         } else {
-            (
-                b'0',
-                "EMV2000",
-                SessionKeyDerivation::Emv2000(
-                    SessionKeyEmv2000::builder()
-                        .primary_account_number(&pan)
-                        .pan_sequence_number(&seq)
-                        .application_transaction_counter(&atc_hex)
-                        .build()?,
-                ),
+            SessionKeyDerivation::Emv2000(
+                SessionKeyEmv2000::builder()
+                    .primary_account_number(&pan)
+                    .pan_sequence_number(&seq)
+                    .application_transaction_counter(&atc_hex)
+                    .build()?,
             )
         };
 
