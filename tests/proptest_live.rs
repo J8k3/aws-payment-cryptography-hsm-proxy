@@ -4489,7 +4489,14 @@ fn encode_ju(key_label: &str, pan_seq: &[u8], atc: [u8; 2], msg: &[u8]) -> Vec<u
 
 /// Encode a KU Mode-0 wire for schemes 0/1/2/5. `length_prefixed` (scheme '5')
 /// adds a 4H message-length field; the others are delimited only.
-fn encode_ku(key_label: &str, scheme: u8, pan_seq: &[u8], skd: [u8; 8], msg: &[u8], length_prefixed: bool) -> Vec<u8> {
+fn encode_ku(
+    key_label: &str,
+    scheme: u8,
+    pan_seq: &[u8],
+    skd: [u8; 8],
+    msg: &[u8],
+    length_prefixed: bool,
+) -> Vec<u8> {
     let mut v = vec![b'0', scheme];
     v.extend_from_slice(key_label.as_bytes());
     v.extend_from_slice(pan_seq);
@@ -4616,7 +4623,10 @@ async fn issuer_script_mac_differential() -> anyhow::Result<()> {
         let handler = registry.get(cmd).expect("JU/KU handler registered");
         let proxy = handler.handle(cmd, &wire, &state).await;
         if &proxy.error_code != b"00" {
-            eprintln!("{}", replay_hint("issuer_script_mac_differential", LABEL, case_idx));
+            eprintln!(
+                "{}",
+                replay_hint("issuer_script_mac_differential", LABEL, case_idx)
+            );
             result = Err(anyhow::anyhow!(
                 "case={case_idx} {} rejected a valid script: error_code={} (pan={pan} seq={seq})",
                 String::from_utf8_lossy(cmd),
@@ -4646,7 +4656,10 @@ async fn issuer_script_mac_differential() -> anyhow::Result<()> {
             .to_string();
 
         if !proxy_mac.eq_ignore_ascii_case(&oracle_mac) {
-            eprintln!("{}", replay_hint("issuer_script_mac_differential", LABEL, case_idx));
+            eprintln!(
+                "{}",
+                replay_hint("issuer_script_mac_differential", LABEL, case_idx)
+            );
             result = Err(anyhow::anyhow!(
                 "case={case_idx} {} MAC mismatch: proxy={proxy_mac} oracle={oracle_mac} \
                  (variant={variant} pan={pan} seq={seq} atc={atc_hex})",

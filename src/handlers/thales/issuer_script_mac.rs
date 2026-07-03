@@ -95,10 +95,16 @@ fn require_mode_0(cmd: &str, byte: u8) -> Result<(), ProxyError> {
 
 /// Read the 8-byte PAN/PAN-Seq BCD field at `pos`, returning `(pan, pan_seq)` and
 /// the new offset.
-fn read_pan_seq(cmd: &str, payload: &[u8], pos: usize) -> Result<(String, String, usize), ProxyError> {
+fn read_pan_seq(
+    cmd: &str,
+    payload: &[u8],
+    pos: usize,
+) -> Result<(String, String, usize), ProxyError> {
     const N: usize = 8;
     if payload.len() < pos + N {
-        return Err(ProxyError::MalformedPayload(format!("{cmd}: PAN+Seq missing")));
+        return Err(ProxyError::MalformedPayload(format!(
+            "{cmd}: PAN+Seq missing"
+        )));
     }
     let arr: [u8; 8] = payload[pos..pos + N]
         .try_into()
@@ -167,7 +173,11 @@ fn parse_ju(payload: &[u8]) -> Result<SmiFields, ProxyError> {
                 *other as char
             )))
         }
-        None => return Err(ProxyError::MalformedPayload("JU: padding flag missing".into())),
+        None => {
+            return Err(ProxyError::MalformedPayload(
+                "JU: padding flag missing".into(),
+            ))
+        }
     };
     pos += 1;
 
@@ -282,7 +292,10 @@ fn parse_ku(payload: &[u8]) -> Result<SmiFields, ProxyError> {
         key_id,
         pan,
         pan_seq,
-        mapping: SmiMapping { session_mode, value },
+        mapping: SmiMapping {
+            session_mode,
+            value,
+        },
         message: message_for_apc(message_raw, false),
     })
 }
@@ -295,12 +308,15 @@ fn read_len_prefixed_message<'a>(
     pos: usize,
 ) -> Result<(&'a [u8], usize), ProxyError> {
     if payload.len() < pos + 4 {
-        return Err(ProxyError::MalformedPayload(format!("{cmd}: message length missing")));
+        return Err(ProxyError::MalformedPayload(format!(
+            "{cmd}: message length missing"
+        )));
     }
     let len_hex = std::str::from_utf8(&payload[pos..pos + 4])
         .map_err(|_| ProxyError::MalformedPayload(format!("{cmd}: message length not ASCII")))?;
-    let msg_len = usize::from_str_radix(len_hex, 16)
-        .map_err(|_| ProxyError::MalformedPayload(format!("{cmd}: invalid message length '{len_hex}'")))?;
+    let msg_len = usize::from_str_radix(len_hex, 16).map_err(|_| {
+        ProxyError::MalformedPayload(format!("{cmd}: invalid message length '{len_hex}'"))
+    })?;
     let start = pos + 4;
     if payload.len() < start + msg_len {
         return Err(ProxyError::MalformedPayload(format!(
@@ -373,8 +389,7 @@ impl Handler for IssuerScriptMacHandler {
                 decision:
                     "KY, all confidentiality / PIN-change modes (1–4), KU schemes '3'/'4'/'6' \
                      return Unsupported (68).",
-                because:
-                    "KY Mode-0 EMV2000 secure-messaging derivation takes an IV-SMI and a \
+                because: "KY Mode-0 EMV2000 secure-messaging derivation takes an IV-SMI and a \
                      branch/height key-tree that APC's EmvMac does not model (PUGD0537-004 Rev A \
                      p.480), so it cannot be faithfully mapped without a payShield reference. \
                      Modes 1–4 add confidentiality / PIN change and need APC's separate \
@@ -406,7 +421,9 @@ impl Handler for IssuerScriptMacHandler {
                  that APC's EmvMac does not model; gated pending payShield-referenced validation"
                     .into(),
             )),
-            other => Err(ProxyError::Unsupported(format!("{other}: not an issuer-script MAC command"))),
+            other => Err(ProxyError::Unsupported(format!(
+                "{other}: not an issuer-script MAC command"
+            ))),
         };
         let fields = match fields {
             Ok(f) => f,
@@ -430,7 +447,8 @@ async fn handle_generate(cmd: &str, fields: SmiFields, state: &Arc<AppState>) ->
         SmiValue::Ac(ac) => SessionKeyDerivationValue::ApplicationCryptogram(ac),
     };
 
-    let be = |e: aws_sdk_paymentcryptographydata::error::BuildError| ProxyError::ApcError(e.to_string());
+    let be =
+        |e: aws_sdk_paymentcryptographydata::error::BuildError| ProxyError::ApcError(e.to_string());
     let emv = match MacAlgorithmEmv::builder()
         .major_key_derivation_mode(MajorKeyDerivationMode::EmvOptionA)
         .primary_account_number(&fields.pan)
@@ -503,7 +521,10 @@ mod tests {
         let f = parse_ju(&ju_payload(b'0', b'1', b'0', &[0xDE, 0xAD, 0xBE, 0xEF])).unwrap();
         assert_eq!(f.pan, "12345678901234");
         assert_eq!(f.pan_seq, "01");
-        assert!(matches!(f.mapping.session_mode, SessionKeyDerivationMode::Emv2000));
+        assert!(matches!(
+            f.mapping.session_mode,
+            SessionKeyDerivationMode::Emv2000
+        ));
         assert!(matches!(f.mapping.value, SmiValue::Atc(ref a) if a == "002A"));
         // padding flag '0' → proxy method-2 pads.
         assert_eq!(f.message.as_str(), "DEADBEEF80000000");
@@ -512,7 +533,13 @@ mod tests {
     #[test]
     fn ju_already_padded_message_not_repadded() {
         // 8-byte, already method-2 padded input; mode '0', pad flag '1' → forward as-is.
-        let f = parse_ju(&ju_payload(b'0', b'1', b'1', &[0xDE, 0xAD, 0xBE, 0xEF, 0x80, 0, 0, 0])).unwrap();
+        let f = parse_ju(&ju_payload(
+            b'0',
+            b'1',
+            b'1',
+            &[0xDE, 0xAD, 0xBE, 0xEF, 0x80, 0, 0, 0],
+        ))
+        .unwrap();
         assert_eq!(f.message.as_str(), "DEADBEEF80000000");
     }
 
@@ -555,7 +582,10 @@ mod tests {
     fn ku_visa_scheme0_atc_from_rightmost_2_bytes() {
         let skd = [0, 0, 0, 0, 0, 0, 0x12, 0x34]; // ATC left-zero-padded to 8B
         let f = parse_ku(&ku_payload(b'0', skd, &[0xAB, 0xCD], false)).unwrap();
-        assert!(matches!(f.mapping.session_mode, SessionKeyDerivationMode::Visa));
+        assert!(matches!(
+            f.mapping.session_mode,
+            SessionKeyDerivationMode::Visa
+        ));
         assert!(matches!(f.mapping.value, SmiValue::Atc(ref a) if a == "1234"));
         assert_eq!(f.message.as_str(), "ABCD800000000000");
     }
@@ -564,7 +594,10 @@ mod tests {
     fn ku_mastercard_scheme1_randi_as_ac() {
         let randi = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
         let f = parse_ku(&ku_payload(b'1', randi, &[0xAB], false)).unwrap();
-        assert!(matches!(f.mapping.session_mode, SessionKeyDerivationMode::MastercardSessionKey));
+        assert!(matches!(
+            f.mapping.session_mode,
+            SessionKeyDerivationMode::MastercardSessionKey
+        ));
         assert!(matches!(f.mapping.value, SmiValue::Ac(ref a) if a == "1122334455667788"));
     }
 
@@ -572,7 +605,10 @@ mod tests {
     fn ku_amex_scheme2_atc() {
         let skd = [0, 0, 0, 0, 0, 0, 0x00, 0x07];
         let f = parse_ku(&ku_payload(b'2', skd, &[0xAB], false)).unwrap();
-        assert!(matches!(f.mapping.session_mode, SessionKeyDerivationMode::Amex));
+        assert!(matches!(
+            f.mapping.session_mode,
+            SessionKeyDerivationMode::Amex
+        ));
         assert!(matches!(f.mapping.value, SmiValue::Atc(ref a) if a == "0007"));
     }
 
@@ -580,7 +616,10 @@ mod tests {
     fn ku_jcb_cvn04_scheme5_emvcommon_ac_length_prefixed() {
         let ac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11];
         let f = parse_ku(&ku_payload(b'5', ac, &[0xDE, 0xAD], true)).unwrap();
-        assert!(matches!(f.mapping.session_mode, SessionKeyDerivationMode::EmvCommonSessionKey));
+        assert!(matches!(
+            f.mapping.session_mode,
+            SessionKeyDerivationMode::EmvCommonSessionKey
+        ));
         assert!(matches!(f.mapping.value, SmiValue::Ac(ref a) if a == "AABBCCDDEEFF0011"));
         assert_eq!(f.message.as_str(), "DEAD800000000000");
     }
@@ -614,6 +653,9 @@ mod tests {
 
     #[test]
     fn unsupported_maps_to_68() {
-        assert_eq!(ProxyError::Unsupported("KY".into()).payshield_code(), *b"68");
+        assert_eq!(
+            ProxyError::Unsupported("KY".into()).payshield_code(),
+            *b"68"
+        );
     }
 }
