@@ -13,6 +13,11 @@ use tokio::time::{timeout, Duration};
 use crate::config::{DiscoverConfig, ForwardTlsConfig};
 use crate::protocol::Protocol;
 
+/// Maximum bytes buffered for a single HSM response before the exchange is
+/// aborted. Mirrors the inbound accumulation cap in `server`: bounds the memory
+/// one forward exchange can consume if the HSM never completes a frame.
+const MAX_HSM_RESPONSE: usize = 256 * 1024;
+
 /// A configured outbound HSM endpoint. Construction does all the one-time
 /// work — reading and parsing the CA / client cert / key files and building
 /// the rustls config — so repeated exchanges (e.g. one KCV probe per
@@ -124,6 +129,15 @@ where
         resp.extend_from_slice(&buf[..n]);
         if protocol.is_response_complete(&resp) {
             break;
+        }
+        // Bound the response buffer: a misbehaving or hostile HSM that dribbles
+        // bytes without ever completing a frame must not grow memory without
+        // limit. The per-read timeout bounds an idle peer; this bounds an
+        // actively-dribbling one. Cap matches the inbound side.
+        if resp.len() > MAX_HSM_RESPONSE {
+            anyhow::bail!(
+                "HSM response exceeded {MAX_HSM_RESPONSE} bytes without completing a frame"
+            );
         }
     }
     Ok(resp)

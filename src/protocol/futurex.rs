@@ -111,42 +111,42 @@ pub fn parse_params(payload: &[u8]) -> std::collections::HashMap<[u8; 2], Vec<u8
     map
 }
 
+/// Marker written in place of any Futurex parameter value in discovery logs,
+/// carrying only the value's byte length (never its content).
+fn redacted_value(val: &[u8]) -> String {
+    format!("[REDACTED:{}B]", val.len())
+}
+
 /// Return a redacted copy of the param map as `HashMap<String, String>` for JSON serialization.
 ///
-/// Sensitive codes (AX/BT = key blocks, AL = PIN block) are replaced with "[REDACTED]".
+/// Discovery logging fires only for commands with no handler — i.e. commands
+/// whose field semantics this proxy does not model. A parameter code that is a
+/// PAN, PIN block, or key material in one command may mean something else in
+/// another, so no value can be assumed safe to log. Every value is therefore
+/// redacted to its byte length; the code names and lengths are retained because
+/// they are what an operator needs to write a handler, and neither reveals
+/// cardholder data or key material.
 pub fn params_redacted_map(
     params: &std::collections::HashMap<[u8; 2], Vec<u8>>,
 ) -> std::collections::HashMap<String, String> {
-    const SENSITIVE: &[[u8; 2]] = &[*b"AX", *b"BT", *b"AL"];
     params
         .iter()
         .map(|(code, val)| {
-            let key = String::from_utf8_lossy(code).to_string();
-            let value = if SENSITIVE.contains(code) {
-                "[REDACTED]".to_string()
-            } else {
-                String::from_utf8_lossy(val).to_string()
-            };
-            (key, value)
+            (
+                String::from_utf8_lossy(code).to_string(),
+                redacted_value(val),
+            )
         })
         .collect()
 }
 
-/// Redact known-sensitive Futurex parameter codes from a param map for safe logging.
-///
-/// AX/BT = key blocks, AL = PIN block — never logged in plaintext.
+/// Redact every Futurex parameter value from a param map for safe logging,
+/// keeping only the code and byte length. See [`params_redacted_map`] for why
+/// this is redact-by-default rather than a sensitive-code blocklist.
 pub fn redact_for_log(params: &std::collections::HashMap<[u8; 2], Vec<u8>>) -> String {
-    const SENSITIVE: &[[u8; 2]] = &[*b"AX", *b"BT", *b"AL"];
     let mut parts: Vec<String> = params
         .iter()
-        .map(|(code, val)| {
-            let code_str = String::from_utf8_lossy(code);
-            if SENSITIVE.contains(code) {
-                format!("{code_str}=[REDACTED]")
-            } else {
-                format!("{}={}", code_str, String::from_utf8_lossy(val))
-            }
-        })
+        .map(|(code, val)| format!("{}={}", String::from_utf8_lossy(code), redacted_value(val)))
         .collect();
     parts.sort();
     parts.join(";")
@@ -192,19 +192,27 @@ mod tests {
     }
 
     #[test]
-    fn redaction_masks_ax_bt_al() {
+    fn redaction_masks_every_value() {
+        // Redact-by-default: no parameter value appears in the clear, including
+        // AK (account number / PAN) and an otherwise-innocuous flag. Only the
+        // code and byte length survive.
         let mut params = std::collections::HashMap::new();
         params.insert(*b"AW", b"1".to_vec());
         params.insert(*b"AX", b"supersecretkey".to_vec());
-        params.insert(*b"BT", b"anothersecretkey".to_vec());
         params.insert(*b"AL", b"secretpinblock".to_vec());
-        params.insert(*b"AK", b"561237487695".to_vec());
+        params.insert(*b"AK", b"561237487695".to_vec()); // PAN — must not leak
         let redacted = params_redacted_map(&params);
-        assert_eq!(redacted["AX"], "[REDACTED]");
-        assert_eq!(redacted["BT"], "[REDACTED]");
-        assert_eq!(redacted["AL"], "[REDACTED]");
-        assert_eq!(redacted["AW"], "1");
-        assert_eq!(redacted["AK"], "561237487695");
+        assert_eq!(redacted["AX"], "[REDACTED:14B]");
+        assert_eq!(redacted["AL"], "[REDACTED:14B]");
+        assert_eq!(redacted["AW"], "[REDACTED:1B]");
+        assert_eq!(redacted["AK"], "[REDACTED:12B]");
+        // No value contains the raw PAN digits.
+        assert!(redacted.values().all(|v| !v.contains("561237487695")));
+
+        // The line form used for tracing carries no clear value either.
+        let line = redact_for_log(&params);
+        assert!(!line.contains("561237487695"), "line leaked PAN: {line}");
+        assert!(line.contains("AK=[REDACTED:12B]"), "line = {line}");
     }
 
     #[test]

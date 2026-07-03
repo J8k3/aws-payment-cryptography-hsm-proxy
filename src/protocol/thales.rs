@@ -36,6 +36,15 @@ impl Protocol for ThalesPayShield {
             return None;
         }
         let body_len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+        // A well-formed body is at least header(2) + command code(2). A shorter
+        // declared length is a malformed frame; refuse it rather than slicing
+        // past `msg` below (which would panic on msg[0..4] / &msg[4..]). The
+        // connection then makes no progress and is closed by the caller's
+        // buffer cap. Returning None (not a valid ParsedCommand) is safe because
+        // no valid frame ever has body_len < 4.
+        if body_len < 4 {
+            return None;
+        }
         let frame_len = 2 + body_len;
         if buf.len() < frame_len {
             return None;
@@ -121,6 +130,30 @@ mod tests {
     #[test]
     fn parse_returns_none_for_empty() {
         assert!(ThalesPayShield.parse(b"").is_none());
+    }
+
+    #[test]
+    fn parse_does_not_panic_on_short_body_len() {
+        // A complete buffer (>= 6 bytes) whose declared body_len is 0..4 is
+        // malformed: the body can't hold header(2)+command(2). Before the guard
+        // this sliced past `msg` and panicked. Must return None, never panic.
+        for body_len in 0u16..4 {
+            let mut frame = body_len.to_be_bytes().to_vec();
+            frame.extend_from_slice(&[0xAA; 8]); // plenty of trailing bytes
+            assert!(
+                ThalesPayShield.parse(&frame).is_none(),
+                "body_len={body_len} must be rejected, not parsed/panicked"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_accepts_minimal_valid_frame() {
+        // body_len == 4 is the smallest valid frame: header + command, empty payload.
+        let frame = make_frame([0x00, 0x00], b"CA", b"");
+        let cmd = ThalesPayShield.parse(&frame).expect("minimal frame parses");
+        assert_eq!(&cmd.command_code, b"CA");
+        assert!(cmd.payload.is_empty());
     }
 
     #[test]

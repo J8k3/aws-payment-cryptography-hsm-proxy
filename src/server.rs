@@ -273,6 +273,15 @@ fn build_tls_config(tls: &TlsConfig) -> Result<rustls::ServerConfig> {
     }
 }
 
+/// Maximum bytes buffered for a single not-yet-parsed inbound frame before the
+/// connection is closed. A well-formed Thales frame is at most 2 + u16::MAX =
+/// 65_537 bytes; Futurex host-command frames are far smaller. 256 KiB is ~4x
+/// the largest possible valid frame — ample headroom for any real command while
+/// still bounding the memory one connection can consume (see the OOM path this
+/// guards against). Not a config knob on purpose: it is a safety limit, not a
+/// tuning parameter.
+const MAX_INBOUND_ACCUMULATION: usize = 256 * 1024;
+
 async fn handle_connection<S>(
     mut socket: S,
     state: Arc<AppState>,
@@ -293,6 +302,22 @@ where
             return Ok(());
         }
         buf.extend_from_slice(&read_buf[..n]);
+
+        // Cap unparsed accumulation. Both parsers drain every complete frame
+        // each pass, so `buf` only carries a partial (incomplete) trailing
+        // frame between reads. If it grows past the cap, either a frame is
+        // larger than we will ever serve or the peer is streaming bytes that
+        // never complete a frame (a Futurex stream with no closing ']', or a
+        // Thales frame whose length prefix never resolves). Close the
+        // connection rather than let one socket grow memory without bound.
+        if buf.len() > MAX_INBOUND_ACCUMULATION {
+            warn!(
+                buffered = buf.len(),
+                cap = MAX_INBOUND_ACCUMULATION,
+                "inbound frame exceeds accumulation cap without completing; closing connection"
+            );
+            return Ok(());
+        }
 
         loop {
             let Some(cmd) = protocol.parse(&buf) else {
@@ -355,10 +380,11 @@ where
     }
 }
 
-/// Log a command seen in discovery mode, redacting known-sensitive fields.
+/// Log a command seen in discovery mode, redacting parameter values.
 /// Writes to tracing and, if configured, to the structured NDJSON discovery log.
 ///
-/// For Futurex: parameters are parsed; key blocks and PIN blocks are masked.
+/// For Futurex: parameter codes and value lengths are logged; every value is
+/// redacted (discovery fires on unmodeled commands, so no value is known safe).
 /// For Thales: only command code and payload length are logged (field layout is positional
 /// and command-specific, so field-level parsing is not attempted).
 fn log_discovery_command(command_code: &[u8], payload: &[u8], log: Option<&DiscoveryLog>) {
