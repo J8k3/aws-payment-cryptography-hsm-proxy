@@ -245,6 +245,7 @@ see the [Threat Model](threat-model.md).
 - [ ] APC aliases used in `key_mappings`, not raw ARNs — survives key rotation.
 - [ ] Discovery log path is on a volume large enough for sustained operation; rotate or feed it to your log pipeline.
 - [ ] Metrics: latency is logged per-command at INFO. Wire it into your observability stack.
+- [ ] Tracing: every log line for one command carries a `req` id (a process-local counter) plus `client_ref` (the client's echoed correlation field — the Thales message header). Filter on `req` to trace a single transaction through the proxy; `client_ref` maps it back to the application's own reference. The `req` id is local to the proxy — never sent to the HSM, APC, or the client.
 - [ ] Rollback path documented and tested. Until the proxy has served production traffic for the observation window, keep the original HSM reachable.
 
 ---
