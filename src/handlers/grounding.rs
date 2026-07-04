@@ -8,12 +8,11 @@
 //! code. The evidence lives **only** here, not duplicated in handler doc-comments
 //! (those keep the wire layout + a pointer to this).
 //!
-//! What the audit currently enforces: every `Proof::LiveTest` names a test that
-//! exists, and the handlers already verified against live APC carry grounding.
-//! It does **not** yet require *every* handler to be grounded — handlers without
-//! grounding are listed in the report as the tracked gap, not silently passed.
-//! Grounding the rest is ongoing work (each handler's documentation and test
-//! added together).
+//! What the audit enforces: every `Proof::LiveTest` names a test that exists,
+//! and **every registered handler carries grounding** — all handler structs now
+//! do, so a handler added without evidence fails the audit rather than slipping
+//! in ungrounded. Grounding *strength* still varies (see the grade vocabulary
+//! below) and raising a handler's grade is ongoing, but coverage is complete.
 //!
 //! The vocabulary (`vec`/`vec-thru`/`2impl`/`apc`/`diff-xprov`/`cited`/`none`) is
 //! the same one the original test-grounding inventory used. Claims are framed as
