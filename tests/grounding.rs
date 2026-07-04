@@ -64,3 +64,23 @@ fn verified_handlers_carry_grounding() {
         );
     }
 }
+
+/// Coverage is complete: *every* registered command's handler must carry
+/// grounding. This is what makes the module-doc claim ("every registered handler
+/// carries grounding") true and self-maintaining — a new handler added without
+/// evidence fails here rather than slipping in ungrounded.
+#[test]
+fn every_registered_handler_carries_grounding() {
+    let reg = Registry::build();
+    let mut ungrounded = Vec::new();
+    for code in reg.command_codes() {
+        let h = reg.get(&code).expect("code came from the registry");
+        if h.grounding().is_empty() {
+            ungrounded.push(String::from_utf8_lossy(&code).into_owned());
+        }
+    }
+    assert!(
+        ungrounded.is_empty(),
+        "these registered commands have no grounding evidence: {ungrounded:?}"
+    );
+}
