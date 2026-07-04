@@ -35,6 +35,17 @@ use super::{AppState, Handler, HandlerResult};
 ///   KI  Derive card unique DES keys
 ///   L0  Generate HMAC secret key
 ///
+/// Transaction Key Scheme — RTKS (Racal, Rx) / AS2805.6.2 (Australian, Hx),
+/// no bundled APC abstraction (PUGD0537-004 Rev A §5.5). Rx/Hx pairs are
+/// functionally identical; the code chosen depends on the HSM's active scheme:
+///   RI/HI RK/HK RU/HU  Transaction Request (T/AQ key, without PIN, T/CI key):
+///                      validate a message MAC and return the TPK + MAC residue
+///                      under a per-transaction key
+///   RW/HW              Translate KEYVAL (per-transaction key value)
+///   RM/HM              Administration Request Message
+///   RO/HO RQ/HQ        Transaction Response / generate Auth Para & response
+///   RS/HS              Confirmation
+///
 /// Misc / admin:
 ///   N0  Generate random value (no APC op)
 ///   QH  Query host / connectivity test (not applicable to APC)
@@ -54,7 +65,10 @@ impl Handler for NotAvailableHandler {
             "A0", "A4", "A6", "A8", "AA", "AC", "AE", "AG", "AK", "AM", "AS", "AU", "AW", "BI",
             "B0", "B8", "BG", "BU", "BW", "BS", "BY", "CS", "DW", "DY", "FA", "FC", "FE", "FG",
             "FK", "GC", "GE", "GG", "GK", "GY", "HA", "HC", "HY", "IA", "J6", "J8", "JK", "K8",
-            "KA", "KC", "KG", "KI", "L0", "LU", "LW", "MG", "MI", // Misc / admin
+            "KA", "KC", "KG", "KI", "L0", "LU", "LW", "MG", "MI",
+            // Transaction Key Scheme — RTKS (Racal) / AS2805.6.2 (Australian)
+            "RI", "RK", "RM", "RO", "RQ", "RS", "RU", "RW", "HI", "HK", "HM", "HO", "HQ", "HS",
+            "HU", "HW", // Misc / admin
             "N0", "NC", "NI", "NO", "Q0", "Q6", "Q8", "QH", "RA", "SE", "TG", "TY", "UI", "VW",
             "VY", "WC", "WQ", "WW", "WY",
         ]
@@ -97,6 +111,27 @@ impl Handler for NotAvailableHandler {
                 wire: WireGrounding::None,
                 crypto: CryptoGrounding::None,
                 proof: Proof::Gated("key management is control-plane / LMK — out of proxy scope"),
+            },
+            Evidence {
+                decision: "RTKS / AS2805.6.2 Transaction Key Scheme commands return 68 (RI/HI, \
+                           RK/HK, RU/HU, RW/HW, RM/HM, RO/HO, RQ/HQ, RS/HS).",
+                because:
+                    "The Racal (Rx) and Australian / AS2805.6.2 (Hx) Transaction Key Scheme is a \
+                          per-transaction key-management technique closely coupled with message \
+                          authentication: a single command bundles transaction-key derivation, \
+                          MAC-residue key evolution, PIN-block processing, and MAC generate/verify \
+                          (PUGD0537-004 Rev A §5.5). APC models none of this as a unit — there is \
+                          no bundled TKS abstraction and no MAC-residue concept, and the individual \
+                          steps map to different APC calls depending on the active TKS \
+                          configuration, so the command cannot be reassembled faithfully from spec \
+                          without live traffic. Gated rather than emit a partial, unverifiable \
+                          decomposition.",
+                wire: WireGrounding::None,
+                crypto: CryptoGrounding::None,
+                proof: Proof::Gated(
+                    "RTKS/AS2805.6.2 transaction key scheme — no bundled APC abstraction; \
+                     MAC residue and per-transaction key derivation have no APC representation",
+                ),
             },
             Evidence {
                 decision:
