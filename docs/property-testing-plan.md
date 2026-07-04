@@ -166,3 +166,48 @@ half-MAC = 2 bytes) and references the deleted standing key pool. Keep only the
 generic framing helpers (`make_thales_frame`, `parse_thales_response`) if a TCP
 end-to-end smoke test is still wanted; move correctness coverage to the
 differential harness.
+
+## Known coverage gap — EMV/ARQC PAN length is fixed at 12
+
+An audit of the generators found one real gap. The generators are otherwise
+strongly boundary-aware (`edge_biased` oversamples MAC padding edges
+`[1,7,8,9,16,24,32]`, ATC `[1,0x2A,0xFFFF]`, PSN `[0,1,99]`, etc.), but every
+EMV/ARQC differential fixes the PAN at 12 digits (`gen_pan(&mut rng, 12)`).
+
+The 8-byte PAN/PSN field is a **14-nibble-PAN field**: EMV Option A packs it as
+the PAN left-zero-padded to 14 digits, then the 2-digit PSN. `decode_bcd_pan_seq`
+inverts that by stripping the pad zeros (`hex[..14].trim_start_matches('0')`). A
+fixed 12-digit PAN therefore always packs *exactly two* pad zeros — so the strip
+is exercised at one point only. The untested boundaries:
+
+- **PAN = 14** — PAN‖PSN is exactly 16 digits, so **no padding, no strip**. This
+  is the strip/no-strip boundary and is never hit today.
+- **Shorter PANs** (e.g. 8) pad with more zeros, exercising that the strip
+  removes the right count.
+
+(Note: the field holds at most 14 PAN digits, so PAN > 14 is *not* representable
+here — an earlier framing of this gap as "test up to 19" was wrong; 8/13/14 are
+the meaningful edges.)
+
+**Recipe (validate live before merging — a PAN=14 failure is a real Option-A
+no-pad-boundary finding, not a test bug):**
+
+1. Generalize the packer, keeping it backward-compatible (a 12-digit PAN yields
+   the same bytes as today):
+   ```rust
+   fn pan_seq_bcd(pan: &str, seq2: &str) -> Vec<u8> {
+       assert!(pan.len() <= 14 && seq2.len() == 2);
+       hex_str_to_bytes(&format!("{pan:0>14}{seq2}")) // left-pad PAN to 14 nibbles
+   }
+   ```
+2. At the **`pan_seq_bcd` callers only** (emv_decrypt `K0`, cap_arqc, ARQC
+   `ks`/`js`/`kq`/`kw`/`k2`), replace `gen_pan(&mut rng, 12)` with an edge-biased
+   length, e.g. `gen_pan(&mut rng, edge_biased(&mut rng, 8, 14, &[8, 13, 14]))`.
+3. **Do not touch the ISO-0 PIN sites** (`pin_verify`, `pin_change`, `tpin`,
+   `pin_translate`, DUKPT) — their `gen_pan(…, 12)` is a 12-digit account tied to
+   the ISO-0 PIN block, not the EMV field.
+
+The oracle already builds its APC call from the original `pan` string, so
+consistency holds for any PAN ≤ 14 (decode(pack(pan)) == pan, since `gen_pan`'s
+first digit is non-zero). Minor add while there: oversample `ATC = 0x0000` in the
+EMV counter edge set (currently reachable but not oversampled, unlike `PSN = 0`).
