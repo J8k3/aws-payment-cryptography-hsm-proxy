@@ -16,7 +16,7 @@ use crate::key_map::KeyDescriptor;
 /// K2 (→ K3) wire format per PUGD0537-004 Rev A p.485 (binary, not ASCII hex):
 ///   Key Type    3H ASCII  consumed (E0 — IMK-AC)
 ///   Key         var       16H | 'U'+32H | 'T'+48H
-///   PAN+Seq     8B binary BCD — 12 PAN digits + 2 seq digits, right-padded 0xFF
+///   PAN+Seq     8B binary BCD — rightmost 16 of PAN||PSN, EMV Option A left-0-pad (last 2 digits = PSN)
 ///   ATC         2B binary Application Transaction Counter
 ///   UN          4B binary Unpredictable Number (required by Mastercard M/Chip)
 ///   TxnLen      2B binary big-endian byte count of transaction data

@@ -20,7 +20,7 @@ use crate::key_map::KeyDescriptor;
 ///                          '2'=ARPC-only (reject: APC requires transaction data)
 ///   Scheme ID    1N ASCII  always '1' (CUP Card Key Derivation ver4.2) — consumed
 ///   Key          var       32H | 'U'+32H | 'T'+48H  (parse_key_32; no key-type prefix)
-///   PAN+Seq      8B binary BCD — 12 PAN digits + 2 seq + 2 padding nibbles (0xFF)
+///   PAN+Seq      8B binary BCD — rightmost 16 of PAN||PSN, EMV Option A left-0-pad (last 2 digits = PSN)
 ///   ATC          2B binary Application Transaction Counter
 ///   Padding Flag 1N ASCII  '0'=none, '1'=CUP 0x80-pad applied — consumed
 ///   TxnLen       2H ASCII  byte count of TxnData (max 0xFF = 255 bytes)

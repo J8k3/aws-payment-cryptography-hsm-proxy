@@ -58,6 +58,7 @@ async fn thales_unhandled_command_is_forwarded_and_logged() {
         hsm_host: "127.0.0.1",
         hsm_port: mock.addr.port(),
         hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: None,
         tls: None,
         forward_tls: None,
     });
@@ -101,8 +102,9 @@ async fn thales_unhandled_command_is_forwarded_and_logged() {
 /// preserving other parameter names and values.
 #[tokio::test(flavor = "multi_thread")]
 async fn futurex_unhandled_command_is_forwarded_and_log_redacts_sensitive_params() {
-    // Construct an unhandled command with one safe param (AK) and one sensitive
-    // param (AL — PIN block). The redactor must mask AL while preserving AK.
+    // Construct an unhandled command carrying an account number (AK) and a PIN
+    // block (AL). Discovery fires on unmodeled commands, so the redactor masks
+    // *every* value — neither the PAN nor the PIN block may reach the log.
     let client_frame = b"[AOZZZZ;AK561237487695;AL48B350B131BFCA28;]";
     let canned_reply = b"[AOZZZZ;BBY;]";
 
@@ -113,6 +115,7 @@ async fn futurex_unhandled_command_is_forwarded_and_log_redacts_sensitive_params
         hsm_host: "127.0.0.1",
         hsm_port: mock.addr.port(),
         hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: None,
         tls: None,
         forward_tls: None,
     });
@@ -145,17 +148,18 @@ async fn futurex_unhandled_command_is_forwarded_and_log_redacts_sensitive_params
         "discovery log should record command ZZZZ; got: {log}"
     );
     assert!(
-        log.contains("[REDACTED]"),
-        "discovery log should redact sensitive params; got: {log}"
+        log.contains("[REDACTED:"),
+        "discovery log should redact param values; got: {log}"
     );
     assert!(
         !log.contains("48B350B131BFCA28"),
         "discovery log must not leak PIN block bytes (AL); got: {log}"
     );
-    // Non-sensitive params should be preserved as-is.
+    // Every value is redacted, including the account number (AK) — discovery
+    // fires on unmodeled commands, so no value is assumed safe to log.
     assert!(
-        log.contains("561237487695"),
-        "discovery log should preserve non-sensitive params (AK); got: {log}"
+        !log.contains("561237487695"),
+        "discovery log must not leak the PAN/account number (AK); got: {log}"
     );
 }
 
@@ -176,6 +180,7 @@ async fn thales_unhandled_command_returns_error_when_hsm_unreachable() {
         hsm_host: "127.0.0.1",
         hsm_port: unreachable_port,
         hsm_read_timeout_secs: None,
+        listen_read_timeout_secs: None,
         tls: None,
         forward_tls: None,
     });
@@ -216,6 +221,7 @@ async fn thales_unhandled_command_returns_error_on_hsm_read_timeout() {
         hsm_host: "127.0.0.1",
         hsm_port: mock.addr.port(),
         hsm_read_timeout_secs: Some(1),
+        listen_read_timeout_secs: None,
         tls: None,
         forward_tls: None,
     });

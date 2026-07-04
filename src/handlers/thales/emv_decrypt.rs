@@ -18,7 +18,7 @@ use crate::key_map::KeyDescriptor;
 /// ("Decrypt Encrypted Counters (EMV 4.x)"):
 ///   Key Type    3H ASCII    consumed (E1 — IMK-ENC)
 ///   Key         var         16H | 'U'+32H | 'T'+48H
-///   PAN+Seq     8B binary   BCD — 12 PAN digits + 2 seq digits, right-padded 0xFF
+///   PAN+Seq     8B binary   BCD — rightmost 16 of PAN||PSN, EMV Option A left-0-pad (last 2 digits = PSN)
 ///   ATC         2B binary   Application Transaction Counter
 ///   DataLen     2B binary   big-endian byte count of encrypted data
 ///   EncData     nB binary   ciphertext
