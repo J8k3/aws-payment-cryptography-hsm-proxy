@@ -7,7 +7,7 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 
 **Coverage:** 26 of 26 handlers carry grounding; 0 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
 
-## `AQ`, `BA`, `BC`, `BE`, `BK`, `CG`, `DE`, `DG`, `EE`, `EG`, `FW`, `JC`, `JE`, `JG`, `LE`, `LG`, `LO`, `NG`, `EM`, `EU`, `EW`, `EY`, `GM`, `A0`, `A4`, `A6`, `A8`, `AA`, `AC`, `AE`, `AG`, `AK`, `AM`, `AS`, `AU`, `AW`, `BI`, `B0`, `B8`, `BG`, `BU`, `BW`, `BS`, `BY`, `CS`, `DW`, `DY`, `FA`, `FC`, `FE`, `FG`, `FK`, `GC`, `GE`, `GG`, `GK`, `GY`, `HA`, `HC`, `HY`, `IA`, `J6`, `J8`, `JK`, `K8`, `KA`, `KC`, `KG`, `KI`, `L0`, `LU`, `LW`, `MG`, `MI`, `N0`, `NC`, `NI`, `NO`, `Q0`, `Q6`, `Q8`, `QH`, `RA`, `SE`, `TG`, `TY`, `UI`, `VW`, `VY`, `WC`, `WQ`, `WW`, `WY`
+## `AQ`, `BA`, `BC`, `BE`, `BK`, `CG`, `DE`, `DG`, `EE`, `EG`, `FW`, `JC`, `JE`, `JG`, `LE`, `LG`, `LO`, `NG`, `EM`, `EU`, `EW`, `EY`, `GM`, `A0`, `A4`, `A6`, `A8`, `AA`, `AC`, `AE`, `AG`, `AK`, `AM`, `AS`, `AU`, `AW`, `BI`, `B0`, `B8`, `BG`, `BU`, `BW`, `BS`, `BY`, `CS`, `DW`, `DY`, `FA`, `FC`, `FE`, `FG`, `FK`, `GC`, `GE`, `GG`, `GK`, `GY`, `HA`, `HC`, `HY`, `IA`, `J6`, `J8`, `JK`, `K8`, `KA`, `KC`, `KG`, `KI`, `L0`, `LU`, `LW`, `MG`, `MI`, `RI`, `RK`, `RM`, `RO`, `RQ`, `RS`, `RU`, `RW`, `HI`, `HK`, `HM`, `HO`, `HQ`, `HS`, `HU`, `HW`, `N0`, `NC`, `NI`, `NO`, `Q0`, `Q6`, `Q8`, `QH`, `RA`, `SE`, `TG`, `TY`, `UI`, `VW`, `VY`, `WC`, `WQ`, `WW`, `WY`
 
 - **PIN operations return 68 (AQ, BA, BC, BE, BK, CG, DE, DG, EE, EG, FW, JC, JE, JG, LE, LG, LO, NG).**
   - wire `none` · crypto `none` · gated (68): no APC equivalent — RSA/LMK/clear-PIN paths
@@ -18,6 +18,9 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 - **Key-management operations return 68 (A0/A4/A6/A8/AA/AC/AE/AG/AK/AM/AS/AU/AW/BI/B0/B8/BG/BU/BW/BS/BY/CS/DW/DY/FA/FC/FE/FG/FK/GC/GE/GG/GK/GY/HA/HC/HY/IA/J6/J8/JK/K8/KA/KC/KG/KI/L0/LU/LW/MG/MI).**
   - wire `none` · crypto `none` · gated (68): key management is control-plane / LMK — out of proxy scope
   - These generate, import, export, translate, or manage keys under an LMK, or compute key check values / derive card-unique keys. APC keys are provisioned externally through the control plane, not minted or wrapped via this transaction proxy, so none map to a data-plane call.
+- **RTKS / AS2805.6.2 Transaction Key Scheme commands return 68 (RI/HI, RK/HK, RU/HU, RW/HW, RM/HM, RO/HO, RQ/HQ, RS/HS).**
+  - wire `none` · crypto `none` · gated (68): RTKS/AS2805.6.2 transaction key scheme — no bundled APC abstraction; MAC residue and per-transaction key derivation have no APC representation
+  - The Racal (Rx) and Australian / AS2805.6.2 (Hx) Transaction Key Scheme is a per-transaction key-management technique closely coupled with message authentication: a single command bundles transaction-key derivation, MAC-residue key evolution, PIN-block processing, and MAC generate/verify (PUGD0537-004 Rev A §5.5). APC models none of this as a unit — there is no bundled TKS abstraction and no MAC-residue concept, and the individual steps map to different APC calls depending on the active TKS configuration, so the command cannot be reassembled faithfully from spec without live traffic. Gated rather than emit a partial, unverifiable decomposition.
 - **Administrative/diagnostic operations return 68 (N0, NC, NI, NO, Q0, Q6, Q8, QH, RA, SE, TG, TY, UI, VW, VY, WC, WQ, WW, WY).**
   - wire `none` · crypto `none` · gated (68): admin/diagnostic — no APC data-plane equivalent
   - Random-value generation, host/connectivity queries, and vendor-specific admin/diagnostic commands have no APC data-plane equivalent.

@@ -1092,8 +1092,8 @@ async fn noop_handler_returns_68_for_all_registered_commands() {
     let state = mock_state("http://127.0.0.1:1", HashMap::new()).await;
     let registry = Registry::build();
 
-    // Spot-check a few explicitly disabled commands
-    for cmd in [b"B0" as &[u8], b"LE", b"EM", b"RA"] {
+    // Spot-check a few explicitly disabled commands (incl. RTKS RI and AS2805 HI)
+    for cmd in [b"B0" as &[u8], b"LE", b"EM", b"RA", b"RI", b"HI"] {
         let handler = registry.get(cmd).expect("noop handler registered");
         let result = handler.handle(cmd, b"", &state).await;
         assert_eq!(
