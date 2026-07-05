@@ -243,6 +243,8 @@ advice; confirm scope and applicability with your Qualified PIN Assessor / QSA.
 - **Monitor for encryption / cryptographic failures** (4C-1.3) — watch for missing or invalid BDK IDs, API errors, and malformed results; your application has transaction context APC does not.
 - **Keep shared keys unique between organizations** (17-1) — a key (including a KEK protecting a data key) shared between two entities must not be reused with a third; APC key tags can help track this.
 - **Use approved initial key injection** (12-7) — load the initial TMK / DUKPT BDK to POI devices via approved asymmetric or manual techniques; APC supports TR-31 and TR-34 export for remote key-loading applications.
+- **Own the key lifecycle outside APC** ([PCI PIN v3.1](https://www.pcisecuritystandards.org/) Control Objectives 2, 3, and 6) — APC protects keys once they are imported, but the generation, conveyance, loading, and destruction of key material *before it is imported and after it is exported* remain the deployer's. The proxy resolves a wire-form key reference to an **already-imported** APC key (by KCV or `key_mappings`); it neither holds the source HSM's master key nor manages that material's lifecycle, so nothing about inserting the proxy changes this responsibility.
+- **Separate production and test keys** (19-4) — production keys must never be present or used in a test system, and vice versa. Because the proxy selects keys by ARN from its config, use **distinct AWS accounts** (at minimum distinct, clearly-scoped keys and `key_mappings`) for production versus test so traffic can never be pointed at the wrong key set.
 
 ## Deployer pre-production checklist
 
@@ -260,6 +262,7 @@ checklist](setup.md#production-hardening-checklist):
 - [ ] AWS identity is a least-privilege IAM role, not long-lived keys (T9)
 - [ ] Proxy host treated as a PIN-processing environment (T10)
 - [ ] If in PCI P2PE / PIN scope: POI authentication, no-cleartext-return, crypto-failure monitoring, unique inter-org keys, and approved key injection are handled per your assessor (see [PCI P2PE / PIN scope](#pci-p2pe--pin-scope-if-your-deployment-is-in-scope))
+- [ ] Production and test keys separated (distinct AWS accounts), and key material lifecycle outside APC owned end-to-end (PCI PIN scope)
 
 ## Reporting
 
