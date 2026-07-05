@@ -107,6 +107,14 @@ Host command `BU` ("Generate a Key Check Value", response `BV`, PUGD0537-004) re
 
 Futurex documents `GPKR` ("General Purpose Key settings get, read only") in its command permission lists, and slot enumeration is expected to pair it with `KMAP` — but the wire field layout of both commands is not published anywhere this project can verify against. Until a capture from a real unit or the Excrypt command reference grounds them, build the inventory from Excrypt Manager / your key ceremony records instead. Automating this is [#13](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/issues/13).
 
+### DUKPT key identifiers
+
+When cataloging DUKPT base derivation keys, record how each is identified per
+transaction — you'll need it to select the right BDK at runtime. Per ANSI X9.24-3,
+**AES DUKPT** uses a 32-bit **BDK ID** (with a Derivation ID); **TDEA DUKPT** uses
+a 10-byte **Key Set ID (KSI)**. APC selects the derived working key from the BDK
+plus the transaction's Key Serial Number (KSN).
+
 ### Migration target per key
 
 For each key, decide:
