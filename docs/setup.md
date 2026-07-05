@@ -16,6 +16,8 @@ This guide assumes you already understand why you're doing this — your applica
 - Network reachability from the proxy host to APC (TLS 443 outbound)
 - Source HSM with administrative access — needed to inventory keys and export them for migration. **Test environment only** for an initial rollout; production keys come later
 
+> **Compliance context.** APC is a validated PCI service — a PCI P2PE Component Provider and in scope for PCI PIN and PCI DSS; its attestations are available to AWS customers through [AWS Artifact](https://aws.amazon.com/artifact/). This proxy runs inside your compliance boundary and is not itself validated. Before a production cutover, review the [PCI P2PE / PIN deployer obligations](threat-model.md#pci-p2pe--pin-scope-if-your-deployment-is-in-scope) in the threat model — POI authentication, no-cleartext-return, failure monitoring, and approved key injection are yours to satisfy.
+
 ### IAM policy
 
 The minimum permissions for serve mode:
