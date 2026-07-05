@@ -266,13 +266,13 @@ impl Handler for KqArqcHandler {
                       Unpredictable Number / txn length — the differential confirms the UN is \
                       forwarded to APC's Mastercard session-key derivation. The Amex scheme ('2', \
                       Option A + Amex SKD) is verified the same way in arqc_verify_kq_amex_differential. \
-                      The Visa scheme ('0') is wired to APC's SessionKeyVisa (PAN + PAN seq, no \
-                      ATC/UN in derivation) and exercised by arqc_verify_kq_visa_differential; it is \
-                      grounded on the APC SDK exposing SessionKeyDerivation::Visa, AWS's payShield \
-                      migration mapping (KQ Scheme 0 Visa -> SessionKeyDerivation=Visa), and this \
-                      repo's KU issuer-script-MAC handler which already maps scheme '0' -> Visa and \
-                      is live-verified — but the KQ Visa differential itself has NOT yet been run \
-                      against live APC and must pass before the un-gate is trusted in production. \
+                      The Visa scheme ('0', Option A + Visa SKD: PAN + PAN seq, no ATC/UN in \
+                      derivation) is verified the same way in arqc_verify_kq_visa_differential: APC \
+                      mints a valid Visa ARQC under SessionKeyDerivation::Visa, the proxy ACCEPTS \
+                      (00), and a one-bit-corrupted ARQC is REJECTED (01) across 32 randomized cases. \
+                      (This corrected an earlier over-conservative gate — Visa VIS is not static-only; \
+                      APC exposes SessionKeyDerivation::Visa, AWS's payShield migration maps KQ Scheme \
+                      0 Visa -> it, and this repo's KU handler already uses it.) \
                       ARPC generation is also verified live: the proxy's ARPC equals a direct APC \
                       verify with the same response attributes — Method 1 (ARC) in \
                       arqc_verify_kq_arpc_method1_differential and Method 2 (CSU + proprietary auth \
