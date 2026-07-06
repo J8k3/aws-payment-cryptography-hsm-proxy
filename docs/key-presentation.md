@@ -15,24 +15,16 @@ There are two resolution paths:
 
 The choice of path depends on the wire form, not on operator preference.
 
-### How APC holds keys (the other side of the mapping)
+### APC as the key store
 
-APC is ARN-addressed because of how it stores keys, and that explains why the
-proxy *maps* rather than *unwraps*. Customer key material exists in plaintext
-only inside an APC HSM while an operation is running; otherwise it is encrypted
-under an HSM AES-256 main key and stored as ANSI X9.143 (TR-31) key blocks in an
-encrypted database, referenced by ARN ([Data protection](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/data-protection.html),
-[Cryptographic details](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/cryptographic-details.foundations.html)).
-
-This is the *same* "key wrapped under a master key" model that payment HSMs use
-for working keys carried in the request — APC just exposes an ARN instead of the
-wrapped bytes and holds the wrapping internally. So the proxy's job is to map a
-wire-form key reference to an ARN and let APC do the unwrap; it never needs (or
-has) the source HSM's master key. It also means **APC has no customer-visible key
-table or slot** for a proxy to enumerate — which is why Futurex slot discovery
-([#13](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/issues/13)) has
-no APC-side analog and addresses a secondary, resident-key mode rather than the
-per-request working-key path.
+APC exposes each key as an ARN, never the wrapped bytes, so the proxy *maps* a
+wire-form reference to an ARN and lets APC do the unwrap — it never needs (or has)
+the source HSM's master key. The migration effectively **swaps the customer's key
+store for APC's key store.** It is still a store the customer owns and enumerates
+— via the control-plane `list_keys`, which is exactly what the KCV path above does
+at startup — just addressed by ARN rather than an HSM-resident slot. So a wire form that used to point at a key in the HSM
+table (a Futurex slot, say — [#13](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/issues/13))
+now has to resolve to the matching APC ARN.
 
 ---
 
