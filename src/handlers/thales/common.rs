@@ -67,6 +67,16 @@ pub enum EmvSession {
     Amex,
 }
 
+/// Map an AWS SDK builder error to a `ProxyError`. Shared by the handlers that
+/// construct APC request attribute types (the same `|e| ApcError(e.to_string())`
+/// was previously inlined at several sites).
+// By-value is required so this can be used directly as `.map_err(build_err)`
+// (`Result::map_err` hands the fn an owned `E`).
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn build_err(e: aws_sdk_paymentcryptographydata::error::BuildError) -> ProxyError {
+    ProxyError::ApcError(e.to_string())
+}
+
 /// Build the APC `SessionKeyDerivation` for `method`.
 ///
 /// `un` (unpredictable number) is consumed only by the Mastercard method; `atc`
@@ -79,9 +89,6 @@ pub fn build_session_key(
     atc: &str,
     un: &str,
 ) -> Result<SessionKeyDerivation, ProxyError> {
-    // Non-capturing closure: Copy, so it can be reused across the arms' map_err.
-    let be =
-        |e: aws_sdk_paymentcryptographydata::error::BuildError| ProxyError::ApcError(e.to_string());
     Ok(match method {
         EmvSession::EmvCommon => SessionKeyDerivation::EmvCommon(
             SessionKeyEmvCommon::builder()
@@ -89,7 +96,7 @@ pub fn build_session_key(
                 .pan_sequence_number(pan_seq)
                 .application_transaction_counter(atc)
                 .build()
-                .map_err(be)?,
+                .map_err(build_err)?,
         ),
         EmvSession::Emv2000 => SessionKeyDerivation::Emv2000(
             SessionKeyEmv2000::builder()
@@ -97,7 +104,7 @@ pub fn build_session_key(
                 .pan_sequence_number(pan_seq)
                 .application_transaction_counter(atc)
                 .build()
-                .map_err(be)?,
+                .map_err(build_err)?,
         ),
         EmvSession::Mastercard => SessionKeyDerivation::Mastercard(
             SessionKeyMastercard::builder()
@@ -106,14 +113,14 @@ pub fn build_session_key(
                 .application_transaction_counter(atc)
                 .unpredictable_number(un)
                 .build()
-                .map_err(be)?,
+                .map_err(build_err)?,
         ),
         EmvSession::Amex => SessionKeyDerivation::Amex(
             SessionKeyAmex::builder()
                 .primary_account_number(pan)
                 .pan_sequence_number(pan_seq)
                 .build()
-                .map_err(be)?,
+                .map_err(build_err)?,
         ),
     })
 }
@@ -424,15 +431,13 @@ pub fn parse_ksn_with_descriptor(
     Ok((ksn, DESC_LEN + ksn_nibbles, deriv_type))
 }
 
-/// Convert a byte slice to an uppercase hex string.
+/// Convert a byte slice to an **uppercase** hex string.
+///
+/// Thin wrapper over `hex::encode_upper`. The uppercase contract is load-bearing:
+/// every call site feeds payShield/APC wire fields (ARQC, MAC, ATC, cryptograms)
+/// that are uppercase hex — do not swap for lowercase `hex::encode`.
 pub fn bytes_to_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            write!(s, "{b:02X}").expect("write to String is infallible");
-            s
-        })
+    hex::encode_upper(bytes)
 }
 
 /// Decode the EMV "pre-formatted" PAN/PAN-Sequence field (8 BCD bytes = 16
