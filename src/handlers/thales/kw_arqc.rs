@@ -8,6 +8,7 @@ use crate::handlers::thales::common::{
     build_arpc_attrs, build_session_key, bytes_to_hex, decode_bcd_pan_seq, emv_pad,
     parse_legacy_key, verify_arqc, ArpcParams, EmvSession,
 };
+use crate::handlers::thales::reader::FieldReader;
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -68,13 +69,10 @@ struct KwFields {
 }
 
 fn parse_kw(payload: &[u8]) -> Result<KwFields, ProxyError> {
-    let mut pos = 0;
+    let mut r = FieldReader::new(payload, "KW");
 
     // Mode Flag (1N ASCII)
-    if payload.len() < pos + 1 {
-        return Err(ProxyError::MalformedPayload("KW: mode flag missing".into()));
-    }
-    let mode = match payload[pos] {
+    let mode = match r.byte("mode flag")? {
         b'0' => KwMode::VerifyOnly,
         b'1' => KwMode::VerifyArpcMethod1,
         b'2' => KwMode::VerifyArpcMethod2,
@@ -90,22 +88,19 @@ fn parse_kw(payload: &[u8]) -> Result<KwFields, ProxyError> {
             )))
         }
     };
-    pos += 1;
 
     // Scheme ID (1A ASCII) — selects the session-key method only. The major
     // derivation mode comes from the explicit Derivation Method byte below (#23):
     // the Scheme ID's even/odd Option-A/B convention is not used for the mode, so a
     // host that sets them inconsistently gets the mode it asked for explicitly.
-    if payload.len() < pos + 1 {
-        return Err(ProxyError::MalformedPayload("KW: scheme ID missing".into()));
-    }
-    let session = match payload[pos] {
+    let scheme = r.byte("scheme ID")?;
+    let session = match scheme {
         b'0' | b'1' => EmvSession::Emv2000,
         b'2' | b'3' | b'5' => EmvSession::EmvCommon, // '5' = Mastercard cloud
         b'4' | b'6' | b'7' | b'8' | b'9' | b'A' | b'B' | b'C' => {
             return Err(ProxyError::Unsupported(format!(
                 "KW scheme '{}' (cloud/LUK/Option-C/JCB/UnionPay SKD) has no APC equivalent",
-                payload[pos] as char
+                scheme as char
             )))
         }
         other => {
@@ -115,16 +110,10 @@ fn parse_kw(payload: &[u8]) -> Result<KwFields, ProxyError> {
             )))
         }
     };
-    pos += 1;
 
     // Derivation Method (1A ASCII) → MajorKeyDerivationMode. This is the host's
     // explicit EMV Option A/B selector and is authoritative for the major key (#23).
-    if payload.len() < pos + 1 {
-        return Err(ProxyError::MalformedPayload(
-            "KW: derivation method missing".into(),
-        ));
-    }
-    let deriv_mode_a = match payload[pos] {
+    let deriv_mode_a = match r.byte("derivation method")? {
         b'A' => true,
         b'B' => false,
         other => {
@@ -134,112 +123,34 @@ fn parse_kw(payload: &[u8]) -> Result<KwFields, ProxyError> {
             )))
         }
     };
-    pos += 1;
 
-    // Key Type (3H ASCII) — consumed
-    if payload.len() < pos + 3 {
-        return Err(ProxyError::MalformedPayload("KW: key type missing".into()));
-    }
-    pos += 3;
-
-    // Key (variable ASCII hex)
-    let (key_id, key_consumed) = parse_legacy_key(payload, pos)?;
-    pos += key_consumed;
+    r.take(3, "key type")?; // Key Type (3H ASCII) — consumed
+    let key_id = r.parse_with(parse_legacy_key)?; // Key (16H | U+32H | T+48H)
 
     // PAN+Seq (8B binary BCD)
-    if payload.len() < pos + 8 {
-        return Err(ProxyError::MalformedPayload(
-            "KW: PAN+seq field missing".into(),
-        ));
-    }
-    let pan_seq_bytes: [u8; 8] = payload[pos..pos + 8]
-        .try_into()
-        .expect("length checked above");
-    let (pan, pan_seq) = decode_bcd_pan_seq(pan_seq_bytes);
-    pos += 8;
+    let (pan, pan_seq) = decode_bcd_pan_seq(r.take_array::<8>("PAN+seq")?);
 
-    // ATC (2B binary)
-    if payload.len() < pos + 2 {
-        return Err(ProxyError::MalformedPayload("KW: ATC missing".into()));
-    }
-    let atc = bytes_to_hex(&payload[pos..pos + 2]);
-    pos += 2;
+    let atc = r.take_hex(2, "ATC")?;
+    // UN forwarded; required by the Mastercard proprietary SKD.
+    let un = r.take_hex(4, "UN")?;
 
-    // UN (4B binary) — forwarded; required by the Mastercard proprietary SKD
-    if payload.len() < pos + 4 {
-        return Err(ProxyError::MalformedPayload("KW: UN missing".into()));
-    }
-    let un = bytes_to_hex(&payload[pos..pos + 4]);
-    pos += 4;
+    // TxnData: length (2B BE) then that many bytes. APC does not pad; forward the
+    // EMV (ISO 9797-1 method 2) padded data.
+    let txn_byte_len = r.u16_be("txn length")?;
+    let txn_data = Zeroizing::new(bytes_to_hex(&emv_pad(r.take(txn_byte_len, "txn data")?)));
 
-    // TxnLen (2B binary big-endian)
-    if payload.len() < pos + 2 {
-        return Err(ProxyError::MalformedPayload(
-            "KW: transaction data length missing".into(),
-        ));
-    }
-    let txn_byte_len = u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize;
-    pos += 2;
+    r.expect_byte(0x3B, "delimiter")?;
+    let arqc = r.take_hex(8, "ARQC")?;
 
-    // TxnData
-    if payload.len() < pos + txn_byte_len {
-        return Err(ProxyError::MalformedPayload(format!(
-            "KW: transaction data too short: need {txn_byte_len} bytes"
-        )));
-    }
-    // APC does not pad; forward EMV (ISO 9797-1 method 2) padded data.
-    let txn_data = Zeroizing::new(bytes_to_hex(&emv_pad(&payload[pos..pos + txn_byte_len])));
-    pos += txn_byte_len;
-
-    // Delimiter 0x3B
-    if payload.len() < pos + 1 || payload[pos] != 0x3B {
-        return Err(ProxyError::MalformedPayload(
-            "KW: missing 0x3B delimiter".into(),
-        ));
-    }
-    pos += 1;
-
-    // ARQC (8B binary)
-    if payload.len() < pos + 8 {
-        return Err(ProxyError::MalformedPayload("KW: ARQC missing".into()));
-    }
-    let arqc = bytes_to_hex(&payload[pos..pos + 8]);
-    pos += 8;
-
-    // ARPC params
+    // ARPC params (mode-dependent, binary)
     let arpc_params = match mode {
-        KwMode::VerifyArpcMethod1 => {
-            if payload.len() < pos + 2 {
-                return Err(ProxyError::MalformedPayload(
-                    "KW Method1: ARC missing".into(),
-                ));
-            }
-            let arc = bytes_to_hex(&payload[pos..pos + 2]);
-            Some(ArpcParams::Method1 {
-                auth_response_code: arc,
-            })
-        }
+        KwMode::VerifyArpcMethod1 => Some(ArpcParams::Method1 {
+            auth_response_code: r.take_hex(2, "ARC")?,
+        }),
         KwMode::VerifyArpcMethod2 => {
-            if payload.len() < pos + 4 {
-                return Err(ProxyError::MalformedPayload(
-                    "KW Method2: CSU missing".into(),
-                ));
-            }
-            let csu = bytes_to_hex(&payload[pos..pos + 4]);
-            pos += 4;
-            if payload.len() < pos + 1 {
-                return Err(ProxyError::MalformedPayload(
-                    "KW Method2: PAD length missing".into(),
-                ));
-            }
-            let pad_len = payload[pos] as usize;
-            pos += 1;
-            if payload.len() < pos + pad_len {
-                return Err(ProxyError::MalformedPayload(
-                    "KW Method2: PAD data truncated".into(),
-                ));
-            }
-            let pad = bytes_to_hex(&payload[pos..pos + pad_len]);
+            let csu = r.take_hex(4, "CSU")?;
+            let pad_len = r.byte("PAD length")? as usize;
+            let pad = r.take_hex(pad_len, "PAD data")?;
             Some(ArpcParams::Method2 {
                 card_status_update: csu,
                 proprietary_auth_data: pad,

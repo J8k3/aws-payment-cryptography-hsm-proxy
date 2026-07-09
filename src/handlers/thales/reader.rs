@@ -119,10 +119,7 @@ impl<'a> FieldReader<'a> {
 
     /// Decode a `width`-character ASCII length field in the given `radix`, then
     /// take that many bytes and return them. Collapses the "ASCII length prefix
-    /// then payload" pattern shared by the MAC / encrypt handlers.
-    // Consumers (mac / mac_translate / dukpt_mac / international_encrypt) are
-    // migrated in later commits on this branch.
-    #[allow(dead_code)]
+    /// then payload" pattern shared by the JS / MAC / encrypt handlers.
     pub(crate) fn take_ascii_len_field(
         &mut self,
         width: usize,

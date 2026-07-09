@@ -8,6 +8,7 @@ use crate::handlers::thales::common::{
     build_arpc_attrs, build_session_key, bytes_to_hex, decode_bcd_pan_seq, emv_pad, parse_key_32,
     verify_arqc, ArpcParams, EmvSession,
 };
+use crate::handlers::thales::reader::FieldReader;
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -54,13 +55,10 @@ struct JsFields {
 }
 
 fn parse_js(payload: &[u8]) -> Result<JsFields, ProxyError> {
-    let mut pos = 0;
+    let mut r = FieldReader::new(payload, "JS");
 
     // Mode Flag (1N)
-    if payload.is_empty() {
-        return Err(ProxyError::MalformedPayload("JS: mode flag missing".into()));
-    }
-    let mode = match payload[pos] {
+    let mode = match r.byte("mode flag")? {
         b'0' => JsMode::VerifyOnly,
         b'1' => JsMode::VerifyWithArpc,
         b'2' => {
@@ -75,86 +73,27 @@ fn parse_js(payload: &[u8]) -> Result<JsFields, ProxyError> {
             )))
         }
     };
-    pos += 1;
 
-    // Scheme ID (1N) — always '1' for CUP; consume and discard
-    if payload.len() < pos + 1 {
-        return Err(ProxyError::MalformedPayload("JS: scheme ID missing".into()));
-    }
-    pos += 1;
-
-    // Key (32H baseline; no key-type prefix in JS)
-    let (key_id, key_consumed) = parse_key_32(payload, pos)?;
-    pos += key_consumed;
+    r.byte("scheme ID")?; // Scheme ID (1N) — always '1' for CUP; consumed
+    let key_id = r.parse_with(parse_key_32)?; // Key (32H baseline; no key-type prefix)
 
     // PAN+Seq (8B binary BCD)
-    const PAN_SEQ_BYTES: usize = 8;
-    if payload.len() < pos + PAN_SEQ_BYTES {
-        return Err(ProxyError::MalformedPayload("JS: PAN+Seq missing".into()));
-    }
-    let pan_seq_arr: [u8; 8] = payload[pos..pos + PAN_SEQ_BYTES]
-        .try_into()
-        .map_err(|_| ProxyError::MalformedPayload("JS: PAN+Seq slice error".into()))?;
-    let (pan, pan_seq) = decode_bcd_pan_seq(pan_seq_arr);
-    pos += PAN_SEQ_BYTES;
+    let (pan, pan_seq) = decode_bcd_pan_seq(r.take_array::<8>("PAN+Seq")?);
+    let atc = r.take_hex(2, "ATC")?;
+    r.byte("padding flag")?; // Padding Flag (1N) — consumed
 
-    // ATC (2B binary)
-    if payload.len() < pos + 2 {
-        return Err(ProxyError::MalformedPayload("JS: ATC missing".into()));
-    }
-    let atc = bytes_to_hex(&payload[pos..pos + 2]);
-    pos += 2;
+    // TxnData: 2-char ASCII-hex length prefix then that many bytes. APC does not
+    // pad; forward the EMV (ISO 9797-1 method 2) padded data.
+    let txn_data = Zeroizing::new(bytes_to_hex(&emv_pad(
+        r.take_ascii_len_field(2, 16, "txn data")?,
+    )));
 
-    // Padding Flag (1N) — consumed
-    if payload.len() < pos + 1 {
-        return Err(ProxyError::MalformedPayload(
-            "JS: padding flag missing".into(),
-        ));
-    }
-    pos += 1;
-
-    // TxnLen (2H ASCII hex — 2 chars, value = byte count)
-    if payload.len() < pos + 2 {
-        return Err(ProxyError::MalformedPayload("JS: TxnLen missing".into()));
-    }
-    let len_hex = std::str::from_utf8(&payload[pos..pos + 2])
-        .map_err(|_| ProxyError::MalformedPayload("JS: TxnLen not ASCII".into()))?;
-    let txn_byte_len = usize::from_str_radix(len_hex, 16)
-        .map_err(|_| ProxyError::MalformedPayload(format!("JS: invalid TxnLen '{len_hex}'")))?;
-    pos += 2;
-
-    // TxnData (nB binary)
-    if payload.len() < pos + txn_byte_len {
-        return Err(ProxyError::MalformedPayload(format!(
-            "JS: TxnData truncated: need {txn_byte_len}B"
-        )));
-    }
-    // APC does not pad; forward EMV (ISO 9797-1 method 2) padded transaction data.
-    let txn_data = Zeroizing::new(bytes_to_hex(&emv_pad(&payload[pos..pos + txn_byte_len])));
-    pos += txn_byte_len;
-
-    // 0x3B delimiter
-    if payload.get(pos) != Some(&0x3B) {
-        return Err(ProxyError::MalformedPayload(format!(
-            "JS: expected 0x3B delimiter at offset {pos}, got {:?}",
-            payload.get(pos)
-        )));
-    }
-    pos += 1;
-
-    // ARQC (8B binary)
-    if payload.len() < pos + 8 {
-        return Err(ProxyError::MalformedPayload("JS: ARQC missing".into()));
-    }
-    let arqc = bytes_to_hex(&payload[pos..pos + 8]);
-    pos += 8;
+    r.expect_byte(0x3B, "delimiter")?;
+    let arqc = r.take_hex(8, "ARQC")?;
 
     // ARC (2B binary) — Mode '1' only
     let arc = if matches!(mode, JsMode::VerifyWithArpc) {
-        if payload.len() < pos + 2 {
-            return Err(ProxyError::MalformedPayload("JS Mode1: ARC missing".into()));
-        }
-        Some(bytes_to_hex(&payload[pos..pos + 2]))
+        Some(r.take_hex(2, "ARC")?)
     } else {
         None
     };
