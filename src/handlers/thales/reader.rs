@@ -137,6 +137,30 @@ impl<'a> FieldReader<'a> {
         })?;
         self.take(len, field)
     }
+
+    /// Like [`take_ascii_len_field`], but for the MAC-family message field where
+    /// the decoded length counts *message bytes* while the field itself is ASCII
+    /// hex (2 chars per byte). Takes `2 * byte_len` bytes and returns the raw
+    /// slice (callers choose `from_utf8` vs `from_utf8_lossy`).
+    ///
+    /// [`take_ascii_len_field`]: Self::take_ascii_len_field
+    pub(crate) fn take_ascii_len_hex(
+        &mut self,
+        width: usize,
+        radix: u32,
+        field: &'static str,
+    ) -> Result<&'a [u8], ProxyError> {
+        let len_str = std::str::from_utf8(self.take(width, field)?).map_err(|_| {
+            ProxyError::MalformedPayload(format!("{}: {field} length not ASCII", self.ctx))
+        })?;
+        let byte_len = usize::from_str_radix(len_str, radix).map_err(|_| {
+            ProxyError::MalformedPayload(format!(
+                "{}: invalid {field} length '{len_str}'",
+                self.ctx
+            ))
+        })?;
+        self.take(byte_len * 2, field)
+    }
 }
 
 #[cfg(test)]

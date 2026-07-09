@@ -4,6 +4,7 @@ use tracing::{debug, warn};
 
 use crate::error::ProxyError;
 use crate::handlers::thales::common::parse_legacy_key;
+use crate::handlers::thales::reader::FieldReader;
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -46,60 +47,40 @@ fn parse_c2_payload(payload: &[u8], is_verify: bool) -> Result<MacFields, ProxyE
     //   [4..] Key                16H | 'U'+32H | 'T'+48H
     //   [IV  16H/32H if block number is 2 or 3]
     //   Message Length 4H, then the hex message; C4 appends an 8H MAC to verify.
-    const HEADER_LEN: usize = 4;
     const MSG_LEN_FIELD: usize = 4;
     const MAC_HEX: usize = 8;
 
-    if payload.len() < HEADER_LEN {
-        return Err(ProxyError::MalformedPayload(format!(
-            "C2/C4 payload too short: {}",
-            payload.len()
-        )));
-    }
+    let mut r = FieldReader::new(payload, "C2/C4");
+
     // Only single-block messages: continuation modes need an inter-block IV and
     // session state that APC's single-call generate_mac cannot carry.
-    if payload[0] != b'0' {
+    let block = r.byte("message block number")?;
+    if block != b'0' {
         return Err(ProxyError::UnsupportedMacMode(format!(
             "C2/C4: message block number '{}' (continuation) not supported; use '0' (only block)",
-            payload[0] as char
+            block as char
         )));
     }
-    // payload[1] Key Type is consumed — the key_map resolves the actual key.
-    let algorithm = algorithm_from_mode_c2(payload[2])?;
-    if payload[3] != b'1' {
+    r.byte("key type")?; // consumed — the key_map resolves the actual key
+    let algorithm = algorithm_from_mode_c2(r.byte("MAC generation mode")?)?;
+    let msg_type = r.byte("message type")?;
+    if msg_type != b'1' {
         return Err(ProxyError::MalformedPayload(format!(
             "C2/C4: message type '{}' not supported; only '1' (expanded hex) is accepted",
-            payload[3] as char
+            msg_type as char
         )));
     }
 
-    let (key_id, key_consumed) = parse_legacy_key(payload, HEADER_LEN)?;
-    let mut pos = HEADER_LEN + key_consumed;
+    let key_id = r.parse_with(parse_legacy_key)?;
 
-    if payload.len() < pos + MSG_LEN_FIELD {
-        return Err(ProxyError::MalformedPayload(
-            "C2/C4: message length field missing".into(),
-        ));
-    }
-    let msg_len_hex = String::from_utf8_lossy(&payload[pos..pos + MSG_LEN_FIELD]);
+    // Message length (4H, may be space-padded → trim), then the hex message.
+    let msg_len_hex = String::from_utf8_lossy(r.take(MSG_LEN_FIELD, "message length")?);
     let msg_byte_len = usize::from_str_radix(msg_len_hex.trim(), 16)
         .map_err(|_| ProxyError::MalformedPayload("C2/C4: bad message length hex".into()))?;
-    pos += MSG_LEN_FIELD;
+    let message_hex = String::from_utf8_lossy(r.take(msg_byte_len * 2, "message")?).to_string();
 
-    let msg_end = pos + msg_byte_len * 2;
-    if payload.len() < msg_end {
-        return Err(ProxyError::MalformedPayload(format!(
-            "C2/C4: payload shorter than declared message: need {} got {}",
-            msg_end,
-            payload.len()
-        )));
-    }
-    let message_hex = String::from_utf8_lossy(&payload[pos..msg_end]).to_string();
     let mac_to_verify = if is_verify {
-        if payload.len() < msg_end + MAC_HEX {
-            return Err(ProxyError::MalformedPayload("C4: missing MAC".into()));
-        }
-        Some(String::from_utf8_lossy(&payload[msg_end..msg_end + MAC_HEX]).to_string())
+        Some(String::from_utf8_lossy(r.take(MAC_HEX, "MAC")?).to_string())
     } else {
         None
     };
@@ -134,36 +115,32 @@ fn algorithm_from_m6_algo_byte(byte: u8) -> Result<String, ProxyError> {
 }
 
 fn parse_m6_payload(payload: &[u8], is_verify: bool) -> Result<MacFields, ProxyError> {
-    const HEADER_LEN: usize = 5; // Mode + InFmt + MACSize + MACAlgo + PadMethod
     const KEY_TYPE_LEN: usize = 3;
     const MSG_LEN_FIELD: usize = 4;
 
-    if payload.len() < HEADER_LEN + KEY_TYPE_LEN {
-        return Err(ProxyError::MalformedPayload(format!(
-            "M6/M8 payload too short: {}",
-            payload.len()
-        )));
-    }
+    let mut r = FieldReader::new(payload, "M6/M8");
 
     // Mode '0' = complete single message. Modes 1-4 are continuation modes that
     // require multi-block session state; APC is stateless and single-call only.
-    if payload[0] != b'0' {
+    let mode = r.byte("mode")?;
+    if mode != b'0' {
         return Err(ProxyError::UnsupportedMacMode(format!(
             "M6/M8: mode '{}' (continuation) not supported; APC is stateless — use mode '0' (complete message) only",
-            payload[0] as char
+            mode as char
         )));
     }
     // Input format '1' = hex-encoded. Only hex input is supported.
-    if payload[1] != b'1' {
+    let infmt = r.byte("input format")?;
+    if infmt != b'1' {
         return Err(ProxyError::MalformedPayload(format!(
             "M6/M8: input format '{}' not supported; only format '1' (hex-encoded) is accepted",
-            payload[1] as char
+            infmt as char
         )));
     }
 
     // Per PUGD0537-004 Rev A p.365: MAC Size '0' = 8 hex digits (4 bytes),
     // '1' = 16 hex digits (8 bytes). The larger size is the full double-length MAC.
-    let mac_size_bytes: usize = match payload[2] {
+    let mac_size_bytes: usize = match r.byte("MAC size")? {
         b'0' => 4,
         b'1' => 8,
         other => {
@@ -173,42 +150,17 @@ fn parse_m6_payload(payload: &[u8], is_verify: bool) -> Result<MacFields, ProxyE
             )))
         }
     };
-    let algorithm = algorithm_from_m6_algo_byte(payload[3])?;
+    let algorithm = algorithm_from_m6_algo_byte(r.byte("MAC algo")?)?;
+    r.byte("pad method")?; // consumed
+    r.take(KEY_TYPE_LEN, "key type")?; // consumed
+    let key_id = r.parse_with(parse_legacy_key)?;
 
-    let mut pos = HEADER_LEN + KEY_TYPE_LEN; // skip past 5-byte header + 3-byte key type
-
-    let (key_id, key_consumed) = parse_legacy_key(payload, pos)?;
-    pos += key_consumed;
-
-    if payload.len() < pos + MSG_LEN_FIELD {
-        return Err(ProxyError::MalformedPayload(
-            "M6/M8: message length field missing".into(),
-        ));
-    }
-    let msg_len_hex = std::str::from_utf8(&payload[pos..pos + MSG_LEN_FIELD])
-        .map_err(|_| ProxyError::MalformedPayload("M6/M8: msg length not ASCII".into()))?;
-    let msg_byte_len = usize::from_str_radix(msg_len_hex, 16).map_err(|_| {
-        ProxyError::MalformedPayload(format!("M6/M8: invalid msg length '{msg_len_hex}'"))
-    })?;
-    pos += MSG_LEN_FIELD;
-
-    let msg_hex_chars = msg_byte_len * 2;
-    if payload.len() < pos + msg_hex_chars {
-        return Err(ProxyError::MalformedPayload(format!(
-            "M6/M8: payload shorter than declared message: need {} got {}",
-            pos + msg_hex_chars,
-            payload.len()
-        )));
-    }
-    let message_hex = String::from_utf8_lossy(&payload[pos..pos + msg_hex_chars]).to_string();
-    pos += msg_hex_chars;
+    // Message: 4-char ASCII byte-count, then that many hex-encoded bytes.
+    let message_hex =
+        String::from_utf8_lossy(r.take_ascii_len_hex(MSG_LEN_FIELD, 16, "message")?).to_string();
 
     let mac_to_verify = if is_verify {
-        let mac_hex_chars = mac_size_bytes * 2;
-        if payload.len() < pos + mac_hex_chars {
-            return Err(ProxyError::MalformedPayload("M8: MAC field missing".into()));
-        }
-        Some(String::from_utf8_lossy(&payload[pos..pos + mac_hex_chars]).to_string())
+        Some(String::from_utf8_lossy(r.take(mac_size_bytes * 2, "MAC")?).to_string())
     } else {
         None
     };
