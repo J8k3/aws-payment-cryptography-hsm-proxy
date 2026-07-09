@@ -1,9 +1,15 @@
+use std::sync::Arc;
+
+use tracing::warn;
+
 use crate::error::ProxyError;
+use crate::handlers::{AppState, HandlerResult};
 use crate::key_map::{KeyBlockMeta, KeyDescriptor};
 
 use aws_sdk_paymentcryptographydata::types::{
-    SessionKeyAmex, SessionKeyDerivation, SessionKeyEmv2000, SessionKeyEmvCommon,
-    SessionKeyMastercard,
+    CryptogramAuthResponse, CryptogramVerificationArpcMethod1, CryptogramVerificationArpcMethod2,
+    MajorKeyDerivationMode, SessionKeyAmex, SessionKeyDerivation, SessionKeyEmv2000,
+    SessionKeyEmvCommon, SessionKeyMastercard,
 };
 
 /// Apply EMV (ISO 9797-1 method 2) padding to ARQC MAC input: append a single
@@ -123,6 +129,97 @@ pub fn build_session_key(
                 .map_err(build_err)?,
         ),
     })
+}
+
+/// ARPC response parameters parsed from the KQ/KW wire tail.
+///
+/// Method 1 = ARC (Auth Response Code); Method 2 = CSU (Card Status Update) plus
+/// optional proprietary authentication data. Shared by the ARQC handlers.
+#[derive(Debug)]
+pub(crate) enum ArpcParams {
+    Method1 {
+        auth_response_code: String,
+    },
+    Method2 {
+        card_status_update: String,
+        proprietary_auth_data: String,
+    },
+}
+
+/// Build the APC `CryptogramAuthResponse` for an ARPC generation request.
+///
+/// Pure request-attribute construction from already-parsed response fields — no
+/// crypto derivation happens here (APC computes the ARPC).
+pub(crate) fn build_arpc_attrs(p: &ArpcParams) -> Result<CryptogramAuthResponse, ProxyError> {
+    Ok(match p {
+        ArpcParams::Method1 { auth_response_code } => CryptogramAuthResponse::ArpcMethod1(
+            CryptogramVerificationArpcMethod1::builder()
+                .auth_response_code(auth_response_code)
+                .build()
+                .map_err(build_err)?,
+        ),
+        ArpcParams::Method2 {
+            card_status_update,
+            proprietary_auth_data,
+        } => {
+            let mut b =
+                CryptogramVerificationArpcMethod2::builder().card_status_update(card_status_update);
+            if !proprietary_auth_data.is_empty() {
+                b = b.proprietary_authentication_data(proprietary_auth_data);
+            }
+            CryptogramAuthResponse::ArpcMethod2(b.build().map_err(build_err)?)
+        }
+    })
+}
+
+/// Verify an ARQC (and optionally generate an ARPC) through APC, mapping the
+/// response and errors to a `HandlerResult`.
+///
+/// This is the request-plumbing + error-framing tail shared verbatim by the KQ /
+/// KW / KS / JS ARQC handlers. Every crypto-relevant value (`deriv_mode`,
+/// `session`, `txn_data`, `arqc`) is computed by the caller's parser and passed
+/// in unchanged — this function does not touch key derivation, padding, or byte
+/// ordering, so it cannot alter crypto behavior. `cmd` is used only for logging.
+#[allow(clippy::too_many_arguments)] // request plumbing: each arg is a distinct APC field
+pub(crate) async fn verify_arqc(
+    state: &Arc<AppState>,
+    cmd: &str,
+    key_arn: &str,
+    txn_data: &str,
+    arqc: &str,
+    deriv_mode: MajorKeyDerivationMode,
+    session: SessionKeyDerivation,
+    arpc: Option<CryptogramAuthResponse>,
+) -> HandlerResult {
+    let mut req = state
+        .data
+        .verify_auth_request_cryptogram()
+        .key_identifier(key_arn)
+        .transaction_data(txn_data)
+        .auth_request_cryptogram(arqc)
+        .major_key_derivation_mode(deriv_mode)
+        .session_key_derivation_attributes(session);
+
+    if let Some(ara) = arpc {
+        req = req.auth_response_attributes(ara);
+    }
+
+    match req.send().await {
+        Ok(resp) => match resp.auth_response_value() {
+            Some(arpc) => HandlerResult::success(arpc.as_bytes().to_vec()),
+            None => HandlerResult::success(vec![]),
+        },
+        Err(e) => {
+            if e.as_service_error().is_some_and(
+                aws_sdk_paymentcryptographydata::operation::verify_auth_request_cryptogram::VerifyAuthRequestCryptogramError::is_verification_failed_exception,
+            ) {
+                warn!("{cmd}: ARQC mismatch");
+                return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
+            }
+            warn!(?e, "{cmd}: verify_auth_request_cryptogram failed");
+            HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
+        }
+    }
 }
 
 /// Parse a TR-31 key block introduced by an 'S' prefix in the wire frame.

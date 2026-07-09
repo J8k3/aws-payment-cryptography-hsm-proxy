@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::debug;
 use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
 use crate::handlers::thales::common::{
-    build_session_key, bytes_to_hex, decode_bcd_pan_seq, emv_pad, parse_legacy_key, EmvSession,
+    build_arpc_attrs, build_session_key, bytes_to_hex, decode_bcd_pan_seq, emv_pad,
+    parse_legacy_key, verify_arqc, ArpcParams, EmvSession,
 };
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
@@ -50,16 +51,6 @@ enum KwMode {
     VerifyOnly,
     VerifyArpcMethod1,
     VerifyArpcMethod2,
-}
-
-enum ArpcParams {
-    Method1 {
-        auth_response_code: String,
-    },
-    Method2 {
-        card_status_update: String,
-        proprietary_auth_data: String,
-    },
 }
 
 struct KwFields {
@@ -324,10 +315,7 @@ async fn handle_kw(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    use aws_sdk_paymentcryptographydata::types::{
-        CryptogramAuthResponse, CryptogramVerificationArpcMethod1,
-        CryptogramVerificationArpcMethod2, MajorKeyDerivationMode,
-    };
+    use aws_sdk_paymentcryptographydata::types::MajorKeyDerivationMode;
 
     let deriv_mode = if fields.deriv_mode_a {
         MajorKeyDerivationMode::EmvOptionA
@@ -346,39 +334,14 @@ async fn handle_kw(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    let auth_response_attrs: Option<CryptogramAuthResponse> = match fields.arpc_params {
-        Some(ArpcParams::Method1 {
-            ref auth_response_code,
-        }) => {
-            match CryptogramVerificationArpcMethod1::builder()
-                .auth_response_code(auth_response_code)
-                .build()
-                .map_err(|e: aws_sdk_paymentcryptographydata::error::BuildError| {
-                    ProxyError::ApcError(e.to_string())
-                }) {
-                Ok(m1) => Some(CryptogramAuthResponse::ArpcMethod1(m1)),
-                Err(e) => return HandlerResult::from_proxy_error(&e),
-            }
-        }
-        Some(ArpcParams::Method2 {
-            ref card_status_update,
-            ref proprietary_auth_data,
-        }) => {
-            let mut m2_b =
-                CryptogramVerificationArpcMethod2::builder().card_status_update(card_status_update);
-            if !proprietary_auth_data.is_empty() {
-                m2_b = m2_b.proprietary_authentication_data(proprietary_auth_data);
-            }
-            match m2_b
-                .build()
-                .map_err(|e: aws_sdk_paymentcryptographydata::error::BuildError| {
-                    ProxyError::ApcError(e.to_string())
-                }) {
-                Ok(m2) => Some(CryptogramAuthResponse::ArpcMethod2(m2)),
-                Err(e) => return HandlerResult::from_proxy_error(&e),
-            }
-        }
-        None => None,
+    let auth_response_attrs = match fields
+        .arpc_params
+        .as_ref()
+        .map(build_arpc_attrs)
+        .transpose()
+    {
+        Ok(a) => a,
+        Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
     debug!(
@@ -389,35 +352,17 @@ async fn handle_kw(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         "KW: verify_auth_request_cryptogram"
     );
 
-    let mut req = state
-        .data
-        .verify_auth_request_cryptogram()
-        .key_identifier(&key_arn)
-        .transaction_data(fields.txn_data.as_str())
-        .auth_request_cryptogram(&fields.arqc)
-        .major_key_derivation_mode(deriv_mode)
-        .session_key_derivation_attributes(session_key_attrs);
-
-    if let Some(ara) = auth_response_attrs {
-        req = req.auth_response_attributes(ara);
-    }
-
-    match req.send().await {
-        Ok(resp) => match resp.auth_response_value() {
-            Some(arpc) => HandlerResult::success(arpc.as_bytes().to_vec()),
-            None => HandlerResult::success(vec![]),
-        },
-        Err(e) => {
-            if e.as_service_error()
-                .is_some_and(aws_sdk_paymentcryptographydata::operation::verify_auth_request_cryptogram::VerifyAuthRequestCryptogramError::is_verification_failed_exception)
-            {
-                warn!("KW: ARQC mismatch");
-                return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
-            }
-            warn!(?e, "KW: verify_auth_request_cryptogram failed");
-            HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
-        }
-    }
+    verify_arqc(
+        state,
+        "KW",
+        &key_arn,
+        fields.txn_data.as_str(),
+        &fields.arqc,
+        deriv_mode,
+        session_key_attrs,
+        auth_response_attrs,
+    )
+    .await
 }
 
 #[cfg(test)]

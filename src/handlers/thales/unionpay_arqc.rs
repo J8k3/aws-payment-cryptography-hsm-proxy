@@ -1,10 +1,13 @@
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::debug;
 use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
-use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, emv_pad, parse_key_32};
+use crate::handlers::thales::common::{
+    build_arpc_attrs, build_session_key, bytes_to_hex, decode_bcd_pan_seq, emv_pad, parse_key_32,
+    verify_arqc, ArpcParams, EmvSession,
+};
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -210,69 +213,41 @@ async fn handle_js(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    use aws_sdk_paymentcryptographydata::types::{
-        CryptogramAuthResponse, CryptogramVerificationArpcMethod1, MajorKeyDerivationMode,
-        SessionKeyDerivation, SessionKeyEmv2000,
+    use aws_sdk_paymentcryptographydata::types::MajorKeyDerivationMode;
+
+    // UnionPay/CUP uses EMV2000 session-key derivation (Option A, no UN).
+    let session_key_attrs = match build_session_key(
+        EmvSession::Emv2000,
+        &fields.pan,
+        &fields.pan_seq,
+        &fields.atc,
+        "",
+    ) {
+        Ok(s) => s,
+        Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    let emv2000 = match SessionKeyEmv2000::builder()
-        .primary_account_number(&fields.pan)
-        .pan_sequence_number(&fields.pan_seq)
-        .application_transaction_counter(&fields.atc)
-        .build()
-        .map_err(|e: aws_sdk_paymentcryptographydata::error::BuildError| {
-            ProxyError::ApcError(e.to_string())
-        }) {
+    let arpc_params = fields.arc.as_ref().map(|arc| ArpcParams::Method1 {
+        auth_response_code: arc.clone(),
+    });
+    let auth_response_attrs = match arpc_params.as_ref().map(build_arpc_attrs).transpose() {
         Ok(a) => a,
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    let auth_response_attrs: Option<CryptogramAuthResponse> = match fields.arc {
-        Some(ref arc) => {
-            match CryptogramVerificationArpcMethod1::builder()
-                .auth_response_code(arc)
-                .build()
-                .map_err(|e: aws_sdk_paymentcryptographydata::error::BuildError| {
-                    ProxyError::ApcError(e.to_string())
-                }) {
-                Ok(m1) => Some(CryptogramAuthResponse::ArpcMethod1(m1)),
-                Err(e) => return HandlerResult::from_proxy_error(&e),
-            }
-        }
-        None => None,
-    };
-
     debug!(key = %key_arn, "JS: verify_auth_request_cryptogram (UnionPay/CUP Emv2000)");
 
-    let mut req = state
-        .data
-        .verify_auth_request_cryptogram()
-        .key_identifier(&key_arn)
-        .transaction_data(fields.txn_data.as_str())
-        .auth_request_cryptogram(&fields.arqc)
-        .major_key_derivation_mode(MajorKeyDerivationMode::EmvOptionA)
-        .session_key_derivation_attributes(SessionKeyDerivation::Emv2000(emv2000));
-
-    if let Some(ara) = auth_response_attrs {
-        req = req.auth_response_attributes(ara);
-    }
-
-    match req.send().await {
-        Ok(resp) => match resp.auth_response_value() {
-            Some(arpc) => HandlerResult::success(arpc.as_bytes().to_vec()),
-            None => HandlerResult::success(vec![]),
-        },
-        Err(e) => {
-            if e.as_service_error()
-                .is_some_and(aws_sdk_paymentcryptographydata::operation::verify_auth_request_cryptogram::VerifyAuthRequestCryptogramError::is_verification_failed_exception)
-            {
-                warn!("JS: ARQC mismatch");
-                return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
-            }
-            warn!(?e, "JS: verify_auth_request_cryptogram failed");
-            HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
-        }
-    }
+    verify_arqc(
+        state,
+        "JS",
+        &key_arn,
+        fields.txn_data.as_str(),
+        &fields.arqc,
+        MajorKeyDerivationMode::EmvOptionA,
+        session_key_attrs,
+        auth_response_attrs,
+    )
+    .await
 }
 
 #[cfg(test)]
