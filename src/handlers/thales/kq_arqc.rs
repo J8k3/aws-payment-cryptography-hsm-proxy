@@ -8,6 +8,7 @@ use crate::handlers::thales::common::{
     build_arpc_attrs, build_session_key, bytes_to_hex, decode_bcd_pan_seq, emv_pad,
     parse_legacy_key, verify_arqc, ArpcParams, EmvSession,
 };
+use crate::handlers::thales::reader::FieldReader;
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -63,13 +64,10 @@ struct KqFields {
 }
 
 fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
-    let mut pos = 0;
+    let mut r = FieldReader::new(payload, "KQ");
 
     // Mode Flag (1N ASCII)
-    if payload.len() < pos + 1 {
-        return Err(ProxyError::MalformedPayload("KQ: mode flag missing".into()));
-    }
-    let mode = match payload[pos] {
+    let mode = match r.byte("mode flag")? {
         b'0' => KqMode::VerifyOnly,
         b'1' => KqMode::VerifyArpcMethod1,
         b'2' => KqMode::VerifyArpcMethod2,
@@ -85,15 +83,10 @@ fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
             )))
         }
     };
-    pos += 1;
 
-    // Scheme ID (1N ASCII)
-    if payload.len() < pos + 1 {
-        return Err(ProxyError::MalformedPayload("KQ: scheme ID missing".into()));
-    }
-    // All KQ schemes use EMV Option A major derivation (PUGD0537-004 Rev A p.468);
-    // the Scheme ID selects the session-key method.
-    let session = match payload[pos] {
+    // Scheme ID (1N ASCII) — all KQ schemes use EMV Option A major derivation
+    // (PUGD0537-004 Rev A p.468); the Scheme ID selects the session-key method.
+    let session = match r.byte("scheme ID")? {
         b'1' => EmvSession::Mastercard, // Option A + Mastercard proprietary SKD (M/Chip)
         b'2' => EmvSession::Amex,       // Option A + Amex AEIPS
         b'0' => {
@@ -111,115 +104,34 @@ fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
             )))
         }
     };
-    pos += 1;
 
-    // Key Type (3H ASCII) — consumed
-    if payload.len() < pos + 3 {
-        return Err(ProxyError::MalformedPayload("KQ: key type missing".into()));
-    }
-    pos += 3;
-
-    // Key (variable ASCII hex)
-    let (key_id, key_consumed) = parse_legacy_key(payload, pos)?;
-    pos += key_consumed;
+    r.take(3, "key type")?; // Key Type (3H ASCII) — consumed
+    let key_id = r.parse_with(parse_legacy_key)?; // Key (16H | U+32H | T+48H)
 
     // PAN+Seq (8B binary BCD)
-    if payload.len() < pos + 8 {
-        return Err(ProxyError::MalformedPayload(
-            "KQ: PAN+seq field missing".into(),
-        ));
-    }
-    let pan_seq_bytes: [u8; 8] = payload[pos..pos + 8]
-        .try_into()
-        .expect("length checked above");
-    let (pan, pan_seq) = decode_bcd_pan_seq(pan_seq_bytes);
-    pos += 8;
+    let (pan, pan_seq) = decode_bcd_pan_seq(r.take_array::<8>("PAN+seq")?);
 
-    // ATC (2B binary)
-    if payload.len() < pos + 2 {
-        return Err(ProxyError::MalformedPayload("KQ: ATC missing".into()));
-    }
-    let atc = bytes_to_hex(&payload[pos..pos + 2]);
-    pos += 2;
+    let atc = r.take_hex(2, "ATC")?;
+    // UN forwarded; required by the Mastercard proprietary SKD.
+    let un = r.take_hex(4, "UN")?;
 
-    // UN (4B binary) — forwarded; required by the Mastercard proprietary SKD
-    if payload.len() < pos + 4 {
-        return Err(ProxyError::MalformedPayload("KQ: UN missing".into()));
-    }
-    let un = bytes_to_hex(&payload[pos..pos + 4]);
-    pos += 4;
+    // TxnData: length (2B BE) then that many bytes. APC does not pad; forward the
+    // EMV (ISO 9797-1 method 2) padded data.
+    let txn_byte_len = r.u16_be("txn length")?;
+    let txn_data = Zeroizing::new(bytes_to_hex(&emv_pad(r.take(txn_byte_len, "txn data")?)));
 
-    // TxnLen (2B binary big-endian)
-    if payload.len() < pos + 2 {
-        return Err(ProxyError::MalformedPayload(
-            "KQ: transaction data length missing".into(),
-        ));
-    }
-    let txn_byte_len = u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize;
-    pos += 2;
-
-    // TxnData (txn_byte_len binary bytes)
-    if payload.len() < pos + txn_byte_len {
-        return Err(ProxyError::MalformedPayload(format!(
-            "KQ: transaction data too short: need {txn_byte_len} bytes"
-        )));
-    }
-    // APC does not pad; forward EMV (ISO 9797-1 method 2) padded data.
-    let txn_data = Zeroizing::new(bytes_to_hex(&emv_pad(&payload[pos..pos + txn_byte_len])));
-    pos += txn_byte_len;
-
-    // Delimiter 0x3B
-    if payload.len() < pos + 1 || payload[pos] != 0x3B {
-        return Err(ProxyError::MalformedPayload(
-            "KQ: missing 0x3B delimiter".into(),
-        ));
-    }
-    pos += 1;
-
-    // ARQC (8B binary)
-    if payload.len() < pos + 8 {
-        return Err(ProxyError::MalformedPayload("KQ: ARQC missing".into()));
-    }
-    let arqc = bytes_to_hex(&payload[pos..pos + 8]);
-    pos += 8;
+    r.expect_byte(0x3B, "delimiter")?;
+    let arqc = r.take_hex(8, "ARQC")?;
 
     // ARPC params (mode-dependent, binary)
     let arpc_params = match mode {
-        KqMode::VerifyArpcMethod1 => {
-            // ARC (2B binary)
-            if payload.len() < pos + 2 {
-                return Err(ProxyError::MalformedPayload(
-                    "KQ Method1: ARC missing".into(),
-                ));
-            }
-            let arc = bytes_to_hex(&payload[pos..pos + 2]);
-            Some(ArpcParams::Method1 {
-                auth_response_code: arc,
-            })
-        }
+        KqMode::VerifyArpcMethod1 => Some(ArpcParams::Method1 {
+            auth_response_code: r.take_hex(2, "ARC")?,
+        }),
         KqMode::VerifyArpcMethod2 => {
-            // CSU (4B binary)
-            if payload.len() < pos + 4 {
-                return Err(ProxyError::MalformedPayload(
-                    "KQ Method2: CSU missing".into(),
-                ));
-            }
-            let csu = bytes_to_hex(&payload[pos..pos + 4]);
-            pos += 4;
-            // PAD_len (1B binary)
-            if payload.len() < pos + 1 {
-                return Err(ProxyError::MalformedPayload(
-                    "KQ Method2: PAD length missing".into(),
-                ));
-            }
-            let pad_len = payload[pos] as usize;
-            pos += 1;
-            if payload.len() < pos + pad_len {
-                return Err(ProxyError::MalformedPayload(
-                    "KQ Method2: PAD data truncated".into(),
-                ));
-            }
-            let pad = bytes_to_hex(&payload[pos..pos + pad_len]);
+            let csu = r.take_hex(4, "CSU")?;
+            let pad_len = r.byte("PAD length")? as usize;
+            let pad = r.take_hex(pad_len, "PAD data")?;
             Some(ArpcParams::Method2 {
                 card_status_update: csu,
                 proprietary_auth_data: pad,
