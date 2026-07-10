@@ -34,7 +34,6 @@ impl<'a> FieldReader<'a> {
     }
 
     /// The not-yet-consumed remainder of the payload.
-    #[allow(dead_code)]
     pub(crate) fn remaining(&self) -> &'a [u8] {
         &self.buf[self.pos.min(self.buf.len())..]
     }
