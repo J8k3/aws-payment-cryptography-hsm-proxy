@@ -26,13 +26,6 @@ impl<'a> FieldReader<'a> {
         Self { buf, pos: 0, ctx }
     }
 
-    /// Current offset into the payload.
-    // Adopted incrementally across the parser migration on this branch.
-    #[allow(dead_code)]
-    pub(crate) fn pos(&self) -> usize {
-        self.pos
-    }
-
     /// The not-yet-consumed remainder of the payload.
     pub(crate) fn remaining(&self) -> &'a [u8] {
         &self.buf[self.pos.min(self.buf.len())..]
@@ -170,7 +163,6 @@ mod tests {
     fn take_advances_and_bounds_check() {
         let mut r = FieldReader::new(&[1, 2, 3, 4], "T");
         assert_eq!(r.take(2, "a").unwrap(), &[1, 2]);
-        assert_eq!(r.pos(), 2);
         assert_eq!(r.remaining(), &[3, 4]);
         assert_eq!(r.take(2, "b").unwrap(), &[3, 4]);
         assert!(matches!(
@@ -187,7 +179,7 @@ mod tests {
             Err(ProxyError::MalformedPayload(_))
         ));
         // cursor unmoved after a failed take
-        assert_eq!(r.pos(), 0);
+        assert_eq!(r.remaining(), &[0xAA]);
     }
 
     #[test]

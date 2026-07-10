@@ -4,7 +4,8 @@ use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
-use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, parse_legacy_key};
+use crate::handlers::thales::common::{decode_bcd_pan_seq, parse_legacy_key};
+use crate::handlers::thales::reader::FieldReader;
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -44,53 +45,18 @@ struct K0Fields {
 }
 
 fn parse_k0(payload: &[u8]) -> Result<K0Fields, ProxyError> {
-    let mut pos = 0;
+    let mut r = FieldReader::new(payload, "K0");
 
-    // Key Type (3H ASCII) — consumed
-    if payload.len() < 3 {
-        return Err(ProxyError::MalformedPayload("K0: key type missing".into()));
-    }
-    pos += 3;
-
-    // Key (variable ASCII hex)
-    let (key_id, key_consumed) = parse_legacy_key(payload, pos)?;
-    pos += key_consumed;
+    r.take(3, "key type")?; // Key Type (3H ASCII) — consumed
+    let key_id = r.parse_with(parse_legacy_key)?; // Key (16H | U+32H | T+48H)
 
     // PAN+Seq (8B binary BCD)
-    if payload.len() < pos + 8 {
-        return Err(ProxyError::MalformedPayload(
-            "K0: PAN+seq field missing".into(),
-        ));
-    }
-    let pan_seq_bytes: [u8; 8] = payload[pos..pos + 8]
-        .try_into()
-        .expect("length checked above");
-    let (pan, pan_seq) = decode_bcd_pan_seq(pan_seq_bytes);
-    pos += 8;
+    let (pan, pan_seq) = decode_bcd_pan_seq(r.take_array::<8>("PAN+seq")?);
+    let atc = r.take_hex(2, "ATC")?;
 
-    // ATC (2B binary)
-    if payload.len() < pos + 2 {
-        return Err(ProxyError::MalformedPayload("K0: ATC missing".into()));
-    }
-    let atc = bytes_to_hex(&payload[pos..pos + 2]);
-    pos += 2;
-
-    // DataLen (2B binary big-endian)
-    if payload.len() < pos + 2 {
-        return Err(ProxyError::MalformedPayload(
-            "K0: encrypted data length missing".into(),
-        ));
-    }
-    let data_byte_len = u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize;
-    pos += 2;
-
-    // EncData (nB binary)
-    if payload.len() < pos + data_byte_len {
-        return Err(ProxyError::MalformedPayload(format!(
-            "K0: ciphertext too short: need {data_byte_len} bytes"
-        )));
-    }
-    let cipher_text = Zeroizing::new(bytes_to_hex(&payload[pos..pos + data_byte_len]));
+    // Encrypted data: length (2B BE) then that many bytes.
+    let data_byte_len = r.u16_be("encrypted data length")?;
+    let cipher_text = Zeroizing::new(r.take_hex(data_byte_len, "encrypted data")?);
 
     Ok(K0Fields {
         key_id,
