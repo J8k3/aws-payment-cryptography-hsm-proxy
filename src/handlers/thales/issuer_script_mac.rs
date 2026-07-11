@@ -9,7 +9,9 @@ use aws_sdk_paymentcryptographydata::types::{
 };
 
 use crate::error::ProxyError;
-use crate::handlers::thales::common::{bytes_to_hex, decode_bcd_pan_seq, emv_pad, parse_key_32};
+use crate::handlers::thales::common::{
+    build_err, bytes_to_hex, decode_bcd_pan_seq, emv_pad, parse_key_32,
+};
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -447,8 +449,6 @@ async fn handle_generate(cmd: &str, fields: SmiFields, state: &Arc<AppState>) ->
         SmiValue::Ac(ac) => SessionKeyDerivationValue::ApplicationCryptogram(ac),
     };
 
-    let be =
-        |e: aws_sdk_paymentcryptographydata::error::BuildError| ProxyError::ApcError(e.to_string());
     let emv = match MacAlgorithmEmv::builder()
         .major_key_derivation_mode(MajorKeyDerivationMode::EmvOptionA)
         .primary_account_number(&fields.pan)
@@ -456,7 +456,7 @@ async fn handle_generate(cmd: &str, fields: SmiFields, state: &Arc<AppState>) ->
         .session_key_derivation_mode(fields.mapping.session_mode)
         .session_key_derivation_value(session_value)
         .build()
-        .map_err(be)
+        .map_err(build_err)
     {
         Ok(e) => e,
         Err(e) => return HandlerResult::from_proxy_error(&e),
@@ -545,7 +545,7 @@ mod tests {
 
     #[test]
     fn ju_rejects_confidentiality_modes() {
-        for m in [b'1', b'2', b'3', b'4'] {
+        for m in *b"1234" {
             assert!(matches!(
                 parse_ju(&ju_payload(m, b'1', b'0', &[0xAA])),
                 Err(ProxyError::Unsupported(_))
@@ -627,7 +627,7 @@ mod tests {
     #[test]
     fn ku_gates_jcb_and_unionpay_schemes() {
         let skd = [0u8; 8];
-        for s in [b'3', b'4', b'6'] {
+        for s in *b"346" {
             assert!(matches!(
                 parse_ku(&ku_payload(s, skd, &[0xAB], false)),
                 Err(ProxyError::Unsupported(_))

@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::debug;
 use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
 use crate::handlers::thales::common::{
-    bytes_to_hex, decode_bcd_pan_seq, emv_pad, parse_legacy_key,
+    build_session_key, bytes_to_hex, decode_bcd_pan_seq, emv_pad, parse_legacy_key, verify_arqc,
+    EmvSession,
 };
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
@@ -211,36 +212,22 @@ async fn handle_cap(payload: &[u8], is_k2: bool, state: &Arc<AppState>) -> Handl
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    use aws_sdk_paymentcryptographydata::types::{
-        MajorKeyDerivationMode, SessionKeyDerivation, SessionKeyEmv2000, SessionKeyMastercard,
-    };
+    use aws_sdk_paymentcryptographydata::types::MajorKeyDerivationMode;
 
-    let session_key_attrs = if is_k2 {
-        let un = fields.unpredictable_number.as_deref().unwrap_or("");
-        match SessionKeyMastercard::builder()
-            .primary_account_number(&fields.pan)
-            .pan_sequence_number(&fields.pan_seq)
-            .application_transaction_counter(&fields.atc)
-            .unpredictable_number(un)
-            .build()
-            .map_err(|e: aws_sdk_paymentcryptographydata::error::BuildError| {
-                ProxyError::ApcError(e.to_string())
-            }) {
-            Ok(mc) => SessionKeyDerivation::Mastercard(mc),
-            Err(e) => return HandlerResult::from_proxy_error(&e),
-        }
-    } else {
-        match SessionKeyEmv2000::builder()
-            .primary_account_number(&fields.pan)
-            .pan_sequence_number(&fields.pan_seq)
-            .application_transaction_counter(&fields.atc)
-            .build()
-            .map_err(|e: aws_sdk_paymentcryptographydata::error::BuildError| {
-                ProxyError::ApcError(e.to_string())
-            }) {
-            Ok(e2k) => SessionKeyDerivation::Emv2000(e2k),
-            Err(e) => return HandlerResult::from_proxy_error(&e),
-        }
+    // K2 = Mastercard proprietary SKD (consumes UN); KS = EMV2000 (ignores UN).
+    let session_key_attrs = match build_session_key(
+        if is_k2 {
+            EmvSession::Mastercard
+        } else {
+            EmvSession::Emv2000
+        },
+        &fields.pan,
+        &fields.pan_seq,
+        &fields.atc,
+        fields.unpredictable_number.as_deref().unwrap_or(""),
+    ) {
+        Ok(s) => s,
+        Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
     // The 8-byte BCD PAN+Seq field carries at most 14 PAN digits, so the ICC
@@ -257,33 +244,17 @@ async fn handle_cap(payload: &[u8], is_k2: bool, state: &Arc<AppState>) -> Handl
         "verify_auth_request_cryptogram"
     );
 
-    match state
-        .data
-        .verify_auth_request_cryptogram()
-        .key_identifier(&key_arn)
-        .transaction_data(fields.txn_data.as_str())
-        .auth_request_cryptogram(&fields.cryptogram)
-        .major_key_derivation_mode(deriv_mode)
-        .session_key_derivation_attributes(session_key_attrs)
-        .send()
-        .await
-    {
-        Ok(_) => HandlerResult::success(vec![]),
-        Err(e) => {
-            if e.as_service_error()
-                .is_some_and(aws_sdk_paymentcryptographydata::operation::verify_auth_request_cryptogram::VerifyAuthRequestCryptogramError::is_verification_failed_exception)
-            {
-                warn!(cmd = if is_k2 { "K2" } else { "KS" }, "cryptogram mismatch");
-                return HandlerResult::from_proxy_error(&ProxyError::VerificationFailed);
-            }
-            warn!(
-                ?e,
-                cmd = if is_k2 { "K2" } else { "KS" },
-                "verify_auth_request_cryptogram failed"
-            );
-            HandlerResult::from_proxy_error(&ProxyError::ApcError(e.to_string()))
-        }
-    }
+    verify_arqc(
+        state,
+        if is_k2 { "K2" } else { "KS" },
+        &key_arn,
+        fields.txn_data.as_str(),
+        &fields.cryptogram,
+        deriv_mode,
+        session_key_attrs,
+        None,
+    )
+    .await
 }
 
 #[cfg(test)]
