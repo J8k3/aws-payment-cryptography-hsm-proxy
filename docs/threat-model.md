@@ -176,11 +176,13 @@ account, keep the file off shared volumes and out of general log-shipping
 pipelines, apply short retention, and disable discovery (`discover.enabled:
 false` / omit `log_file`) once handlers cover the application's command set.
 
-**Proxy today.** Redacts a fixed set of known-sensitive Futurex parameter codes
-before logging. This is a blocklist, and discovery mode by definition fires on
-commands whose field semantics are not modeled — so values under non-listed codes
-(including PAN) can be written in the clear. Broadening redaction to a
-log-safe-by-default model is a candidate code fix; regardless, the file must be
+**Proxy today.** For Thales the wire format is positional and command-specific,
+so the discovery log records only the command code and payload length — no
+parameter values, and therefore no PAN or key material, are written. Redaction is
+a per-vendor concern behind the `Protocol::redact_discovery` seam; a vendor whose
+wire form is parameter-tagged supplies its own redaction, and discovery mode by
+definition fires on commands whose field semantics are not modeled, so any such
+redaction is treated as best-effort. Regardless of vendor, the file must be
 treated as sensitive at rest.
 
 ### T8 — Forward-leg CA trust scope

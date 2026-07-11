@@ -312,8 +312,8 @@ fn build_tls_config(tls: &TlsConfig) -> Result<rustls::ServerConfig> {
 
 /// Maximum bytes buffered for a single not-yet-parsed inbound frame before the
 /// connection is closed. A well-formed Thales frame is at most 2 + u16::MAX =
-/// 65_537 bytes; Futurex host-command frames are far smaller. 256 KiB is ~4x
-/// the largest possible valid frame — ample headroom for any real command while
+/// 65_537 bytes. 256 KiB is ~4x the largest possible valid frame — ample
+/// headroom for any real command (including a bolt-on vendor's framing) while
 /// still bounding the memory one connection can consume (see the OOM path this
 /// guards against). Not a config knob on purpose: it is a safety limit, not a
 /// tuning parameter.
@@ -372,8 +372,9 @@ where
         // each pass, so `buf` only carries a partial (incomplete) trailing
         // frame between reads. If it grows past the cap, either a frame is
         // larger than we will ever serve or the peer is streaming bytes that
-        // never complete a frame (a Futurex stream with no closing ']', or a
-        // Thales frame whose length prefix never resolves). Close the
+        // never complete a frame (a Thales frame whose length prefix never
+        // resolves, or a delimiter-framed vendor's stream that never closes).
+        // Close the
         // connection rather than let one socket grow memory without bound.
         if buf.len() > MAX_INBOUND_ACCUMULATION {
             warn!(
@@ -397,8 +398,8 @@ where
             // this command inherits `req`, so one transaction's records can be
             // correlated in the logs. `client_ref` is the client's own
             // correlation field echoed for cross-mapping: the Thales message
-            // header (its documented purpose). Futurex carries no per-request
-            // field in the current parse, so it logs as `0000` there.
+            // header (its documented purpose). A vendor whose framing carries no
+            // such field leaves `header` as `[0, 0]`, so it logs as `0000`.
             let req_id = REQUEST_SEQ.fetch_add(1, Ordering::Relaxed);
             let span = tracing::info_span!(
                 "req",

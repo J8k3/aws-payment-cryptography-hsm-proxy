@@ -19,7 +19,7 @@
 //! Required environment:
 //!
 //!   HSM_HOST     — IP or hostname of the HSM (or EFTSim endpoint)
-//!   HSM_PORT     — TCP port (Futurex plain: 9000, TLS: 9100; Thales plain: 1500)
+//!   HSM_PORT     — TCP port (Thales plain: 1500)
 //!   PROXY_HOST   — host where this proxy is listening (default: 127.0.0.1)
 //!   PROXY_PORT   — port the proxy is listening on (default: 1500)
 //!   AWS_REGION   — AWS region for APC calls (default: us-east-1)

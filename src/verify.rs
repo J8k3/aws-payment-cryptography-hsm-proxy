@@ -16,8 +16,9 @@
 //!   - The startup APC `list_keys` scan succeeds and reports its index size
 //!
 //! What we don't check yet:
-//!   - Futurex HSM-side KCV (`GPKR` field layout unverified — see `hsm_probe`
-//!     module docs and #13)
+//!   - HSM-side KCV for non-Thales vendors — the `BU` probe is Thales-specific;
+//!     other vendors (e.g. an enterprise bolt-on) skip probing but still get
+//!     `key_mappings` validation.
 //!   - Cert validity windows (expiry)
 
 use anyhow::Result;
@@ -285,7 +286,7 @@ async fn check_one_key(client: &aws_sdk_paymentcryptography::Client, identifier:
 
 /// Decide whether the HSM-side KCV cross-check runs, emit the corresponding
 /// report line, and build the client (loading TLS material once for the whole
-/// run). `None` means "no probing": no `discover` block, the Futurex gate, an
+/// run). `None` means "no probing": no `discover` block, a non-Thales vendor, an
 /// unrecognized vendor, or unusable TLS config. Also validates `vendor` itself
 /// — server::run refuses to start on an unknown vendor, and verify must not
 /// report a config as ready when the proxy would not boot it.

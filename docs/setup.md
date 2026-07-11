@@ -55,7 +55,7 @@ If you already know exactly which HSM commands your application uses, skip to Ph
 
 ```yaml
 # proxy-discover.yaml
-vendor: thales_payshield   # or futurex_excrypt
+vendor: thales_payshield
 listen:
   host: 0.0.0.0
   port: 1500
@@ -80,11 +80,11 @@ Update the application's HSM endpoint from the real HSM's address to the proxy's
 
 ### Read `discovery.jsonl`
 
-One NDJSON record per **unique** command code. For Futurex, parameters are parsed and sensitive values (`AL`, `AX`, `BT`) are masked. For Thales the wire format is positional and command-specific, so only the command code and payload length are recorded.
+One NDJSON record per **unique** command code. For Thales the wire format is positional and command-specific, so only the command code and payload length are recorded.
 
 ```jsonl
-{"ts":1717200000,"vendor":"futurex_excrypt","cmd":"TPIN","params":{"AW":"3","AK":"1234567890","AX":"[REDACTED]","BT":"[REDACTED]","AL":"[REDACTED]"}}
-{"ts":1717200001,"vendor":"futurex_excrypt","cmd":"GKEY","params":{"BC":"01","AK":"9876543210"}}
+{"ts":1717200000,"vendor":"thales_payshield","cmd":"M6","payload_len":248}
+{"ts":1717200001,"vendor":"thales_payshield","cmd":"CA","payload_len":132}
 ```
 
 ### Decide which commands you need handlers for
@@ -104,10 +104,6 @@ Before importing anything, build a spreadsheet of every key your application use
 Host command `BU` ("Generate a Key Check Value", response `BV`, PUGD0537-004) returns the KCV for a key given the LMK-encrypted key material — the same hex your application presents on the wire and that you put in `key_mappings`. The legacy `KA` (PUGD0538) does the same for a narrower key-type set; its own spec marks it superseded by `BU`, and it is disabled under the PCI-HSM key-type-separation setting. There is no slot-enumeration command on payShield — the operator walks their own key list.
 
 `--verify-only` automates exactly this check when `discover.hsm_host` is configured — see Phase 5.
-
-### Futurex
-
-Futurex documents `GPKR` ("General Purpose Key settings get, read only") in its command permission lists, and slot enumeration is expected to pair it with `KMAP` — but the wire field layout of both commands is not published anywhere this project can verify against. Until a capture from a real unit or the Excrypt command reference grounds them, build the inventory from Excrypt Manager / your key ceremony records instead. Automating this is [#13](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/issues/13).
 
 ### DUKPT key identifiers
 
@@ -192,7 +188,7 @@ See [docs/key-presentation.md](key-presentation.md) for the full matrix. Short v
 - **TR-31 / X9.143 wrapped block with KC optional block** — automatic. No `key_mappings` entry needed. Proxy's startup scan resolves it by `(KeyUsage, Algorithm, KCV)`.
 - **Variant LMK encrypted hex** — add a `key_mappings` entry with the exact hex string as the key.
 - **ASCII label** — add a `key_mappings` entry with the label string as the key.
-- **TKB without KC, AKB, Futurex cryptogram** — not currently auto-resolved; pin in `key_mappings` if supported at all.
+- **TKB without KC, AKB** — not currently auto-resolved; pin in `key_mappings` if supported at all.
 
 ---
 
@@ -207,7 +203,7 @@ What it checks:
 - AWS credentials resolve
 - `list_keys` scan succeeds (the same scan the proxy runs at startup for wrapped-key resolution)
 - Every `key_mappings` entry resolves to a `CREATE_COMPLETE`, enabled APC key. Reports KCV / usage / algorithm per entry.
-- **HSM-side KCV cross-check** (Thales, when `discover.hsm_host` is configured): asks the source HSM for the KCV of each LMK-encrypted mapping key (`BU` over the same TLS config as the forward leg) and compares it to APC's KCV. This catches the case a clean APC inventory cannot: a mapping that points at a *valid* APC key holding *different* clear material than the HSM key the application actually uses. Key mismatch is a `FAIL`; an unreachable HSM degrades to a single warning and the APC-side checks still run. Futurex is not yet covered (see Phase 2 note on `GPKR`).
+- **HSM-side KCV cross-check** (Thales, when `discover.hsm_host` is configured): asks the source HSM for the KCV of each LMK-encrypted mapping key (`BU` over the same TLS config as the forward leg) and compares it to APC's KCV. This catches the case a clean APC inventory cannot: a mapping that points at a *valid* APC key holding *different* clear material than the HSM key the application actually uses. Key mismatch is a `FAIL`; an unreachable HSM degrades to a single warning and the APC-side checks still run.
 - TLS file paths exist (parse happens at startup)
 - mTLS config is internally consistent (client cert + key paired)
 - Warns if inbound TLS is missing (plaintext listener) or if `discover.enabled=true` without `discover.tls` (plaintext forward leg)
@@ -265,7 +261,6 @@ see the [Threat Model](threat-model.md).
 These are known gaps the project hasn't closed:
 
 - **AS2805 / RTKS combined MAC+translate handlers** (RI/RK/RM/RO/RQ/RS/RU/RW, HI/HK/HM/HO/HQ/HS/HU/HW) — see [#12](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/issues/12). If your application uses these, you'll need to add handlers before cutover.
-- **Futurex slot auto-discovery via `KMAP` + `GPKR`** — see [#13](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/issues/13). Until that ships, Futurex slot IDs must be pinned manually in `key_mappings`.
 - **HSM connection pooling** — see [#1](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/issues/1). The forward leg currently opens a fresh TCP per forwarded command. Fine for discovery and low-volume; revisit for high-throughput production.
 - **Real-HSM validation** — every test in this repo is either a unit test or an integration test against APC + an in-process mock HSM. The first cutover against a real upstream client application will surface protocol edge cases the spec inference left ambiguous. File what you find.
 

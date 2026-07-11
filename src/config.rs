@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 pub struct ProxyConfig {
     #[serde(default)]
     pub listen: ListenConfig,
-    /// Protocol variant: "thales_payshield" or "futurex_excrypt"
+    /// Vendor module to serve, matched against each registered `VendorModule`'s
+    /// `vendor()` string. The open core provides `"thales_payshield"`; enterprise
+    /// bolt-ons register additional vendors (e.g. `"futurex_excrypt"`).
     pub vendor: String,
     pub aws: AwsConfig,
     /// Maps legacy key identifiers (label or LMK-encrypted hex) to APC key ARNs.
