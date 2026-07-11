@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn ju_rejects_confidentiality_modes() {
-        for m in [b'1', b'2', b'3', b'4'] {
+        for m in *b"1234" {
             assert!(matches!(
                 parse_ju(&ju_payload(m, b'1', b'0', &[0xAA])),
                 Err(ProxyError::Unsupported(_))
@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn ku_gates_jcb_and_unionpay_schemes() {
         let skd = [0u8; 8];
-        for s in [b'3', b'4', b'6'] {
+        for s in *b"346" {
             assert!(matches!(
                 parse_ku(&ku_payload(s, skd, &[0xAB], false)),
                 Err(ProxyError::Unsupported(_))
