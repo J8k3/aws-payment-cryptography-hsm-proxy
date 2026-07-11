@@ -5,6 +5,7 @@ use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
 use crate::handlers::thales::common::parse_legacy_key;
+use crate::handlers::thales::reader::FieldReader;
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -85,47 +86,35 @@ struct PinFields {
 /// Parse CC (`has_dest_flag` = false) or CA (`has_dest_flag` = true) static
 /// translate commands. The DES path: 16H source PIN block, 12N PAN.
 fn parse_translate(payload: &[u8], has_dest_flag: bool) -> Result<PinFields, ProxyError> {
-    let (source_key, src_len) = parse_legacy_key(payload, 0)?;
-    let mut pos = src_len;
+    let mut r = FieldReader::new(payload, "translate");
+    let source_key = r.parse_with(parse_legacy_key)?;
 
     if has_dest_flag {
         // A '*' or '~' flag means the destination is a BDK (DUKPT) — not handled here.
-        if let Some(&b'*' | &b'~') = payload.get(pos) {
+        if let Some(&b'*' | &b'~') = r.remaining().first() {
             return Err(ProxyError::Unsupported(
                 "CA with a DUKPT destination (BDK key flag) is not supported".into(),
             ));
         }
     }
 
-    let (dest_key, dest_len) = parse_legacy_key(payload, pos)?;
-    pos += dest_len;
+    let dest_key = r.parse_with(parse_legacy_key)?;
 
-    let maxlen_end = pos + MAX_PIN_LEN_FIELD;
-    let pin_end = maxlen_end + PIN_BLOCK_DES;
-    let src_fmt_end = pin_end + FMT_CODE_LEN;
-    let dst_fmt_end = src_fmt_end + FMT_CODE_LEN;
-    let acct_end = dst_fmt_end + ACCOUNT_LEN;
-
-    if payload.len() < acct_end {
-        return Err(ProxyError::MalformedPayload(format!(
-            "translate payload too short: {} < {}",
-            payload.len(),
-            acct_end
-        )));
-    }
-
-    let source_format = map_translate_format(&payload[pin_end..src_fmt_end])?;
-    let dest_format = map_translate_format(&payload[src_fmt_end..dst_fmt_end])?;
+    r.take(MAX_PIN_LEN_FIELD, "max PIN length")?; // consumed
+    let pin_block =
+        Zeroizing::new(String::from_utf8_lossy(r.take(PIN_BLOCK_DES, "PIN block")?).to_string());
+    let source_format = map_translate_format(r.take(FMT_CODE_LEN, "source format")?)?;
+    let dest_format = map_translate_format(r.take(FMT_CODE_LEN, "dest format")?)?;
+    let account_number =
+        String::from_utf8_lossy(r.take(ACCOUNT_LEN, "account number")?).to_string();
 
     Ok(PinFields {
         source_key,
         dest_key,
         source_format,
         dest_format,
-        pin_block: Zeroizing::new(
-            String::from_utf8_lossy(&payload[maxlen_end..pin_end]).to_string(),
-        ),
-        account_number: String::from_utf8_lossy(&payload[dst_fmt_end..acct_end]).to_string(),
+        pin_block,
+        account_number,
     })
 }
 

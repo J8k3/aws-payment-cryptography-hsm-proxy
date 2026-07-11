@@ -4,6 +4,7 @@ use tracing::{debug, warn};
 
 use crate::error::ProxyError;
 use crate::handlers::thales::common::parse_legacy_key;
+use crate::handlers::thales::reader::FieldReader;
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -36,7 +37,6 @@ use crate::key_map::KeyDescriptor;
 /// Response payload: outbound MAC (out_mac_size*2 H).
 pub struct MacTranslateHandler;
 
-const HEADER_BYTES: usize = 5; // Mode + InFmt + MACSize + MACAlgo + PadMethod
 const KEY_TYPE_LEN: usize = 3;
 const MSG_LEN_FIELD: usize = 4;
 
@@ -71,82 +71,46 @@ fn algo_from_byte(byte: u8) -> Result<String, ProxyError> {
 }
 
 fn parse_my(payload: &[u8]) -> Result<MacTranslateFields, ProxyError> {
-    if payload.len() < HEADER_BYTES + KEY_TYPE_LEN {
-        return Err(ProxyError::MalformedPayload(format!(
-            "MY payload too short: {}",
-            payload.len()
-        )));
-    }
+    let mut r = FieldReader::new(payload, "MY");
 
     // Mode '0' = complete single message. Continuation modes require multi-block
     // session state; APC is stateless and single-call only.
-    if payload[0] != b'0' {
+    let mode = r.byte("mode")?;
+    if mode != b'0' {
         return Err(ProxyError::UnsupportedMacMode(format!(
             "MY: mode '{}' (continuation) not supported; APC is stateless — use mode '0' (complete message) only",
-            payload[0] as char
+            mode as char
         )));
     }
     // Input format '1' = hex-encoded. Only hex input is supported.
-    if payload[1] != b'1' {
+    let infmt = r.byte("input format")?;
+    if infmt != b'1' {
         return Err(ProxyError::MalformedPayload(format!(
             "MY: input format '{}' not supported; only format '1' (hex-encoded) is accepted",
-            payload[1] as char
+            infmt as char
         )));
     }
 
-    // Inbound header: Mode(1) + InFmt(1) + MACSize(1) + MACAlgo(1) + PadMethod(1)
-    let in_mac_size = mac_size_from_byte(payload[2])?;
-    let in_algo = algo_from_byte(payload[3])?;
-    // payload[4] = pad method, consumed
+    // Inbound header: MACSize(1) + MACAlgo(1) + PadMethod(1), then key type + key.
+    let in_mac_size = mac_size_from_byte(r.byte("in MAC size")?)?;
+    let in_algo = algo_from_byte(r.byte("in MAC algo")?)?;
+    r.byte("in pad method")?; // consumed
+    r.take(KEY_TYPE_LEN, "in key type")?; // consumed
+    let in_key_id = r.parse_with(parse_legacy_key)?;
 
-    let mut pos = HEADER_BYTES + KEY_TYPE_LEN; // skip inbound header + key type
+    // Outbound header: MACSize(1) + MACAlgo(1) + PadMethod(1), then key type + key.
+    let out_mac_size = mac_size_from_byte(r.byte("out MAC size")?)?;
+    let out_algo = algo_from_byte(r.byte("out MAC algo")?)?;
+    r.byte("out pad method")?; // consumed
+    r.take(KEY_TYPE_LEN, "out key type")?; // consumed
+    let out_key_id = r.parse_with(parse_legacy_key)?;
 
-    let (in_key_id, n) = parse_legacy_key(payload, pos)?;
-    pos += n;
+    // Message: 4-char ASCII byte-count, then that many hex-encoded bytes.
+    let message_hex =
+        String::from_utf8_lossy(r.take_ascii_len_hex(MSG_LEN_FIELD, 16, "message")?).to_string();
 
-    // Outbound header: MACSize(1) + MACAlgo(1) + PadMethod(1)
-    if payload.len() < pos + 3 + KEY_TYPE_LEN {
-        return Err(ProxyError::MalformedPayload(
-            "MY: outbound header missing".into(),
-        ));
-    }
-    let out_mac_size = mac_size_from_byte(payload[pos])?;
-    let out_algo = algo_from_byte(payload[pos + 1])?;
-    // payload[pos+2] = out pad method, consumed
-    pos += 3 + KEY_TYPE_LEN;
-
-    let (out_key_id, n) = parse_legacy_key(payload, pos)?;
-    pos += n;
-
-    // Message length (4H)
-    if payload.len() < pos + MSG_LEN_FIELD {
-        return Err(ProxyError::MalformedPayload(
-            "MY: message length missing".into(),
-        ));
-    }
-    let msg_len_hex = std::str::from_utf8(&payload[pos..pos + MSG_LEN_FIELD])
-        .map_err(|_| ProxyError::MalformedPayload("MY: msg length not ASCII".into()))?;
-    let msg_byte_len = usize::from_str_radix(msg_len_hex, 16).map_err(|_| {
-        ProxyError::MalformedPayload(format!("MY: invalid msg length '{msg_len_hex}'"))
-    })?;
-    pos += MSG_LEN_FIELD;
-
-    // Message
-    let msg_hex_chars = msg_byte_len * 2;
-    if payload.len() < pos + msg_hex_chars {
-        return Err(ProxyError::MalformedPayload("MY: message truncated".into()));
-    }
-    let message_hex = String::from_utf8_lossy(&payload[pos..pos + msg_hex_chars]).to_string();
-    pos += msg_hex_chars;
-
-    // Inbound MAC
-    let in_mac_hex_chars = in_mac_size * 2;
-    if payload.len() < pos + in_mac_hex_chars {
-        return Err(ProxyError::MalformedPayload(
-            "MY: inbound MAC missing".into(),
-        ));
-    }
-    let inbound_mac = String::from_utf8_lossy(&payload[pos..pos + in_mac_hex_chars]).to_string();
+    // Inbound MAC (hex; size per the inbound header).
+    let inbound_mac = String::from_utf8_lossy(r.take(in_mac_size * 2, "inbound MAC")?).to_string();
 
     Ok(MacTranslateFields {
         in_algo,

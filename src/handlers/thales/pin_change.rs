@@ -5,6 +5,7 @@ use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
 use crate::handlers::thales::common::{map_pin_block_format, parse_key_32, parse_legacy_key};
+use crate::handlers::thales::reader::FieldReader;
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -86,92 +87,76 @@ struct CuFields {
 }
 
 fn parse_du(payload: &[u8]) -> Result<DuFields, ProxyError> {
-    let mut pos = 0;
+    let mut r = FieldReader::new(payload, "DU");
 
-    let (enc_key_id, n) = parse_legacy_key(payload, pos)?;
-    pos += n;
-    let (pvk_id, n) = parse_legacy_key(payload, pos)?;
-    pos += n;
+    let enc_key_id = r.parse_with(parse_legacy_key)?;
+    let pvk_id = r.parse_with(parse_legacy_key)?;
 
-    pos += MAX_PIN_LEN_FIELD + MIN_PIN_LEN_FIELD;
+    r.take(MAX_PIN_LEN_FIELD + MIN_PIN_LEN_FIELD, "PIN length fields")?; // consumed
 
-    let cur_pin_end = pos + PIN_BLOCK_LEN;
-    let fmt_end = cur_pin_end + PIN_FMT_FIELD;
-    let acct_end = fmt_end + ACCOUNT_LEN;
-    let decim_end = acct_end + DECIM_TABLE_LEN;
-    let pvdata_end = decim_end + PIN_VAL_DATA_LEN;
-    let offset_end = pvdata_end + IBM_OFFSET_LEN;
-    let new_pin_end = offset_end + PIN_BLOCK_LEN;
-
-    if payload.len() < new_pin_end {
-        return Err(ProxyError::MalformedPayload(format!(
-            "DU payload too short: {} < {}",
-            payload.len(),
-            new_pin_end
-        )));
-    }
+    let cur_pin_block = Zeroizing::new(
+        String::from_utf8_lossy(r.take(PIN_BLOCK_LEN, "current PIN block")?).to_string(),
+    );
+    let pin_block_format =
+        String::from_utf8_lossy(r.take(PIN_FMT_FIELD, "PIN block format")?).to_string();
+    let account = String::from_utf8_lossy(r.take(ACCOUNT_LEN, "account")?).to_string();
+    let decim_table =
+        String::from_utf8_lossy(r.take(DECIM_TABLE_LEN, "decimalization table")?).to_string();
+    let pin_val_data =
+        String::from_utf8_lossy(r.take(PIN_VAL_DATA_LEN, "PIN validation data")?).to_string();
+    let cur_offset = String::from_utf8_lossy(r.take(IBM_OFFSET_LEN, "current offset")?).to_string();
+    let new_pin_block = Zeroizing::new(
+        String::from_utf8_lossy(r.take(PIN_BLOCK_LEN, "new PIN block")?).to_string(),
+    );
 
     Ok(DuFields {
         enc_key_id,
         pvk_id,
-        cur_pin_block: Zeroizing::new(
-            String::from_utf8_lossy(&payload[pos..cur_pin_end]).to_string(),
-        ),
-        pin_block_format: String::from_utf8_lossy(&payload[cur_pin_end..fmt_end]).to_string(),
-        account: String::from_utf8_lossy(&payload[fmt_end..acct_end]).to_string(),
-        decim_table: String::from_utf8_lossy(&payload[acct_end..decim_end]).to_string(),
-        pin_val_data: String::from_utf8_lossy(&payload[decim_end..pvdata_end]).to_string(),
-        cur_offset: String::from_utf8_lossy(&payload[pvdata_end..offset_end]).to_string(),
-        new_pin_block: Zeroizing::new(
-            String::from_utf8_lossy(&payload[offset_end..new_pin_end]).to_string(),
-        ),
+        cur_pin_block,
+        pin_block_format,
+        account,
+        decim_table,
+        pin_val_data,
+        cur_offset,
+        new_pin_block,
     })
 }
 
 fn parse_cu(payload: &[u8]) -> Result<CuFields, ProxyError> {
-    let mut pos = 0;
+    let mut r = FieldReader::new(payload, "CU");
 
-    let (enc_key_id, n) = parse_legacy_key(payload, pos)?;
-    pos += n;
-    let (pvk_id, n) = parse_key_32(payload, pos)?;
-    pos += n;
+    let enc_key_id = r.parse_with(parse_legacy_key)?;
+    let pvk_id = r.parse_with(parse_key_32)?;
 
-    pos += MAX_PIN_LEN_FIELD + MIN_PIN_LEN_FIELD;
+    r.take(MAX_PIN_LEN_FIELD + MIN_PIN_LEN_FIELD, "PIN length fields")?; // consumed
 
-    let cur_pin_end = pos + PIN_BLOCK_LEN;
-    let fmt_end = cur_pin_end + PIN_FMT_FIELD;
-    let acct_end = fmt_end + ACCOUNT_LEN;
-    let pvki_end = acct_end + PVKI_LEN;
-    let pvv_end = pvki_end + PVV_LEN;
-    let new_pin_end = pvv_end + PIN_BLOCK_LEN;
+    let cur_pin_block = Zeroizing::new(
+        String::from_utf8_lossy(r.take(PIN_BLOCK_LEN, "current PIN block")?).to_string(),
+    );
+    let pin_block_format =
+        String::from_utf8_lossy(r.take(PIN_FMT_FIELD, "PIN block format")?).to_string();
+    let account = String::from_utf8_lossy(r.take(ACCOUNT_LEN, "account")?).to_string();
 
-    if payload.len() < new_pin_end {
-        return Err(ProxyError::MalformedPayload(format!(
-            "CU payload too short: {} < {}",
-            payload.len(),
-            new_pin_end
-        )));
-    }
-
-    let pvki_str = std::str::from_utf8(&payload[acct_end..pvki_end])
+    let pvki_str = std::str::from_utf8(r.take(PVKI_LEN, "PVKI")?)
         .map_err(|_| ProxyError::MalformedPayload("CU: PVKI not ASCII".into()))?;
     let pvki = pvki_str
         .parse::<i32>()
         .map_err(|_| ProxyError::MalformedPayload(format!("CU: invalid PVKI '{pvki_str}'")))?;
 
+    let cur_pvv = String::from_utf8_lossy(r.take(PVV_LEN, "current PVV")?).to_string();
+    let new_pin_block = Zeroizing::new(
+        String::from_utf8_lossy(r.take(PIN_BLOCK_LEN, "new PIN block")?).to_string(),
+    );
+
     Ok(CuFields {
         enc_key_id,
         pvk_id,
-        cur_pin_block: Zeroizing::new(
-            String::from_utf8_lossy(&payload[pos..cur_pin_end]).to_string(),
-        ),
-        pin_block_format: String::from_utf8_lossy(&payload[cur_pin_end..fmt_end]).to_string(),
-        account: String::from_utf8_lossy(&payload[fmt_end..acct_end]).to_string(),
+        cur_pin_block,
+        pin_block_format,
+        account,
         pvki,
-        cur_pvv: String::from_utf8_lossy(&payload[pvki_end..pvv_end]).to_string(),
-        new_pin_block: Zeroizing::new(
-            String::from_utf8_lossy(&payload[pvv_end..new_pin_end]).to_string(),
-        ),
+        cur_pvv,
+        new_pin_block,
     })
 }
 

@@ -8,6 +8,7 @@ use crate::handlers::thales::common::{
     build_session_key, bytes_to_hex, decode_bcd_pan_seq, emv_pad, parse_legacy_key, verify_arqc,
     EmvSession,
 };
+use crate::handlers::thales::reader::FieldReader;
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -56,85 +57,29 @@ struct CapFields {
 
 fn parse_cap(payload: &[u8], is_k2: bool) -> Result<CapFields, ProxyError> {
     let cmd = if is_k2 { "K2" } else { "KS" };
-    let mut pos = 0;
+    let mut r = FieldReader::new(payload, cmd);
 
-    // Key Type (3H ASCII) — consumed
-    if payload.len() < pos + 3 {
-        return Err(ProxyError::MalformedPayload(format!(
-            "{cmd}: key type missing"
-        )));
-    }
-    pos += 3;
-
-    // Key (variable ASCII hex)
-    let (key_id, key_consumed) = parse_legacy_key(payload, pos)?;
-    pos += key_consumed;
+    r.take(3, "key type")?; // Key Type (3H ASCII) — consumed
+    let key_id = r.parse_with(parse_legacy_key)?; // Key (16H | U+32H | T+48H)
 
     // PAN+Seq (8B binary BCD)
-    if payload.len() < pos + 8 {
-        return Err(ProxyError::MalformedPayload(format!(
-            "{cmd}: PAN+seq field missing"
-        )));
-    }
-    let pan_seq_bytes: [u8; 8] = payload[pos..pos + 8]
-        .try_into()
-        .expect("length checked above");
-    let (pan, pan_seq) = decode_bcd_pan_seq(pan_seq_bytes);
-    pos += 8;
+    let (pan, pan_seq) = decode_bcd_pan_seq(r.take_array::<8>("PAN+seq")?);
+    let atc = r.take_hex(2, "ATC")?;
 
-    // ATC (2B binary)
-    if payload.len() < pos + 2 {
-        return Err(ProxyError::MalformedPayload(format!("{cmd}: ATC missing")));
-    }
-    let atc = bytes_to_hex(&payload[pos..pos + 2]);
-    pos += 2;
-
-    // UN (4B binary, K2 only)
+    // UN (4B binary, K2 only — the Mastercard proprietary SKD consumes it)
     let unpredictable_number = if is_k2 {
-        if payload.len() < pos + 4 {
-            return Err(ProxyError::MalformedPayload("K2: UN missing".into()));
-        }
-        let un = bytes_to_hex(&payload[pos..pos + 4]);
-        pos += 4;
-        Some(un)
+        Some(r.take_hex(4, "UN")?)
     } else {
         None
     };
 
-    // TxnLen (2B binary big-endian)
-    if payload.len() < pos + 2 {
-        return Err(ProxyError::MalformedPayload(format!(
-            "{cmd}: transaction data length missing"
-        )));
-    }
-    let txn_byte_len = u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize;
-    pos += 2;
+    // TxnData: length (2B BE) then that many bytes. APC does not pad; forward the
+    // EMV (ISO 9797-1 method 2) padded data.
+    let txn_byte_len = r.u16_be("txn length")?;
+    let txn_data = Zeroizing::new(bytes_to_hex(&emv_pad(r.take(txn_byte_len, "txn data")?)));
 
-    // TxnData
-    if payload.len() < pos + txn_byte_len {
-        return Err(ProxyError::MalformedPayload(format!(
-            "{cmd}: transaction data too short: need {txn_byte_len} bytes"
-        )));
-    }
-    // APC does not pad; forward EMV (ISO 9797-1 method 2) padded transaction data.
-    let txn_data = Zeroizing::new(bytes_to_hex(&emv_pad(&payload[pos..pos + txn_byte_len])));
-    pos += txn_byte_len;
-
-    // Delimiter 0x3B
-    if payload.len() < pos + 1 || payload[pos] != 0x3B {
-        return Err(ProxyError::MalformedPayload(format!(
-            "{cmd}: missing 0x3B delimiter"
-        )));
-    }
-    pos += 1;
-
-    // Cryptogram (8B binary)
-    if payload.len() < pos + 8 {
-        return Err(ProxyError::MalformedPayload(format!(
-            "{cmd}: cryptogram missing"
-        )));
-    }
-    let cryptogram = bytes_to_hex(&payload[pos..pos + 8]);
+    r.expect_byte(0x3B, "delimiter")?;
+    let cryptogram = r.take_hex(8, "cryptogram")?;
 
     Ok(CapFields {
         key_id,

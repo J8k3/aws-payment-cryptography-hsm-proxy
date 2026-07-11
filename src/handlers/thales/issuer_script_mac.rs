@@ -12,6 +12,7 @@ use crate::error::ProxyError;
 use crate::handlers::thales::common::{
     build_err, bytes_to_hex, decode_bcd_pan_seq, emv_pad, parse_key_32,
 };
+use crate::handlers::thales::reader::FieldReader;
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -131,62 +132,44 @@ fn message_for_apc(raw: &[u8], already_padded: bool) -> Zeroizing<String> {
 /// Wire: Mode(1N) Scheme(1N='1') MK-SMI(32H|U+32H|S+..) PAN/Seq(8B)
 ///       ATC(2B) PaddingFlag(1N) MacMsgLen(4H) MacMsgData(nB) ';'(1A)
 fn parse_ju(payload: &[u8]) -> Result<SmiFields, ProxyError> {
-    let mut pos = 0;
+    let mut r = FieldReader::new(payload, "JU");
 
-    let mode = *payload
-        .first()
-        .ok_or_else(|| ProxyError::MalformedPayload("JU: mode flag missing".into()))?;
-    require_mode_0("JU", mode)?;
-    pos += 1;
+    require_mode_0("JU", r.byte("mode flag")?)?;
 
     // Scheme ID — CUP defines only '1'.
-    match payload.get(pos) {
-        Some(b'1') => {}
-        Some(other) => {
+    match r.byte("scheme ID")? {
+        b'1' => {}
+        other => {
             return Err(ProxyError::MalformedPayload(format!(
                 "JU: unsupported scheme '{}' (CUP defines only '1')",
-                *other as char
+                other as char
             )))
         }
-        None => return Err(ProxyError::MalformedPayload("JU: scheme ID missing".into())),
     }
-    pos += 1;
 
-    let (key_id, key_consumed) = parse_key_32(payload, pos)?;
-    pos += key_consumed;
+    let key_id = r.parse_with(parse_key_32)?;
+    let (pan, pan_seq) = r.parse_with(|b, o| {
+        read_pan_seq("JU", b, o).map(|(pan, seq, next)| ((pan, seq), next - o))
+    })?;
 
-    let (pan, pan_seq, next) = read_pan_seq("JU", payload, pos)?;
-    pos = next;
-
-    // ATC (2B binary)
-    if payload.len() < pos + 2 {
-        return Err(ProxyError::MalformedPayload("JU: ATC missing".into()));
-    }
-    let atc = bytes_to_hex(&payload[pos..pos + 2]);
-    pos += 2;
+    let atc = r.take_hex(2, "ATC")?;
 
     // Padding Flag (1N): '1' = host already padded the message.
-    let already_padded = match payload.get(pos) {
-        Some(b'0') => false,
-        Some(b'1') => true,
-        Some(other) => {
+    let already_padded = match r.byte("padding flag")? {
+        b'0' => false,
+        b'1' => true,
+        other => {
             return Err(ProxyError::MalformedPayload(format!(
                 "JU: invalid padding flag '{}'",
-                *other as char
+                other as char
             )))
         }
-        None => {
-            return Err(ProxyError::MalformedPayload(
-                "JU: padding flag missing".into(),
-            ))
-        }
     };
-    pos += 1;
 
     // MAC Message Data Length (4H ASCII) + data + ';'.
-    let (message_raw, next) = read_len_prefixed_message("JU", payload, pos)?;
-    pos = next;
-    expect_delimiter("JU", payload, pos)?;
+    let message_raw =
+        r.parse_with(|b, o| read_len_prefixed_message("JU", b, o).map(|(m, next)| (m, next - o)))?;
+    r.expect_byte(0x3B, "delimiter")?;
 
     Ok(SmiFields {
         key_id,
@@ -208,34 +191,18 @@ fn parse_ju(payload: &[u8]) -> Result<SmiFields, ProxyError> {
 /// The KU message carries no host padding flag for these schemes, so the proxy
 /// always method-2 pads it for APC.
 fn parse_ku(payload: &[u8]) -> Result<SmiFields, ProxyError> {
-    let mut pos = 0;
+    let mut r = FieldReader::new(payload, "KU");
 
-    let mode = *payload
-        .first()
-        .ok_or_else(|| ProxyError::MalformedPayload("KU: mode flag missing".into()))?;
-    require_mode_0("KU", mode)?;
-    pos += 1;
+    require_mode_0("KU", r.byte("mode flag")?)?;
+    let scheme = r.byte("scheme ID")?;
 
-    let scheme = *payload
-        .get(pos)
-        .ok_or_else(|| ProxyError::MalformedPayload("KU: scheme ID missing".into()))?;
-    pos += 1;
-
-    let (key_id, key_consumed) = parse_key_32(payload, pos)?;
-    pos += key_consumed;
-
-    let (pan, pan_seq, next) = read_pan_seq("KU", payload, pos)?;
-    pos = next;
+    let key_id = r.parse_with(parse_key_32)?;
+    let (pan, pan_seq) = r.parse_with(|b, o| {
+        read_pan_seq("KU", b, o).map(|(pan, seq, next)| ((pan, seq), next - o))
+    })?;
 
     // Integrity Session Key Data — 8 bytes for schemes 0/1/2/5.
-    const SKD_BYTES: usize = 8;
-    if payload.len() < pos + SKD_BYTES {
-        return Err(ProxyError::MalformedPayload(
-            "KU: integrity session key data missing".into(),
-        ));
-    }
-    let skd = &payload[pos..pos + SKD_BYTES];
-    pos += SKD_BYTES;
+    let skd = r.take(8, "integrity session key data")?;
 
     // Scheme → (session mode, seed). ATC schemes take the rightmost 2 bytes of the
     // 8-byte field (left zero-padded per Thales); AC schemes take all 8 bytes.
@@ -282,13 +249,12 @@ fn parse_ku(payload: &[u8]) -> Result<SmiFields, ProxyError> {
 
     // Message framing: scheme '5' is length-prefixed; '0'/'1'/'2' are delimited by
     // ';' (payShield defines no length for them).
-    let (message_raw, next) = if length_prefixed {
-        read_len_prefixed_message("KU", payload, pos)?
+    let message_raw = if length_prefixed {
+        r.parse_with(|b, o| read_len_prefixed_message("KU", b, o).map(|(m, next)| (m, next - o)))?
     } else {
-        read_delimited_message("KU", payload, pos)?
+        r.parse_with(|b, o| read_delimited_message("KU", b, o).map(|(m, next)| (m, next - o)))?
     };
-    pos = next;
-    expect_delimiter("KU", payload, pos)?;
+    r.expect_byte(0x3B, "delimiter")?;
 
     Ok(SmiFields {
         key_id,
@@ -344,18 +310,6 @@ fn read_delimited_message<'a>(
         None => Err(ProxyError::MalformedPayload(format!(
             "{cmd}: message delimiter ';' not found"
         ))),
-    }
-}
-
-/// Verify the `';'` (0x3B) delimiter at `pos`.
-fn expect_delimiter(cmd: &str, payload: &[u8], pos: usize) -> Result<(), ProxyError> {
-    if payload.get(pos) == Some(&0x3B) {
-        Ok(())
-    } else {
-        Err(ProxyError::MalformedPayload(format!(
-            "{cmd}: expected ';' delimiter at offset {pos}, got {:?}",
-            payload.get(pos)
-        )))
     }
 }
 

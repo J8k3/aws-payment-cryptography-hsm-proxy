@@ -5,6 +5,7 @@ use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
 use crate::handlers::thales::common::parse_legacy_key;
+use crate::handlers::thales::reader::FieldReader;
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -126,16 +127,10 @@ impl Handler for InternationalEncryptHandler {
 /// Parse M0/M2 common prefix and data block.
 /// Returns (key_id, msg_hex, cursor) or an error.
 fn parse_m0_fields(payload: &[u8]) -> Result<(KeyDescriptor, Zeroizing<String>), ProxyError> {
-    let mut pos = 0;
+    let mut r = FieldReader::new(payload, "M0/M2");
 
-    // Mode Flag (2N)
-    if payload.len() < pos + MODE_FLAG_LEN {
-        return Err(ProxyError::MalformedPayload(
-            "M0/M2: mode flag missing".into(),
-        ));
-    }
-    let mode = &payload[pos..pos + MODE_FLAG_LEN];
-    pos += MODE_FLAG_LEN;
+    // Mode Flag (2N) — ECB "00" only.
+    let mode = r.take(MODE_FLAG_LEN, "mode flag")?;
     if mode != b"00" {
         return Err(ProxyError::MalformedPayload(format!(
             "M0/M2: mode '{}' not supported (ECB '00' only)",
@@ -143,64 +138,23 @@ fn parse_m0_fields(payload: &[u8]) -> Result<(KeyDescriptor, Zeroizing<String>),
         )));
     }
 
-    // Input Format Flag (1N)
-    if payload.len() < pos + FORMAT_FLAG_LEN {
-        return Err(ProxyError::MalformedPayload(
-            "M0/M2: input format flag missing".into(),
-        ));
-    }
-    if payload[pos] != b'1' {
+    // Input Format Flag (1N) — hex '1' only.
+    let in_fmt = r.byte("input format flag")?;
+    if in_fmt != b'1' {
         return Err(ProxyError::MalformedPayload(format!(
             "M0/M2: input format '{}' not supported (hex '1' only)",
-            payload[pos] as char
+            in_fmt as char
         )));
     }
-    pos += FORMAT_FLAG_LEN;
 
-    // Output Format Flag (1N) — accepted but unused (we always return hex)
-    if payload.len() < pos + FORMAT_FLAG_LEN {
-        return Err(ProxyError::MalformedPayload(
-            "M0/M2: output format flag missing".into(),
-        ));
-    }
-    pos += FORMAT_FLAG_LEN;
+    r.take(FORMAT_FLAG_LEN, "output format flag")?; // accepted but unused (we always return hex)
+    r.take(KEY_TYPE_LEN, "key type")?; // consumed, key_map resolves the actual key
+    let key_id = r.parse_with(parse_legacy_key)?;
 
-    // Key Type (3H) — consumed, key_map resolves the actual key
-    if payload.len() < pos + KEY_TYPE_LEN {
-        return Err(ProxyError::MalformedPayload(
-            "M0/M2: key type field missing".into(),
-        ));
-    }
-    pos += KEY_TYPE_LEN;
-
-    // Key (variable)
-    let (key_id, key_consumed) = parse_legacy_key(payload, pos)?;
-    pos += key_consumed;
-
-    // Message Length (4H hex chars = hex-encoded byte count)
-    if payload.len() < pos + MSG_LEN_FIELD {
-        return Err(ProxyError::MalformedPayload(
-            "M0/M2: message length field missing".into(),
-        ));
-    }
-    let len_hex = std::str::from_utf8(&payload[pos..pos + MSG_LEN_FIELD])
-        .map_err(|_| ProxyError::MalformedPayload("M0/M2: message length not ASCII".into()))?;
-    let byte_count = usize::from_str_radix(len_hex, 16).map_err(|_| {
-        ProxyError::MalformedPayload(format!("M0/M2: invalid message length '{len_hex}'"))
-    })?;
-    pos += MSG_LEN_FIELD;
-
-    // Message (2× byte_count hex chars)
-    let msg_hex_chars = byte_count * 2;
-    if payload.len() < pos + msg_hex_chars {
-        return Err(ProxyError::MalformedPayload(format!(
-            "M0/M2: message too short: need {} hex chars, got {}",
-            msg_hex_chars,
-            payload.len().saturating_sub(pos)
-        )));
-    }
-    let msg =
-        Zeroizing::new(String::from_utf8_lossy(&payload[pos..pos + msg_hex_chars]).to_string());
+    // Message: 4-char ASCII byte-count, then that many hex-encoded bytes.
+    let msg = Zeroizing::new(
+        String::from_utf8_lossy(r.take_ascii_len_hex(MSG_LEN_FIELD, 16, "message")?).to_string(),
+    );
 
     Ok((key_id, msg))
 }

@@ -21,4 +21,5 @@ pub mod pin;
 pub mod pin_change;
 pub mod pin_verify_non_dukpt;
 pub mod random_pin;
+pub mod reader;
 pub mod unionpay_arqc;

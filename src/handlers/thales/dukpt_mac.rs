@@ -4,6 +4,7 @@ use tracing::{debug, warn};
 
 use crate::error::ProxyError;
 use crate::handlers::thales::common::{parse_bdk, parse_ksn_with_descriptor};
+use crate::handlers::thales::reader::FieldReader;
 use crate::handlers::{AppState, Handler, HandlerResult};
 use crate::key_map::KeyDescriptor;
 
@@ -30,7 +31,6 @@ use crate::key_map::KeyDescriptor;
 ///   dukpt_key_variant=Bidirectional, dukpt_derivation_type from KSN descriptor}.
 pub struct DukptMacHandler;
 
-const HEADER_BYTES: usize = 5; // Mode + InFmt + MACSize + MACAlgo + PadMethod
 const MSG_LEN_FIELD: usize = 4;
 
 struct GwFields {
@@ -45,14 +45,9 @@ struct GwFields {
 }
 
 fn parse_gw(payload: &[u8]) -> Result<GwFields, ProxyError> {
-    if payload.len() < HEADER_BYTES {
-        return Err(ProxyError::MalformedPayload(format!(
-            "GW: payload too short: {}",
-            payload.len()
-        )));
-    }
+    let mut r = FieldReader::new(payload, "GW");
 
-    let is_verify = match payload[0] {
+    let is_verify = match r.byte("mode")? {
         b'0' => false,
         b'1' => true,
         other => {
@@ -63,14 +58,15 @@ fn parse_gw(payload: &[u8]) -> Result<GwFields, ProxyError> {
         }
     };
 
-    if payload[1] != b'1' {
+    let fmt = r.byte("input format")?;
+    if fmt != b'1' {
         return Err(ProxyError::MalformedPayload(format!(
             "GW: unsupported input format '{}' (only '1'=hex)",
-            payload[1] as char
+            fmt as char
         )));
     }
 
-    let mac_size_bytes: usize = match payload[2] {
+    let mac_size_bytes: usize = match r.byte("MAC size")? {
         b'0' => 4,
         b'1' => 2,
         other => {
@@ -81,53 +77,26 @@ fn parse_gw(payload: &[u8]) -> Result<GwFields, ProxyError> {
         }
     };
 
-    let algo: &'static str = match payload[3] {
+    let algo: &'static str = match r.byte("algorithm")? {
         b'1' => "ISO9797_ALG1",
         b'3' => "ISO9797_ALG3",
         b'6' => "CMAC",
         other => return Err(ProxyError::UnsupportedMacMode(format!("{}", other as char))),
     };
 
-    // payload[4] = pad method, consumed
-    let mut pos = HEADER_BYTES;
+    r.byte("pad method")?; // consumed
 
-    let (bdk_id, bdk_consumed) = parse_bdk(payload, pos)?;
-    pos += bdk_consumed;
-
-    let (ksn, ksn_consumed, deriv_type) = parse_ksn_with_descriptor(payload, pos)?;
-    pos += ksn_consumed;
-
-    if payload.len() < pos + MSG_LEN_FIELD {
-        return Err(ProxyError::MalformedPayload(
-            "GW: message length field missing".into(),
-        ));
-    }
-    let msg_len_hex = std::str::from_utf8(&payload[pos..pos + MSG_LEN_FIELD])
-        .map_err(|_| ProxyError::MalformedPayload("GW: msg length not ASCII".into()))?;
-    let msg_byte_len = usize::from_str_radix(msg_len_hex, 16).map_err(|_| {
-        ProxyError::MalformedPayload(format!("GW: invalid msg length '{msg_len_hex}'"))
+    let bdk_id = r.parse_with(parse_bdk)?;
+    let (ksn, deriv_type) = r.parse_with(|b, o| {
+        parse_ksn_with_descriptor(b, o).map(|(ksn, consumed, dt)| ((ksn, dt), consumed))
     })?;
-    pos += MSG_LEN_FIELD;
 
-    let msg_hex_chars = msg_byte_len * 2;
-    if payload.len() < pos + msg_hex_chars {
-        return Err(ProxyError::MalformedPayload(format!(
-            "GW: payload shorter than declared message: need {} got {}",
-            pos + msg_hex_chars,
-            payload.len()
-        )));
-    }
-    let message_hex = String::from_utf8_lossy(&payload[pos..pos + msg_hex_chars]).to_string();
-    pos += msg_hex_chars;
+    // Message: MSG_LEN_FIELD-char ASCII byte-count, then that many hex-encoded bytes.
+    let message_hex =
+        String::from_utf8_lossy(r.take_ascii_len_hex(MSG_LEN_FIELD, 16, "message")?).to_string();
 
     let mac_to_verify = if is_verify {
-        let mac_hex_chars = mac_size_bytes * 2;
-        if payload.len() < pos + mac_hex_chars {
-            return Err(ProxyError::MalformedPayload(
-                "GW: MAC field missing for verify".into(),
-            ));
-        }
-        Some(String::from_utf8_lossy(&payload[pos..pos + mac_hex_chars]).to_string())
+        Some(String::from_utf8_lossy(r.take(mac_size_bytes * 2, "MAC")?).to_string())
     } else {
         None
     };
