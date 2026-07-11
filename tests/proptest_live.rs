@@ -5000,6 +5000,151 @@ async fn arqc_verify_kq_amex_differential() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── ARQC accept-path KQ Visa (Scheme '0', Option A + Visa SKD, live differential) ─
+//
+// Mirrors the Amex differential: Visa's session key derives from PAN + PAN seq only
+// (no ATC/UN), so this proves scheme '0' -> SessionKeyDerivation::Visa round-trips
+// through APC. This is the differential that must pass before the KQ Visa un-gate
+// (issue #52) is trusted in production.
+#[tokio::test]
+#[ignore = "live APC; set APC_LIVE=1 to run"]
+async fn arqc_verify_kq_visa_differential() -> anyhow::Result<()> {
+    if !live_enabled() {
+        eprintln!("APC_LIVE not set; skipping live harness");
+        return Ok(());
+    }
+    eprintln!(
+        "arqc_verify_kq_visa_differential: grounding crypto=apc \
+         wire=diff-xprov(APC generate_auth_request_cryptogram Visa -> proxy KQ verify)"
+    );
+
+    use apc_proxy::handlers::thales::common::emv_pad;
+    use aws_sdk_paymentcryptographydata::types::{
+        MajorKeyDerivationMode, SessionKeyDerivation, SessionKeyVisa,
+    };
+
+    let (cpc, data) = aws_clients().await;
+    let specs = [KeySpec {
+        role: "E0",
+        wire_label: "U0000000000000000000000000000QAE0",
+        algorithm: KeyAlgorithm::Tdes2Key,
+        key_usage: KeyUsage::Tr31E0EmvMkeyAppCryptograms,
+        modes: KeyModesOfUse::builder().derive_key(true).build(),
+    }];
+    let keys = TestKeys::create(cpc.clone(), &specs).await?;
+    let e0_arn = keys.arn("E0").to_string();
+    let e0_label = keys.wire_label("E0").to_string();
+    let provisioned_arns = keys.arns();
+    let state = live_state(data.clone(), &keys);
+
+    let registry = Registry::build();
+    let kq = registry.get(b"KQ").expect("KQ handler registered");
+
+    const LABEL: &str = "arqc_verify_kq_visa";
+    let run = cases_to_run();
+    eprintln!(
+        "arqc_verify_kq_visa_differential: seed=0x{:016X} cases={:?}",
+        rng_seed(),
+        run
+    );
+
+    let mut result: anyhow::Result<()> = Ok(());
+
+    for case_idx in run {
+        let mut rng = case_rng(LABEL, case_idx);
+        let pan = gen_pan(&mut rng, 12);
+        let seq = format!("{:02}", edge_biased(&mut rng, 0, 99, &[0, 1, 99]));
+        let atc_val = edge_biased(&mut rng, 0, 0xFFFF, &[1, 0x2A, 0xFFFF]) as u16;
+        let atc = atc_val.to_be_bytes();
+        let un: [u8; 4] = hex_str_to_bytes(&gen_hex_message(&mut rng, 4))
+            .try_into()
+            .expect("4 bytes");
+
+        let txn_len = edge_biased(&mut rng, 1, 24, &[1, 7, 8, 16]);
+        let txn = hex_str_to_bytes(&gen_hex_message(&mut rng, txn_len));
+        let padded_txn_hex = hex_upper(&emv_pad(&txn));
+
+        // Visa session: PAN + PSN only (no ATC/UN in derivation).
+        let session = SessionKeyDerivation::Visa(
+            SessionKeyVisa::builder()
+                .primary_account_number(&pan)
+                .pan_sequence_number(&seq)
+                .build()?,
+        );
+
+        let arqc_hex = data
+            .generate_auth_request_cryptogram()
+            .key_identifier(&e0_arn)
+            .transaction_data(&padded_txn_hex)
+            .major_key_derivation_mode(MajorKeyDerivationMode::EmvOptionA)
+            .session_key_derivation_attributes(session)
+            .send()
+            .await?
+            .auth_request_cryptogram()
+            .to_string();
+        let arqc = hex_str_to_bytes(&arqc_hex);
+
+        // scheme '0' = Visa
+        let wire = encode_kq(
+            b'0',
+            &e0_label,
+            &pan_seq_bcd(&pan, &seq),
+            atc,
+            un,
+            &txn,
+            &arqc,
+        );
+        let proxy = kq.handle(b"KQ", &wire, &state).await;
+        if &proxy.error_code != b"00" {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_kq_visa_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} KQ rejected a VALID Visa ARQC: error_code={} \
+                 (pan={pan} seq={seq} arqc={arqc_hex})",
+                String::from_utf8_lossy(&proxy.error_code),
+            ));
+            break;
+        }
+
+        let mut bad = arqc.clone();
+        bad[0] ^= 0x01;
+        let wire_bad = encode_kq(
+            b'0',
+            &e0_label,
+            &pan_seq_bcd(&pan, &seq),
+            atc,
+            un,
+            &txn,
+            &bad,
+        );
+        let proxy_bad = kq.handle(b"KQ", &wire_bad, &state).await;
+        if &proxy_bad.error_code != b"01" {
+            eprintln!(
+                "{}",
+                replay_hint("arqc_verify_kq_visa_differential", LABEL, case_idx)
+            );
+            result = Err(anyhow::anyhow!(
+                "case={case_idx} KQ accepted a CORRUPTED Visa ARQC: error_code={} (expected 01)",
+                String::from_utf8_lossy(&proxy_bad.error_code),
+            ));
+            break;
+        }
+
+        eprintln!(
+            "case={case_idx:02} OK (Visa) pan={pan} seq={seq} txn_len={txn_len} arqc={arqc_hex}"
+        );
+    }
+
+    let teardown_result = keys.teardown().await;
+    let survivor_result = assert_no_surviving(&cpc, &provisioned_arns).await;
+    result?;
+    teardown_result?;
+    survivor_result?;
+    Ok(())
+}
+
 // ── ARQC accept-path KW (Option A: EMV2000 + EMV Common, live differential) ───
 //
 // KW's Scheme ID selects major mode + session method. This sweeps the two Option-A
