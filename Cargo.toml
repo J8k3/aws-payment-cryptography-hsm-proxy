@@ -15,9 +15,13 @@ name = "apc-proxy"
 path = "src/main.rs"
 
 [features]
-default = ["ring"]
+default = ["ring", "thales"]
 ring = ["rustls/ring", "tokio-rustls/ring"]
 aws-lc-rs = ["rustls/aws-lc-rs", "tokio-rustls/aws-lc-rs"]
+# Built-in Thales payShield vendor support (protocol + handlers). On by default;
+# build with --no-default-features to compile the framework without payShield —
+# e.g. a single-vendor deployment that only needs a bolt-on vendor.
+thales = []
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

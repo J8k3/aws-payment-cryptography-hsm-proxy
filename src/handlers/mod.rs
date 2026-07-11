@@ -1,6 +1,6 @@
-pub mod futurex;
 pub mod grounding;
 pub mod noop;
+#[cfg(feature = "thales")]
 pub mod thales;
 
 use async_trait::async_trait;
@@ -75,75 +75,52 @@ pub struct Registry {
 }
 
 impl Registry {
+    /// The default registry: the built-in vendor module(s) plus the
+    /// vendor-agnostic stubs. With the `thales` feature (on by default) this is
+    /// Thales payShield + the not-available stub; without it, only the stub.
+    ///
+    /// Used by the grounding report and tests. A running proxy builds its registry
+    /// from the selected vendor via [`Registry::for_module`].
     pub fn build() -> Self {
-        let mut map: HashMap<Vec<u8>, Arc<dyn Handler>> = HashMap::new();
-
-        // `h: Arc<dyn Handler>` by value is intentional — Rust coerces Arc<ConcreteType> to
-        // Arc<dyn Handler> at the call site, which doesn't work through a `&Arc<dyn Handler>` ref.
-        #[allow(clippy::needless_pass_by_value)]
-        fn register(map: &mut HashMap<Vec<u8>, Arc<dyn Handler>>, h: Arc<dyn Handler>) {
-            for code in h.command_codes() {
-                map.insert(code.as_bytes().to_vec(), Arc::clone(&h));
-            }
+        #[cfg(feature = "thales")]
+        {
+            Self::for_module(&thales::ThalesModule)
         }
+        #[cfg(not(feature = "thales"))]
+        {
+            let mut r = Self::empty();
+            r.register(Arc::new(noop::NotAvailableHandler));
+            r
+        }
+    }
 
-        // Thales payShield handlers
-        register(&mut map, Arc::new(thales::pin::PinHandler));
-        register(&mut map, Arc::new(thales::pin_change::PinChangeHandler));
-        register(&mut map, Arc::new(thales::diebold_pin::DieboldPinHandler));
-        register(&mut map, Arc::new(thales::random_pin::RandomPinHandler));
-        register(
-            &mut map,
-            Arc::new(thales::dukpt_pin_verify::DukptPinVerifyHandler),
-        );
-        register(
-            &mut map,
-            Arc::new(thales::dukpt_pin_verify_aes::DukptPinVerifyAesHandler),
-        );
-        register(
-            &mut map,
-            Arc::new(thales::pin_verify_non_dukpt::PinVerifyNonDukptHandler),
-        );
-        register(
-            &mut map,
-            Arc::new(thales::encrypt_decrypt::EncryptDecryptHandler),
-        );
-        register(
-            &mut map,
-            Arc::new(thales::international_encrypt::InternationalEncryptHandler),
-        );
-        register(&mut map, Arc::new(thales::dukpt_mac::DukptMacHandler));
-        register(
-            &mut map,
-            Arc::new(thales::issuer_script_mac::IssuerScriptMacHandler),
-        );
-        register(&mut map, Arc::new(thales::cap_arqc::CapArqcHandler));
-        register(&mut map, Arc::new(thales::emv_decrypt::EmvDecryptHandler));
-        register(&mut map, Arc::new(thales::kq_arqc::KqArqcHandler));
-        register(&mut map, Arc::new(thales::kw_arqc::KwArqcHandler));
-        register(
-            &mut map,
-            Arc::new(thales::unionpay_arqc::UnionPayArqcHandler),
-        );
-        register(&mut map, Arc::new(thales::hmac::HmacHandler));
-        register(&mut map, Arc::new(thales::mac::MacHandler));
-        register(
-            &mut map,
-            Arc::new(thales::mac_translate::MacTranslateHandler),
-        );
-        register(&mut map, Arc::new(thales::legacy_mac::LegacyMacHandler));
-        register(&mut map, Arc::new(thales::cvv::CvvHandler));
-        register(&mut map, Arc::new(thales::dynamic_cvv::DynamicCvvHandler));
-        register(&mut map, Arc::new(thales::heartbeat::HeartbeatHandler));
+    fn empty() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
+    }
 
-        // Futurex Excrypt handlers
-        register(&mut map, Arc::new(futurex::echo::EchoHandler));
-        register(&mut map, Arc::new(futurex::tpin::TpinHandler));
+    /// Assemble a registry from one vendor module's handlers plus the core's
+    /// vendor-agnostic handlers (the not-available stub). This is how a running
+    /// proxy registers exactly the vendor it was configured for.
+    pub fn for_module(module: &dyn crate::vendor::VendorModule) -> Self {
+        let mut r = Self::empty();
+        for h in module.handlers() {
+            r.register(h);
+        }
+        r.register(Arc::new(noop::NotAvailableHandler));
+        r
+    }
 
-        // Vendor-agnostic stubs
-        register(&mut map, Arc::new(noop::NotAvailableHandler));
-
-        Self { map }
+    /// Register a handler under each of its command codes, overwriting any prior
+    /// entry for those codes. `h` is taken by value so `Arc<ConcreteType>` coerces
+    /// to `Arc<dyn Handler>` at the call site (which does not work through a
+    /// `&Arc<dyn Handler>`).
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn register(&mut self, h: Arc<dyn Handler>) {
+        for code in h.command_codes() {
+            self.map.insert(code.as_bytes().to_vec(), Arc::clone(&h));
+        }
     }
 
     pub fn get(&self, command_code: &[u8]) -> Option<Arc<dyn Handler>> {

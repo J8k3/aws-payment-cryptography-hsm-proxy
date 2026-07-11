@@ -24,7 +24,9 @@ use anyhow::Result;
 use std::collections::BTreeMap;
 
 use crate::config::ProxyConfig;
+#[cfg(feature = "thales")]
 use crate::hsm_client::HsmClient;
+#[cfg(feature = "thales")]
 use crate::hsm_probe::{self, ProbeOutcome};
 use crate::key_map::KeyMap;
 
@@ -97,6 +99,7 @@ pub async fn run(cfg: &ProxyConfig) -> Result<bool> {
     // and without this check the first live transaction is what finds out.
     // `hsm` goes to None after the first fatal probe outcome, so a dead HSM
     // produces one warning instead of one per mapping.
+    #[cfg(feature = "thales")]
     let mut hsm = hsm_probe_target(cfg, &mut report);
     let mut per_arn_checked: BTreeMap<String, KeyCheck> = BTreeMap::new();
     for (label, arn_or_alias) in &cfg.key_mappings {
@@ -116,51 +119,58 @@ pub async fn run(cfg: &ProxyConfig) -> Result<bool> {
                         short(arn_or_alias)
                     )
                 };
-                let outcome = match &hsm {
-                    Some(client) => Some(hsm_probe::thales_kcv(client, label).await),
-                    None => None,
-                };
-                match outcome {
-                    None => report.pass(line("")),
-                    Some(ProbeOutcome::Kcv(h)) if hsm_probe::kcv_matches(&kcv, &h) => {
-                        report.pass(line(&format!(", HSM={h} ✓")));
-                    }
-                    Some(ProbeOutcome::Kcv(h)) => {
-                        report.fail(format!(
-                            "{label:<36} → {} APC KCV={kcv}, HSM KCV={h} — KEY MISMATCH",
-                            short(arn_or_alias)
-                        ));
-                    }
-                    Some(ProbeOutcome::UnsupportedForm) => {
-                        report.warn(line(
-                            ", HSM: not probeable — mapping key is not an LMK-encrypted wire form",
-                        ));
-                    }
-                    Some(ProbeOutcome::KeyTypeUnknown) => {
-                        report.warn(line(
-                            ", HSM: BU rejected all blind-probeable key types (ZPK/TMK-TPK-PVK/TAK/ZMK)",
-                        ));
-                    }
-                    Some(ProbeOutcome::HsmError(e)) => {
-                        report.warn(line(&format!(", HSM probe error: {e}")));
-                    }
-                    Some(ProbeOutcome::CommandDisabled) => {
-                        hsm = None;
-                        report.warn(
-                            "HSM refused BU (error 68 — command disabled by security settings) \
-                             — skipping HSM-side KCV checks"
-                                .to_string(),
-                        );
-                        report.pass(line(""));
-                    }
-                    Some(ProbeOutcome::Unreachable(e)) => {
-                        hsm = None;
-                        report.warn(format!(
-                            "HSM unreachable — skipping HSM-side KCV checks: {e}"
-                        ));
-                        report.pass(line(""));
+                // HSM-side KCV cross-check (Thales `BU` probe) — only with the
+                // `thales` vendor. Without it, verify validates the APC side only.
+                #[cfg(feature = "thales")]
+                {
+                    let outcome = match &hsm {
+                        Some(client) => Some(hsm_probe::thales_kcv(client, label).await),
+                        None => None,
+                    };
+                    match outcome {
+                        None => report.pass(line("")),
+                        Some(ProbeOutcome::Kcv(h)) if hsm_probe::kcv_matches(&kcv, &h) => {
+                            report.pass(line(&format!(", HSM={h} ✓")));
+                        }
+                        Some(ProbeOutcome::Kcv(h)) => {
+                            report.fail(format!(
+                                "{label:<36} → {} APC KCV={kcv}, HSM KCV={h} — KEY MISMATCH",
+                                short(arn_or_alias)
+                            ));
+                        }
+                        Some(ProbeOutcome::UnsupportedForm) => {
+                            report.warn(line(
+                                ", HSM: not probeable — mapping key is not an LMK-encrypted wire form",
+                            ));
+                        }
+                        Some(ProbeOutcome::KeyTypeUnknown) => {
+                            report.warn(line(
+                                ", HSM: BU rejected all blind-probeable key types (ZPK/TMK-TPK-PVK/TAK/ZMK)",
+                            ));
+                        }
+                        Some(ProbeOutcome::HsmError(e)) => {
+                            report.warn(line(&format!(", HSM probe error: {e}")));
+                        }
+                        Some(ProbeOutcome::CommandDisabled) => {
+                            hsm = None;
+                            report.warn(
+                                "HSM refused BU (error 68 — command disabled by security settings) \
+                                 — skipping HSM-side KCV checks"
+                                    .to_string(),
+                            );
+                            report.pass(line(""));
+                        }
+                        Some(ProbeOutcome::Unreachable(e)) => {
+                            hsm = None;
+                            report.warn(format!(
+                                "HSM unreachable — skipping HSM-side KCV checks: {e}"
+                            ));
+                            report.pass(line(""));
+                        }
                     }
                 }
+                #[cfg(not(feature = "thales"))]
+                report.pass(line(""));
             }
             KeyCheck::NotFound => {
                 report.fail(format!(
@@ -279,28 +289,19 @@ async fn check_one_key(client: &aws_sdk_paymentcryptography::Client, identifier:
 /// unrecognized vendor, or unusable TLS config. Also validates `vendor` itself
 /// — server::run refuses to start on an unknown vendor, and verify must not
 /// report a config as ready when the proxy would not boot it.
+#[cfg(feature = "thales")]
 fn hsm_probe_target(cfg: &ProxyConfig, report: &mut Report) -> Option<HsmClient> {
-    let vendor_known = match cfg.vendor.as_str() {
-        "thales_payshield" | "futurex_excrypt" => true,
-        other => {
-            report.fail(format!(
-                "vendor {other:?} is not recognized (expected \"thales_payshield\" or \
-                 \"futurex_excrypt\") — the proxy will refuse to start"
-            ));
-            false
-        }
-    };
     let discover = cfg.discover.as_ref()?;
-    if !vendor_known {
-        return None;
-    }
-    if cfg.vendor == "futurex_excrypt" {
-        report.warn(
-            "HSM-side KCV cross-check is gated for Futurex: the GPKR field layout \
-             is not verified against any available Excrypt reference — see the \
-             hsm_probe module docs and #13"
-                .to_string(),
-        );
+    // The HSM-side KCV cross-check is implemented only for the Thales probe. For
+    // any other vendor (e.g. a bolt-on), skip probing — `key_mappings` are still
+    // validated, and `server::run` is the authority on whether the configured
+    // vendor is actually bootable.
+    if cfg.vendor != "thales_payshield" {
+        report.warn(format!(
+            "HSM-side KCV cross-check skipped for vendor {:?} — only \"thales_payshield\" \
+             is probed; key_mappings validation still applies",
+            cfg.vendor
+        ));
         return None;
     }
     match HsmClient::from_discover(discover) {

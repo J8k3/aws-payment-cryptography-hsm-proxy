@@ -97,39 +97,6 @@ fn send_recv(frame: &[u8]) -> Vec<u8> {
     resp[..n].to_vec()
 }
 
-// ── Futurex Excrypt ───────────────────────────────────────────────────────────
-
-/// ECHO is the simplest possible probe: send, get response, confirm framing.
-#[test]
-#[ignore = "requires live proxy and Futurex HSM or simulator (set HSM_HOST, HSM_PORT, PROXY_HOST, PROXY_PORT)"]
-fn futurex_echo_returns_success() {
-    let frame = b"[AOECHO;]";
-    let resp = send_recv(frame);
-    let s = String::from_utf8_lossy(&resp);
-    assert!(s.starts_with("[AOECHO;"), "unexpected response prefix: {s}");
-    assert!(s.contains("BBY;"), "expected success status BBY in: {s}");
-}
-
-/// TPIN round-trip: ISO Format 0 PIN block re-encrypted from ZPK_INBOUND to ZPK_OUTBOUND.
-///
-/// Level 2 (known material): PIN block 48B350B131BFCA28 is PIN=1234 encrypted under
-/// ZPK_INBOUND (P0SRC = 0123456789ABCDEF0123456789ABCDEF, KCV D5D44F).
-/// APC decrypts and re-encrypts under ZPK_OUTBOUND (P0DST = FEDCBA9876543210...).
-/// Both keys must be in proxy.yaml key_mappings and the proxy must be in futurex_excrypt mode.
-#[test]
-#[ignore = "requires live proxy in futurex_excrypt mode with ZPK_INBOUND/ZPK_OUTBOUND in proxy.yaml"]
-fn futurex_tpin_translates_pin_block() {
-    let frame = b"[AOTPIN;AW0;AXZPK_INBOUND;BTZPK_OUTBOUND;AL48B350B131BFCA28;AK561237487695;]";
-    let resp = send_recv(frame);
-    let s = String::from_utf8_lossy(&resp);
-    assert!(s.starts_with("[AOTPIN;"), "unexpected response prefix: {s}");
-    assert!(
-        s.contains("AL"),
-        "expected AL parameter (translated PIN block) in: {s}"
-    );
-    assert!(s.contains("BBY;"), "expected success status BBY in: {s}");
-}
-
 // ── Thales payShield wire helpers ─────────────────────────────────────────────
 
 fn make_thales_frame(header: [u8; 2], cmd: &[u8], payload: &[u8]) -> Vec<u8> {

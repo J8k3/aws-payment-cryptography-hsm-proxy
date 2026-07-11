@@ -7,11 +7,11 @@ use tracing::info;
 #[derive(Parser)]
 #[command(
     name = "apc-proxy",
-    about = "Thales payShield 10K and Futurex Excrypt → AWS Payment Cryptography protocol proxy",
+    about = "Thales payShield 10K → AWS Payment Cryptography protocol proxy",
     long_about = "Listens for legacy HSM host commands on a TCP port and translates \
                   them to AWS Payment Cryptography API calls, returning vendor-compatible \
-                  responses. Supports Thales payShield 10K and Futurex Excrypt Enterprise SSP v.2 \
-                  host command protocols."
+                  responses. Supports the Thales payShield 10K host command protocol; \
+                  other vendors are available as separate bolt-ons."
 )]
 struct Cli {
     /// Path to proxy.yaml configuration file

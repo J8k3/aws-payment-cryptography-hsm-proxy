@@ -21,7 +21,8 @@ use crate::config::{DiscoverConfig, ProxyConfig, TlsConfig};
 use crate::handlers::{AppState, Registry};
 use crate::hsm_client::{default_crypto_provider, forward_to_hsm};
 use crate::key_map::KeyMap;
-use crate::protocol::{futurex::FuturexExcrypt, thales::ThalesPayShield, Protocol};
+use crate::protocol::Protocol;
+use crate::vendor::VendorModule;
 
 /// Writes a structured NDJSON discovery log. Each unique command code is written once,
 /// so the file stays small and is immediately usable as context in an AI coding session.
@@ -45,11 +46,10 @@ impl DiscoveryLog {
         })
     }
 
-    fn record_futurex(
-        &self,
-        command_code: &[u8],
-        params: &std::collections::HashMap<[u8; 2], Vec<u8>>,
-    ) {
+    /// Append one NDJSON discovery record. `params` is the vendor's own
+    /// log-safe (redacted) description of the payload, produced by
+    /// [`Protocol::redact_discovery`]. Each command code is logged once.
+    fn record(&self, command_code: &[u8], params: &serde_json::Value) {
         let cmd = String::from_utf8_lossy(command_code).to_string();
         if !self
             .seen
@@ -63,39 +63,11 @@ impl DiscoveryLog {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let param_map = crate::protocol::futurex::params_redacted_map(params);
         let record = serde_json::json!({
             "ts": ts,
             "vendor": self.vendor,
             "cmd": cmd,
-            "params": param_map,
-        });
-        if let Ok(mut w) = self.writer.lock() {
-            let _ = writeln!(w, "{record}");
-            let _ = w.flush();
-        }
-    }
-
-    fn record_thales(&self, command_code: &[u8], payload_len: usize) {
-        let cmd = String::from_utf8_lossy(command_code).to_string();
-        if !self
-            .seen
-            .lock()
-            .expect("mutex poisoned")
-            .insert(cmd.clone())
-        {
-            return;
-        }
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let record = serde_json::json!({
-            "ts": ts,
-            "vendor": self.vendor,
-            "cmd": cmd,
-            "payload_len": payload_len,
-            "note": "Thales fields are positional and command-specific; payload not parsed in discovery mode",
+            "params": params,
         });
         if let Ok(mut w) = self.writer.lock() {
             let _ = writeln!(w, "{record}");
@@ -104,7 +76,22 @@ impl DiscoveryLog {
     }
 }
 
+/// Run the proxy with the built-in vendor module(s): Thales payShield when the
+/// `thales` feature is enabled (the default), otherwise none.
 pub async fn run(cfg: ProxyConfig) -> Result<()> {
+    #[cfg(feature = "thales")]
+    let modules: Vec<Arc<dyn VendorModule>> = vec![Arc::new(crate::handlers::thales::ThalesModule)];
+    #[cfg(not(feature = "thales"))]
+    let modules: Vec<Arc<dyn VendorModule>> = Vec::new();
+    run_with(cfg, modules).await
+}
+
+/// Run the proxy against an explicit set of [`VendorModule`]s. This is the seam a
+/// bolt-on builds on: it depends on this crate, supplies its own vendor module(s)
+/// — alongside or instead of the built-in ones — and calls this. The module whose
+/// [`VendorModule::vendor`] matches `cfg.vendor` is selected; its handlers (plus
+/// the vendor-agnostic stubs) are registered, and its protocol frames the wire.
+pub async fn run_with(cfg: ProxyConfig, modules: Vec<Arc<dyn VendorModule>>) -> Result<()> {
     let mut aws_builder = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(aws_config::Region::new(cfg.aws.region.clone()));
     if let Some(ref profile) = cfg.aws.profile {
@@ -139,13 +126,12 @@ pub async fn run(cfg: ProxyConfig) -> Result<()> {
         data: aws_sdk_paymentcryptographydata::Client::new(&aws_cfg),
     });
 
-    let registry = Arc::new(Registry::build());
-
-    let protocol: Arc<dyn Protocol> = match cfg.vendor.as_str() {
-        "thales_payshield" => Arc::new(ThalesPayShield),
-        "futurex_excrypt" => Arc::new(FuturexExcrypt),
-        other => anyhow::bail!("unknown vendor: {other}"),
-    };
+    let module = modules
+        .into_iter()
+        .find(|m| m.vendor() == cfg.vendor)
+        .ok_or_else(|| anyhow::anyhow!("unknown or unavailable vendor: {}", cfg.vendor))?;
+    let protocol = module.protocol();
+    let registry = Arc::new(Registry::for_module(module.as_ref()));
 
     let tls_acceptor: Option<tokio_rustls::TlsAcceptor> = cfg
         .listen
@@ -443,6 +429,7 @@ where
                         if let Some(ref dcfg) = discover {
                             if dcfg.enabled {
                                 log_discovery_command(
+                                    &*protocol,
                                     &command_code,
                                     &payload,
                                     discovery_log.as_deref(),
@@ -474,30 +461,21 @@ where
     }
 }
 
-/// Log a command seen in discovery mode, redacting parameter values.
-/// Writes to tracing and, if configured, to the structured NDJSON discovery log.
-///
-/// For Futurex: parameter codes and value lengths are logged; every value is
-/// redacted (discovery fires on unmodeled commands, so no value is known safe).
-/// For Thales: only command code and payload length are logged (field layout is positional
-/// and command-specific, so field-level parsing is not attempted).
-fn log_discovery_command(command_code: &[u8], payload: &[u8], log: Option<&DiscoveryLog>) {
-    use crate::protocol::futurex::{parse_params, redact_for_log};
-
+/// Log a command seen in discovery mode. The active vendor's protocol produces
+/// the log-safe (redacted) view of the payload via [`Protocol::redact_discovery`]
+/// — parameter codes and lengths only, never values — which is written to tracing
+/// and, if configured, to the structured NDJSON discovery log.
+fn log_discovery_command(
+    protocol: &dyn Protocol,
+    command_code: &[u8],
+    payload: &[u8],
+    log: Option<&DiscoveryLog>,
+) {
     let cmd = String::from_utf8_lossy(command_code);
-
-    if command_code.len() == 4 {
-        let params = parse_params(payload);
-        let safe = redact_for_log(&params);
-        info!(cmd = %cmd, params = %safe, "DISCOVERY: unhandled Futurex command");
-        if let Some(dl) = log {
-            dl.record_futurex(command_code, &params);
-        }
-    } else {
-        info!(cmd = %cmd, payload_len = payload.len(), "DISCOVERY: unhandled Thales command");
-        if let Some(dl) = log {
-            dl.record_thales(command_code, payload.len());
-        }
+    let params = protocol.redact_discovery(payload);
+    info!(cmd = %cmd, params = %params, "DISCOVERY: unhandled command");
+    if let Some(dl) = log {
+        dl.record(command_code, &params);
     }
 }
 

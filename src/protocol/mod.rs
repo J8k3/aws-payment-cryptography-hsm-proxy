@@ -1,4 +1,4 @@
-pub mod futurex;
+#[cfg(feature = "thales")]
 pub mod thales;
 
 use bytes::Bytes;
@@ -41,4 +41,16 @@ pub trait Protocol: Send + Sync {
     /// Returns true when `data` contains a complete framed response from the real HSM.
     /// Used by the discovery passthrough to know when to stop reading.
     fn is_response_complete(&self, data: &[u8]) -> bool;
+
+    /// Produce a **log-safe** JSON description of an unhandled command's payload
+    /// for the discovery log — parameter codes and byte lengths only, never
+    /// values. The default is length-only (correct for positional/command-scoped
+    /// wires like Thales); a parameter-tagged vendor (e.g. Futurex) overrides it
+    /// to report per-parameter codes and lengths.
+    fn redact_discovery(&self, payload: &[u8]) -> serde_json::Value {
+        serde_json::json!({
+            "payload_len": payload.len(),
+            "note": "fields are positional and command-specific; payload not parsed in discovery mode",
+        })
+    }
 }
