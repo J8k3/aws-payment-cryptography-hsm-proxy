@@ -16,6 +16,8 @@ This guide assumes you already understand why you're doing this — your applica
 - Network reachability from the proxy host to APC (TLS 443 outbound)
 - Source HSM with administrative access — needed to inventory keys and export them for migration. **Test environment only** for an initial rollout; production keys come later
 
+> **Compliance context.** APC is a validated PCI service — a PCI P2PE Component Provider and in scope for PCI PIN and PCI DSS; its attestations are available to AWS customers through [AWS Artifact](https://aws.amazon.com/artifact/). This proxy runs inside your compliance boundary and is not itself validated. Before a production cutover, review the [PCI P2PE / PIN deployer obligations](threat-model.md#pci-p2pe--pin-scope-if-your-deployment-is-in-scope) in the threat model — POI authentication, no-cleartext-return, failure monitoring, and approved key injection are yours to satisfy.
+
 ### IAM policy
 
 The minimum permissions for serve mode:
@@ -106,6 +108,14 @@ Host command `BU` ("Generate a Key Check Value", response `BV`, PUGD0537-004) re
 ### Futurex
 
 Futurex documents `GPKR` ("General Purpose Key settings get, read only") in its command permission lists, and slot enumeration is expected to pair it with `KMAP` — but the wire field layout of both commands is not published anywhere this project can verify against. Until a capture from a real unit or the Excrypt command reference grounds them, build the inventory from Excrypt Manager / your key ceremony records instead. Automating this is [#13](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/issues/13).
+
+### DUKPT key identifiers
+
+When cataloging DUKPT base derivation keys, record how each is identified per
+transaction — you'll need it to select the right BDK at runtime. Per ANSI X9.24-3,
+**AES DUKPT** uses a 32-bit **BDK ID** (with a Derivation ID); **TDEA DUKPT** uses
+a 10-byte **Key Set ID (KSI)**. APC selects the derived working key from the BDK
+plus the transaction's Key Serial Number (KSN).
 
 ### Migration target per key
 
@@ -245,6 +255,7 @@ see the [Threat Model](threat-model.md).
 - [ ] APC aliases used in `key_mappings`, not raw ARNs — survives key rotation.
 - [ ] Discovery log path is on a volume large enough for sustained operation; rotate or feed it to your log pipeline.
 - [ ] Metrics: latency is logged per-command at INFO. Wire it into your observability stack.
+- [ ] Tracing: every log line for one command carries a `req` id (a process-local counter) plus `client_ref` (the client's echoed correlation field — the Thales message header). Filter on `req` to trace a single transaction through the proxy; `client_ref` maps it back to the application's own reference. The `req` id is local to the proxy — never sent to the HSM, APC, or the client.
 - [ ] Rollback path documented and tested. Until the proxy has served production traffic for the observation window, keep the original HSM reachable.
 
 ---

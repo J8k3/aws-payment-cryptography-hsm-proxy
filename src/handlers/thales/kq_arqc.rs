@@ -21,7 +21,7 @@ use crate::key_map::KeyDescriptor;
 ///                         '2'=verify + ARPC Method 2 (CSU)
 ///                         '3'/'4'=skip-verify ARPC (not supported by APC)
 ///   Scheme ID   1N ASCII  selects session-key derivation; all use EMV Option A:
-///                         '0'=Visa VIS (static, no session key — no APC equivalent)
+///                         '0'=Visa (Visa SKD: PAN + PAN seq)
 ///                         '1'=Mastercard M/Chip (Mastercard proprietary SKD + UN)
 ///                         '2'=Amex AEIPS (Amex SKD)
 ///   Key Type    3H ASCII  e.g. '00E' for IMK-AC (consumed)
@@ -87,19 +87,12 @@ fn parse_kq(payload: &[u8]) -> Result<KqFields, ProxyError> {
     // Scheme ID (1N ASCII) — all KQ schemes use EMV Option A major derivation
     // (PUGD0537-004 Rev A p.468); the Scheme ID selects the session-key method.
     let session = match r.byte("scheme ID")? {
+        b'0' => EmvSession::Visa,       // Option A + Visa SKD (PAN + PAN seq)
         b'1' => EmvSession::Mastercard, // Option A + Mastercard proprietary SKD (M/Chip)
         b'2' => EmvSession::Amex,       // Option A + Amex AEIPS
-        b'0' => {
-            // Visa VIS is static (ICC master key used directly, no session key).
-            // APC always derives a session key, so this has no faithful equivalent
-            // (verified against live APC: every APC session mode rejects it).
-            return Err(ProxyError::Unsupported(
-                "KQ scheme '0' (Visa VIS, static session key) has no APC equivalent".into(),
-            ));
-        }
         other => {
             return Err(ProxyError::MalformedPayload(format!(
-                "KQ: invalid scheme ID '{}' (1=MC M/Chip, 2=Amex)",
+                "KQ: invalid scheme ID '{}' (0=Visa, 1=MC M/Chip, 2=Amex)",
                 other as char
             )))
         }
@@ -164,9 +157,9 @@ impl Handler for KqArqcHandler {
         use crate::handlers::grounding::{CryptoGrounding, Evidence, Proof, WireGrounding};
         &[Evidence {
             decision: "KQ verifies an ARQC and optionally generates an ARPC → APC \
-                       verify_auth_request_cryptogram. Scheme ID selects the session-key method \
-                       (Mastercard M/Chip, Amex AEIPS) on EMV Option A; Visa VIS (static, Scheme \
-                       '0') and skip-verify modes 3/4 are rejected as having no APC equivalent. \
+                       verify_auth_request_cryptogram. Scheme ID selects the session-key method on \
+                       EMV Option A: Visa (Scheme '0'), Mastercard M/Chip (Scheme '1'), Amex AEIPS \
+                       (Scheme '2'). Skip-verify modes 3/4 are rejected as having no APC equivalent. \
                        Mode 1/2 map to ARPC Method 1 (ARC) / Method 2 (CSU + proprietary data).",
             because: "PUGD0537-004 Rev A p.468 (KQ). Verified live for the Mastercard scheme ('1', \
                       Option A + Mastercard proprietary SKD): APC mints a valid ARQC via \
@@ -176,6 +169,13 @@ impl Handler for KqArqcHandler {
                       Unpredictable Number / txn length — the differential confirms the UN is \
                       forwarded to APC's Mastercard session-key derivation. The Amex scheme ('2', \
                       Option A + Amex SKD) is verified the same way in arqc_verify_kq_amex_differential. \
+                      The Visa scheme ('0', Option A + Visa SKD: PAN + PAN seq, no ATC/UN in \
+                      derivation) is verified the same way in arqc_verify_kq_visa_differential: APC \
+                      mints a valid Visa ARQC under SessionKeyDerivation::Visa, the proxy ACCEPTS \
+                      (00), and a one-bit-corrupted ARQC is REJECTED (01) across 32 randomized cases. \
+                      (This corrected an earlier over-conservative gate — Visa VIS is not static-only; \
+                      APC exposes SessionKeyDerivation::Visa, AWS's payShield migration maps KQ Scheme \
+                      0 Visa -> it, and this repo's KU handler already uses it.) \
                       ARPC generation is also verified live: the proxy's ARPC equals a direct APC \
                       verify with the same response attributes — Method 1 (ARC) in \
                       arqc_verify_kq_arpc_method1_differential and Method 2 (CSU + proprietary auth \
@@ -359,13 +359,11 @@ mod tests {
     }
 
     #[test]
-    fn kq_rejects_scheme_0_static() {
-        // Visa VIS static has no APC equivalent → Unsupported (payShield 68).
+    fn kq_scheme_0_maps_to_visa() {
+        // Scheme '0' = Visa (APC SessionKeyVisa: PAN + PAN seq). Parses, not rejected.
         let payload = kq_prefix(b'0', b'0', &single_key(), pan_bcd(), &[0xDE, 0xAD]);
-        assert!(matches!(
-            parse_kq(&payload),
-            Err(ProxyError::Unsupported(_))
-        ));
+        let f = parse_kq(&payload).unwrap();
+        assert_eq!(f.session, EmvSession::Visa);
     }
 
     #[test]

@@ -15,6 +15,17 @@ There are two resolution paths:
 
 The choice of path depends on the wire form, not on operator preference.
 
+### APC as the key store
+
+APC exposes each key as an ARN, never the wrapped bytes, so the proxy *maps* a
+wire-form reference to an ARN and lets APC do the unwrap — it never needs (or has)
+the source HSM's master key. The migration effectively **swaps the customer's key
+store for APC's key store.** It is still a store the customer owns and enumerates
+— via the control-plane `list_keys`, which is exactly what the KCV path above does
+at startup — just addressed by ARN rather than an HSM-resident slot. So a wire form that used to point at a key in the HSM
+table (a Futurex slot, say — [#13](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/issues/13))
+now has to resolve to the matching APC ARN.
+
 ---
 
 ## Thales payShield 10K

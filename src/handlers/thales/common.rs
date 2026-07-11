@@ -9,7 +9,7 @@ use crate::key_map::{KeyBlockMeta, KeyDescriptor};
 use aws_sdk_paymentcryptographydata::types::{
     CryptogramAuthResponse, CryptogramVerificationArpcMethod1, CryptogramVerificationArpcMethod2,
     MajorKeyDerivationMode, SessionKeyAmex, SessionKeyDerivation, SessionKeyEmv2000,
-    SessionKeyEmvCommon, SessionKeyMastercard,
+    SessionKeyEmvCommon, SessionKeyMastercard, SessionKeyVisa,
 };
 
 /// Apply EMV (ISO 9797-1 method 2) padding to ARQC MAC input: append a single
@@ -71,6 +71,8 @@ pub enum EmvSession {
     Mastercard,
     /// American Express AEIPS (PAN + PAN seq).
     Amex,
+    /// Visa (PAN + PAN seq) — APC's `SessionKeyVisa`, no ATC/UN in derivation.
+    Visa,
 }
 
 /// Map an AWS SDK builder error to a `ProxyError`. Shared by the handlers that
@@ -86,7 +88,8 @@ pub(crate) fn build_err(e: aws_sdk_paymentcryptographydata::error::BuildError) -
 /// Build the APC `SessionKeyDerivation` for `method`.
 ///
 /// `un` (unpredictable number) is consumed only by the Mastercard method; `atc`
-/// is consumed by every method except Amex. Other arguments unused by a given
+/// is consumed by EMV Common / EMV2000 / Mastercard, but not by Amex or Visa
+/// (both derive from PAN + PAN seq only). Other arguments unused by a given
 /// method are ignored.
 pub fn build_session_key(
     method: EmvSession,
@@ -123,6 +126,13 @@ pub fn build_session_key(
         ),
         EmvSession::Amex => SessionKeyDerivation::Amex(
             SessionKeyAmex::builder()
+                .primary_account_number(pan)
+                .pan_sequence_number(pan_seq)
+                .build()
+                .map_err(build_err)?,
+        ),
+        EmvSession::Visa => SessionKeyDerivation::Visa(
+            SessionKeyVisa::builder()
                 .primary_account_number(pan)
                 .pan_sequence_number(pan_seq)
                 .build()

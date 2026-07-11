@@ -2,12 +2,20 @@ use anyhow::Result;
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio::time::{timeout, Duration};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
+
+/// Process-global monotonic request counter. Each inbound command is assigned
+/// the next value, which is attached (as `req`) to every log line emitted while
+/// serving that command. Purely local — the id is never placed on the wire to
+/// the HSM, APC, or the client; it exists only to correlate the proxy's own log
+/// records for one transaction. See `docs/` connection-pooling notes (Layer 1).
+static REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
 
 use crate::config::{DiscoverConfig, ProxyConfig, TlsConfig};
 use crate::handlers::{AppState, Registry};
@@ -399,51 +407,66 @@ where
             let command_code = cmd.command_code.clone();
             let payload = cmd.payload.clone();
 
-            debug!(
+            // Per-command request id + span. Every log line emitted while serving
+            // this command inherits `req`, so one transaction's records can be
+            // correlated in the logs. `client_ref` is the client's own
+            // correlation field echoed for cross-mapping: the Thales message
+            // header (its documented purpose). Futurex carries no per-request
+            // field in the current parse, so it logs as `0000` there.
+            let req_id = REQUEST_SEQ.fetch_add(1, Ordering::Relaxed);
+            let span = tracing::info_span!(
+                "req",
+                id = req_id,
                 cmd = %String::from_utf8_lossy(&command_code),
-                len = payload.len(),
-                "command received"
+                client_ref = %format!("{:02X}{:02X}", header[0], header[1]),
             );
 
-            let t0 = std::time::Instant::now();
-            let response_bytes = match registry.get(&command_code) {
-                Some(handler) => {
-                    let result = handler.handle(&command_code, &payload, &state).await;
-                    info!(
-                        cmd = %String::from_utf8_lossy(&command_code),
-                        error_code = %String::from_utf8_lossy(&result.error_code),
-                        latency_us = t0.elapsed().as_micros(),
-                        "command handled"
-                    );
-                    let rc = protocol.response_code(&command_code);
-                    protocol.frame_response(header, &rc, &result.error_code, &result.payload)
-                }
-                None => {
-                    // No handler registered for this command.
-                    if let Some(ref dcfg) = discover {
-                        if dcfg.enabled {
-                            log_discovery_command(
-                                &command_code,
-                                &payload,
-                                discovery_log.as_deref(),
-                            );
-                            match forward_to_hsm(&buf[..frame_len], dcfg, &*protocol).await {
-                                Ok(resp) => resp,
-                                Err(e) => {
-                                    warn!(err = %e, "discovery forward failed, returning error");
-                                    protocol.frame_error(header, &command_code, b"41")
+            // Handle inside the span. Borrows `buf`/`state`/… by ref and is
+            // awaited immediately (never spawned), so this holds no borrow past
+            // the await and the `buf.drain` below is unaffected.
+            let response_bytes = async {
+                debug!(len = payload.len(), "command received");
+                let t0 = std::time::Instant::now();
+                match registry.get(&command_code) {
+                    Some(handler) => {
+                        let result = handler.handle(&command_code, &payload, &state).await;
+                        info!(
+                            error_code = %String::from_utf8_lossy(&result.error_code),
+                            latency_us = t0.elapsed().as_micros(),
+                            "command handled"
+                        );
+                        let rc = protocol.response_code(&command_code);
+                        protocol.frame_response(header, &rc, &result.error_code, &result.payload)
+                    }
+                    None => {
+                        // No handler registered for this command.
+                        if let Some(ref dcfg) = discover {
+                            if dcfg.enabled {
+                                log_discovery_command(
+                                    &command_code,
+                                    &payload,
+                                    discovery_log.as_deref(),
+                                );
+                                match forward_to_hsm(&buf[..frame_len], dcfg, &*protocol).await {
+                                    Ok(resp) => resp,
+                                    Err(e) => {
+                                        warn!(err = %e, "discovery forward failed, returning error");
+                                        protocol.frame_error(header, &command_code, b"41")
+                                    }
                                 }
+                            } else {
+                                warn!("no handler registered");
+                                protocol.frame_error(header, &command_code, b"68")
                             }
                         } else {
-                            warn!(cmd = %String::from_utf8_lossy(&command_code), "no handler registered");
+                            warn!("no handler registered");
                             protocol.frame_error(header, &command_code, b"68")
                         }
-                    } else {
-                        warn!(cmd = %String::from_utf8_lossy(&command_code), "no handler registered");
-                        protocol.frame_error(header, &command_code, b"68")
                     }
                 }
-            };
+            }
+            .instrument(span)
+            .await;
 
             socket.write_all(&response_bytes).await?;
             buf.drain(..frame_len);
@@ -475,5 +498,118 @@ fn log_discovery_command(command_code: &[u8], payload: &[u8], log: Option<&Disco
         if let Some(dl) = log {
             dl.record_thales(command_code, payload.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handlers::AppState;
+    use crate::key_map::KeyMap;
+    use crate::protocol::thales::ThalesPayShield;
+    use std::collections::HashMap;
+
+    /// A `MakeWriter` that appends all formatted log output to a shared buffer,
+    /// so a test can assert on what was logged.
+    #[derive(Clone)]
+    struct BufWriter(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Minimal Thales frame: [len][2B header][2B command], empty payload.
+    fn frame(header: [u8; 2], cmd: [u8; 2]) -> Vec<u8> {
+        let body_len = (2 + cmd.len()) as u16;
+        let mut out = body_len.to_be_bytes().to_vec();
+        out.extend_from_slice(&header);
+        out.extend_from_slice(&cmd);
+        out
+    }
+
+    /// State whose APC client is constructed but never called — the two gated
+    /// (`RA`) commands below return 68 without any data-plane request.
+    fn gated_only_state() -> Arc<AppState> {
+        let sdk = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new("us-east-1"))
+            .build();
+        Arc::new(AppState {
+            key_map: KeyMap::new(HashMap::new()),
+            data: aws_sdk_paymentcryptographydata::Client::new(&sdk),
+        })
+    }
+
+    #[tokio::test]
+    async fn each_command_gets_a_distinct_logged_request_id() {
+        let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufWriter(Arc::clone(&captured)))
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .finish();
+        // Current-thread test runtime → the thread-local default covers the
+        // whole async handling (held across awaits for the test's duration).
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let state = gated_only_state();
+        let registry = Arc::new(Registry::build());
+        let protocol: Arc<dyn Protocol> = Arc::new(ThalesPayShield);
+
+        // Two gated commands with distinct client headers (AA=0x4141, BB=0x4242).
+        let (mut client, server) = tokio::io::duplex(4096);
+        client
+            .write_all(&frame([0x41, 0x41], *b"RA"))
+            .await
+            .unwrap();
+        client
+            .write_all(&frame([0x42, 0x42], *b"RA"))
+            .await
+            .unwrap();
+        client.shutdown().await.unwrap(); // EOF so the handler loop exits
+
+        handle_connection(server, state, registry, protocol, None, None, None)
+            .await
+            .unwrap();
+
+        let text = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+
+        // Both client-correlation values (the echoed Thales headers) were logged.
+        assert!(
+            text.contains("client_ref=4141"),
+            "missing client_ref 4141:\n{text}"
+        );
+        assert!(
+            text.contains("client_ref=4242"),
+            "missing client_ref 4242:\n{text}"
+        );
+
+        // Each command was served under a `req` span with an `id`, and the two
+        // ids are distinct (process-global monotonic counter).
+        let ids: std::collections::BTreeSet<&str> = text
+            .match_indices("id=")
+            .map(|(i, _)| {
+                let rest = &text[i + 3..];
+                let end = rest
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(rest.len());
+                &rest[..end]
+            })
+            .collect();
+        assert!(
+            ids.len() >= 2,
+            "expected >=2 distinct request ids, got {ids:?}\n{text}"
+        );
     }
 }
