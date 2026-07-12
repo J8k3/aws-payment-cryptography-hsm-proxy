@@ -174,6 +174,15 @@ When working in this repo and new HSM command behavior surfaces — protocol edg
 
 Do not defer knowledge updates. The proxy and the MCP server are a knowledge loop.
 
+## Reference Source Documents
+
+The specification and reference documents this repo's protocol parsers are derived from — Thales payShield manuals, EMV Books, ISO/ITU/NIST specs, Visa/Mastercard rules, the AWS APC API reference, PCI-for-APC — live in a shared, private local reference store at `../payment-reference-sources` (also used by the MCP server; see its README). Consult it when verifying a protocol/mapping claim against its source.
+
+- Cite by identifier (e.g. "PUGD0537-004 p.488"), matching an entry in the store; do not copy the licensed documents into this repo.
+- The store is **private / local-only** — its documents are licensed and must not be redistributed or pushed to a public remote.
+
+Do NOT hardcode this pointer into generated artifacts (e.g. `docs/grounding-report.md`, which `src/handlers/grounding.rs` regenerates) — this AGENTS.md is the single place that records where the store is.
+
 ## Code Quality
 
 After every implementation or edit, run clippy and fix all output before reporting the work as done:
