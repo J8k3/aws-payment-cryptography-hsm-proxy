@@ -35,13 +35,6 @@
 //!   parity, so a false positive would require a parity-valid wrong decrypt.
 //!   Keys of other types (e.g. BDK) come back [`ProbeOutcome::KeyTypeUnknown`]
 //!   and are reported as warnings, not silently passed.
-//! - Futurex `GPKR` is intentionally NOT implemented. The command exists
-//!   (docs.futurex.com lists it as "General Purpose Key settings get (read
-//!   only)") but no source available to this repo documents its field layout —
-//!   the MCP registry built from the Futurex General Payment HSM Integration
-//!   Guide (2024) does not contain it. Gated rather than guess a wire format;
-//!   lifting the gate needs the Excrypt command reference or a capture from a
-//!   real unit.
 //!
 //! Proof: mock-HSM round-trip tests in `tests/hsm_probe.rs`. There is no live
 //! payShield in the test environment, so unlike the handler differentials this

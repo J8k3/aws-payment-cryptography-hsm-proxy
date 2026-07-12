@@ -5,7 +5,7 @@
 
 Evidence for *why* each handler behaves as it does and *how* it was verified. Generated from `Handler::grounding()` — do not edit by hand. Grounding labels: wire `vec-thru` > `diff-xprov` > `cited` > `none`; crypto `vec` > `2impl` > `apc` > `none`.
 
-**Coverage:** 26 of 26 handlers carry grounding; 0 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
+**Coverage:** 24 of 24 handlers carry grounding; 0 not yet grounded (tracked at the end). This reflects current state — it does not claim the rest are verified.
 
 ## `AQ`, `BA`, `BC`, `BE`, `BK`, `CG`, `DE`, `DG`, `EE`, `EG`, `FW`, `JC`, `JE`, `JG`, `LE`, `LG`, `LO`, `NG`, `EM`, `EU`, `EW`, `EY`, `GM`, `A0`, `A4`, `A6`, `A8`, `AA`, `AC`, `AE`, `AG`, `AK`, `AM`, `AS`, `AU`, `AW`, `BI`, `B0`, `B8`, `BG`, `BU`, `BW`, `BS`, `BY`, `CS`, `DW`, `DY`, `FA`, `FC`, `FE`, `FG`, `FK`, `GC`, `GE`, `GG`, `GK`, `GY`, `HA`, `HC`, `HY`, `IA`, `J6`, `J8`, `JK`, `K8`, `KA`, `KC`, `KG`, `KI`, `L0`, `LU`, `LW`, `MG`, `MI`, `RI`, `RK`, `RM`, `RO`, `RQ`, `RS`, `RU`, `RW`, `HI`, `HK`, `HM`, `HO`, `HQ`, `HS`, `HU`, `HW`, `N0`, `NC`, `NI`, `NO`, `Q0`, `Q6`, `Q8`, `QH`, `RA`, `SE`, `TG`, `TY`, `UI`, `VW`, `VY`, `WC`, `WQ`, `WW`, `WY`
 
@@ -96,12 +96,6 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 - **DA/EA verify an IBM 3624 PIN and DC/EC a Visa PVV, all via APC verify_pin_data with no DUKPT. DA/DC carry a TPK and EA/EC a ZPK; both are P0 encryption keys in APC, so each pair shares one code path. The IBM 12H offset is F-padded on the wire and trimmed to APC's ^[0-9]+$ before the call (same handling as GO/CK).**
   - wire `diff-xprov` · crypto `apc` · live test `pin_verify_non_dukpt_differential`
   - PUGD0537-004 Rev A p.263 (DA) / p.273 (DC) / p.266 (EA) / p.275 (EC). Verified live: the proxy's verify verdict matches a direct APC verify_pin_data verdict across randomized PAN, both methods, and all four command codes. A valid PIN is minted via generate_pin_data (IBM3624 natural PIN offset 0, or Visa PVV read back from PinData::VerificationValue); a wrong field offset would feed APC a different block, which it rejects, so proxy and oracle verdicts diverge.
-
-## `ECHO`
-
-- **Futurex Excrypt ECHO is a connectivity heartbeat: returns an empty success response, makes no APC call.**
-  - wire `cited` · crypto `none` · manual: Futurex HSM Reference Manual — ECHO returns empty success
-  - Futurex HSM Reference Manual — ECHO confirms the HSM connection is alive. No cryptography or key material is involved, so the proxy answers locally. Nothing to differentially verify against APC.
 
 ## `GO`, `GQ`, `GS`, `GU`
 
@@ -216,10 +210,4 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 - **QY (Generate a Dynamic CVV) and PM (Verify a Dynamic CVV/CVC) return Unsupported (68).**
   - wire `none` · crypto `none` · gated (68): EMV card-unique-key dCVV; no validated APC mapping yet
   - PUGD0537-004 Rev A p.306 (QY) / p.308 (PM). These are EMV multi-scheme dynamic-CVV operations — not the static-CVK CW/CY algorithm. The wire begins with a Scheme ID and derives a card-unique key from an EMV issuer master key (E-type) via an explicit Option A/B method. Only Visa dCVV (Scheme '0') plausibly maps to APC's DynamicCardVerificationValue, but APC requires a PAN sequence number the Visa-dCVV wire does not carry, and the ATC width/encoding and card-key derivation must be validated end-to-end before a mapping can be trusted. The other schemes (Visa AV/dCVV2, Mastercard CVC3, Amex, Discover, Oberthur, JCB, Gemalto) have no APC equivalent. Gated to avoid emitting a cryptographically wrong dCVV.
-
-## `TPIN`
-
-- **Futurex Excrypt TPIN translates a PIN block from an inbound PEK (AX) to an outbound PEK (BT) → APC translate_pin_data. Request params are ';'-delimited 2-char tags: AW=format, AX/BT=keys, AL=PIN block, AK=account; the response carries the translated block in AL.**
-  - wire `diff-xprov` · crypto `apc` · live test `futurex_tpin_differential`
-  - Futurex HSM Reference Manual (TPIN). Verified live: for ISO Format 0 — which is deterministic (no random fill) — the proxy's translated block byte-matches a direct APC translate_pin_data with the same inbound/outbound keys and account, across randomized PAN. A Futurex param-parse error (wrong key/format/account) would diverge them. Non-ISO0 formats share the same code path but are not yet separately differentialed.
 

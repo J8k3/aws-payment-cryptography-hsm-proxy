@@ -5,7 +5,9 @@
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-A Rust TCP proxy that sits between HSM-dependent payment applications and [AWS Payment Cryptography (APC)](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/what-is.html). It speaks the wire protocol your application already sends — Thales payShield 10K host commands or Futurex Excrypt Enterprise SSP v.2 — and translates them to APC API calls on the outbound side, without changing the application.
+A Rust TCP proxy that sits between HSM-dependent payment applications and [AWS Payment Cryptography (APC)](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/what-is.html). It speaks the wire protocol your application already sends — Thales payShield 10K host commands — and translates them to APC API calls on the outbound side, without changing the application.
+
+> **Two editions.** This repository is the **open-source core** (Apache-2.0), covering Thales payShield 10K. **APC Proxy Enterprise** is a separately licensed, commercial add-on for teams that need more — additional HSM vendors (Futurex Excrypt today; Atalla on the roadmap) and production-scale capabilities such as multi-HSM connection pooling. It is built on this exact core through a stable extension seam, so nothing is forked. See [**Enterprise edition**](#enterprise-edition).
 
 **If you are refactoring the application, use the APC SDK directly.** That is the better path: lower latency, simpler deployment, no protocol translation layer. This proxy exists for the case where refactoring is not on the table — the application is a black box, a third-party system, or the migration budget doesn't cover application changes.
 
@@ -97,7 +99,7 @@ Run the proxy in passthrough mode between your application and the real HSM. The
 
 **Configure `proxy.yaml`** (start from `proxy.example.yaml` — the schema is fully commented there):
 ```yaml
-vendor: futurex_excrypt    # or thales_payshield
+vendor: thales_payshield
 aws:
   region: us-east-1
 discover:
@@ -119,11 +121,10 @@ discover:
 **Stop the proxy.** Open `discovery.jsonl`. It contains one JSON record per unique command code your application sent:
 
 ```json
-{"ts":1715688000,"vendor":"futurex_excrypt","cmd":"TPIN","params":{"AW":"3","AK":"1234567890","AX":"[REDACTED]","BT":"[REDACTED]","AL":"[REDACTED]"}}
-{"ts":1715688001,"vendor":"futurex_excrypt","cmd":"GKEY","params":{"BC":"01","AK":"9876543210"}}
+{"ts":1715688000,"vendor":"thales_payshield","cmd":"NC","params":{"payload_len":16,"note":"fields are positional and command-specific; payload not parsed in discovery mode"}}
 ```
 
-For Futurex commands, parameters are parsed and logged by name. Key blocks (`AX`, `BT`) and PIN blocks (`AL`) are replaced with `[REDACTED]`; all other parameter names and values are preserved. For Thales commands, only the command code and payload length are logged — Thales payloads are positional and command-specific, so field-level parsing is not attempted in discovery mode.
+Each vendor's protocol produces its own log-safe view of the payload — command codes and byte lengths only, never values. Thales payloads are positional and command-specific, so only the command code and payload length are recorded. (A parameter-tagged vendor such as Futurex, via the enterprise bolt-on, logs each parameter's 2-char code and length with the value redacted.)
 
 **Feed `discovery.jsonl` to the [AWS Payment Cryptography MCP](https://github.com/J8k3/aws-payment-cryptography-mcp).** Call `hsm_analyze_discovery_log` with the file contents. The tool returns: which commands already have handlers in this repo, which need to be written, the APC operation and key type for each, and the exact file path and handler structure to implement. The AI writes the Rust handler code for each command you need.
 
@@ -132,7 +133,7 @@ For Futurex commands, parameters are parsed and logged by name. Key blocks (`AX`
 Once handlers are written and registered, disable discovery mode and run the proxy in production configuration:
 
 ```yaml
-vendor: futurex_excrypt
+vendor: thales_payshield
 aws:
   region: us-east-1
 listen:
@@ -197,22 +198,42 @@ Wire framing: `[2B length][2B header][2B command code][payload]` — length coun
 | JS | ARQC verify + ARPC generate (UnionPay / CUP) | `VerifyAuthRequestCryptogram` |
 | B2 | Heartbeat / diagnostics | Echo response |
 
-### Futurex Excrypt Enterprise SSP v.2 (`futurex_excrypt`)
+### Enterprise edition
 
-Wire framing: `[AOCCCC;param;param;]` bracket-delimited with 2-byte parameter codes.
+The open-source core in this repository is **Thales payShield 10K only**, and can
+be built with no other vendor compiled in. **APC Proxy Enterprise** is a
+separately licensed, closed-source add-on for organizations that need more. It
+depends on this core as a library and plugs in through the same stable extension
+seam the built-in Thales support uses (`VendorModule`) — the core is never forked.
 
-| Commands | Function | APC Operation |
-|----------|----------|---------------|
-| ECHO | Connectivity heartbeat | Echo response |
-| TPIN | PIN translate | `TranslatePinData` |
+**Available now:**
 
-### Atalla / NCR Payments
+- **Futurex Excrypt** support — its wire protocol and handlers registered as a
+  `VendorModule`, running against the same APC backend as the open core.
 
-Not currently supported. The companion [AWS Payment Cryptography MCP](https://github.com/J8k3/aws-payment-cryptography-mcp) includes Atalla command mappings at directory quality (names and APC equivalents; no parameter detail), but no protocol framing or handlers exist in this proxy. If you have access to Atalla hardware and documentation and want to contribute, the handler registry is the extension point.
+**On the roadmap:**
+
+- **Atalla** HSM support, added the same way.
+- **Multi-HSM connection pooling** — stateless proxy instances fronting a pool of
+  redundant HSMs, with health-weighted routing and a cross-transaction integrity
+  contract (exclusive checkout, poison-on-anomaly, correlation-token verification)
+  that the single-endpoint open core does not need.
+- Priority support and integration assistance for production migrations.
+
+The two editions are wire-compatible and share one configuration model, so a
+deployment can start on the open-source core and adopt Enterprise features
+without re-architecting.
+
+**Licensing & access:** APC Proxy Enterprise is available under a commercial
+license. To request access, a trial, or a quote, open an issue on this
+repository or contact the maintainer via their [GitHub profile](https://github.com/J8k3).
 
 ---
 
-Each handler maps one HSM command to one APC data plane call. The handler registry is the extension point — add a file under `src/handlers/<vendor>/`, register it in `src/handlers/mod.rs`, and the proxy routes that command to it.
+Each handler maps one HSM command to one APC data-plane call. A vendor plugs in as
+a `VendorModule` (its `vendor` string, framing `Protocol`, and `Handler`s); the
+built-in Thales support (`ThalesModule`) is registered through the exact same seam
+a bolt-on uses. See [Adding a vendor or command](#adding-a-vendor-or-command).
 
 ---
 
@@ -269,16 +290,13 @@ Loads the config, calls `get_key` against APC for every `key_mappings` entry, an
 
 ---
 
-## Adding a Handler
+## Adding a vendor or command
 
-1. Create `src/handlers/<vendor>/<command>.rs`. Implement the `Handler` trait — `handle()` receives the command code and payload bytes, returns `HandlerResult`.
-2. Add the module to `src/handlers/<vendor>/mod.rs`.
-3. Register an instance in `Registry::build()` in `src/handlers/mod.rs`.
-4. Add the command to the Supported Commands table above.
+**A new command for the Thales vendor:** create `src/handlers/thales/<command>.rs`, implement the `Handler` trait (`handle()` receives the command code and payload bytes, returns `HandlerResult`), add the module to `src/handlers/thales/mod.rs`, and list the handler in `ThalesModule::handlers()`. Add the command to the Supported Commands table above.
+
+**A new vendor:** implement `VendorModule` (its `vendor` string, framing `Protocol`, and `Handler`s) in a crate that depends on this one, then pass it to `server::run_with(cfg, vec![...])`. That is exactly how the Futurex bolt-on is built — the core needs no change.
 
 **Thales reference:** `src/handlers/thales/cvv.rs` — handles CW/CY (CVV generate/verify), NY (static CVC3 generate), and RY (CVV2 calculate or verify) and shows the standard parse → key-map resolve → APC call → `HandlerResult` pattern. Most Thales handlers follow this structure.
-
-**Futurex reference:** `src/handlers/futurex/tpin.rs` — uses `parse_params()` from `src/protocol/futurex.rs` to split the Excrypt `[AOCCCC;param;param;]` payload into a `HashMap<[u8; 2], Vec<u8>>` keyed by 2-char parameter code.
 
 Wrap sensitive fields (key blocks, PIN blocks) in `Zeroizing<String>` or `Zeroizing<Vec<u8>>` so they are wiped from memory on drop. After implementing, run `cargo clippy -- -D warnings` and `cargo test` — both must pass before committing.
 
@@ -325,15 +343,13 @@ This is wall-clock time from completed frame parse to response encoding — i.e.
 
 **Discovery passthrough is stateless** — In discovery mode, the proxy opens a fresh TCP connection per forwarded command, sends the frame, and reads until the response is complete (per the protocol's length/framing check). There is no connection state between commands. Stateful protocols and commands that require persistent connection state across multiple exchanges will not work correctly in discovery mode. For complex command sequences, capture them with a network sniffer instead.
 
-**PAN representation in PIN translation** — Thales CA/CC commands supply 12 digits (the rightmost digits of the PAN excluding the check digit). Futurex TPIN supplies the same via the `AK` parameter. The proxy passes this 12-digit value as `primary_account_number` to APC `TranslatePinData`. This matches the field APC uses internally to reconstruct the ISO PIN block, but it has not been verified against a live APC endpoint with real traffic. If PIN translation returns an error related to the PAN value, check whether your APC configuration expects the full PAN instead.
-
-**Futurex error codes** — When the proxy returns an error on a Futurex connection (key not found, malformed payload, APC failure), the `BB` status field carries a payShield-style error code (10, 15, 23, 41) rather than a Futurex-native code. These values are not defined in the Futurex Excrypt protocol. Most applications treat any non-`Y` status as failure and log the raw value, so this usually does not cause incorrect behavior — but an application that pattern-matches on specific `BB` codes will not recognize them as expected Futurex error codes.
+**PAN representation in PIN translation** — Thales CA/CC commands supply 12 digits (the rightmost digits of the PAN excluding the check digit). The proxy passes this 12-digit value as `primary_account_number` to APC `TranslatePinData`. This matches the field APC uses internally to reconstruct the ISO PIN block, but it has not been verified against a live APC endpoint with real traffic. If PIN translation returns an error related to the PAN value, check whether your APC configuration expects the full PAN instead.
 
 **Session state** — The proxy is stateless per command. HSM integrations that rely on keyed sessions or sequence numbers across multiple commands will not work without extending the server to track connection state.
 
 **ARQC session key derivation variant** — KQ and KW use APC's `EmvCommon` session key derivation (PAN + PAN Sequence + ATC), which is correct for standard EMV and Visa CVN10/CVN14. Visa CVN17/CVN18/CVN22 use a different derivation formula (PAN + PAN Sequence only, no ATC) that requires APC's `Visa` session key derivation variant; Mastercard M/Chip SKD uses a separate derivation that requires the `Mastercard` variant with the Unpredictable Number. If your deployment uses these card types and ARQC verification returns error 01 (mismatch) for valid transactions, the session key derivation variant is the first place to investigate.
 
-**Key map completeness** — Key references the application sends fall into two paths. Wrapped key blocks in X9.143 / TR-31 format with a `KC` optional block resolve automatically against the startup APC scan — no `key_mappings` entry needed. Label-style and variant-LMK encrypted hex references must each appear as a `key_mappings` entry. Discovery mode against a real HSM is the reliable way to enumerate the label/hex references — look for parameter codes that carry key material (`AX`, `BT` in Futurex; the key field in Thales commands) and confirm every non-wrapped value has a mapping. See [`docs/key-presentation.md`](docs/key-presentation.md) for the full wire-form matrix.
+**Key map completeness** — Key references the application sends fall into two paths. Wrapped key blocks in X9.143 / TR-31 format with a `KC` optional block resolve automatically against the startup APC scan — no `key_mappings` entry needed. Label-style and variant-LMK encrypted hex references must each appear as a `key_mappings` entry. Discovery mode against a real HSM is the reliable way to enumerate the label/hex references — look for the key field in the Thales commands and confirm every non-wrapped value has a mapping. See [`docs/key-presentation.md`](docs/key-presentation.md) for the full wire-form matrix.
 
 ---
 
@@ -347,7 +363,7 @@ The protocol parsers are derived from specification and reference documentation 
 
 ## Help test this
 
-The author does not have a Thales payShield 10K or Futurex Excrypt Enterprise SSP v.2 on hand. Everything in this repo is tested either against AWS Payment Cryptography directly or against an in-process mock HSM. **Real-application validation is the most valuable thing this project needs** and the only way to surface the protocol edge cases the spec inference left ambiguous.
+The author does not have a Thales payShield 10K on hand. Everything in this repo is tested either against AWS Payment Cryptography directly or against an in-process mock HSM. **Real-application validation is the most valuable thing this project needs** and the only way to surface the protocol edge cases the spec inference left ambiguous.
 
 If you have access to either HSM and can try this against a real application — even a non-production one — please report what you find. Concrete asks, in priority order:
 
@@ -362,7 +378,7 @@ If you have access to either HSM and can try this against a real application —
 | What you found | Issue label | What to include |
 |---|---|---|
 | Worked end-to-end against real HSM | `needs-hsm-validation` | HSM model + firmware, application name (sanitised), commands exercised, anything surprising |
-| Protocol parse error or response misframing | `protocol-edge-case` | The wire frame bytes (sanitised), expected response, what the proxy returned, payShield/Excrypt firmware version |
+| Protocol parse error or response misframing | `protocol-edge-case` | The wire frame bytes (sanitised), expected response, what the proxy returned, payShield firmware version |
 | TLS handshake fails | `tls-compat` | Client TLS version + cipher suites, cert key type, the rustls error from the proxy log |
 | Wrong APC behavior or unexpected error 41 | `apc-behavior` | The handler that ran, the wire frame, the APC error in the proxy log |
 

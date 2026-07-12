@@ -22,9 +22,9 @@ wire-form reference to an ARN and lets APC do the unwrap — it never needs (or 
 the source HSM's master key. The migration effectively **swaps the customer's key
 store for APC's key store.** It is still a store the customer owns and enumerates
 — via the control-plane `list_keys`, which is exactly what the KCV path above does
-at startup — just addressed by ARN rather than an HSM-resident slot. So a wire form that used to point at a key in the HSM
-table (a Futurex slot, say — [#13](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/issues/13))
-now has to resolve to the matching APC ARN.
+at startup — just addressed by ARN rather than an HSM-resident slot. So a wire
+form that used to point at a key in the HSM's key table now has to resolve to the
+matching APC ARN.
 
 ---
 
@@ -61,33 +61,9 @@ Every Thales handler that uses `parse_legacy_key`, `parse_bdk`, or `parse_key_32
 
 The `parse_*` helpers in `src/handlers/thales/common.rs` are the single source of truth; if you extend a handler to use one of those helpers, wrapped-key support comes with it.
 
----
-
-## Futurex Excrypt Enterprise SSP
-
-For payment transaction processing, the dominant key presentation is a **working
-key carried in the request, wrapped under the HSM master key** — the same
-stateless-at-scale model as Thales's LMK-encrypted keys. Passing the key per
-request keeps HSMs in a cluster interchangeable; a resident key table would pin a
-transaction to one box (and runs into the per-session limits — ~1 min idle / 15
-min / 7,500 transactions — documented in the module's FIPS 140-2 security policy).
-The proxy never unwraps these (it does not hold the source HSM's master key); it
-resolves them to a pre-imported APC key by KCV match or operator `key_mappings`.
-
-Presentation splits by **key lifetime**: long-lived keys (master keys, KEKs,
-issuer master keys) are often resident in the HSM's **key table** and referenced
-by slot — a management / general-purpose concern; per-transaction **working keys**
-are carried wrapped in the request. It is the working-key path that dominates
-transaction commands and that the proxy is built to resolve.
-
-| Wire form | Encoding | What proxy does | Notes |
-|---|---|---|---|
-| **Cryptogram — working key wrapped under the master key** | Hex-encoded key wrapped under the HSM master key / KEK, carried in the request | Not parsed | The dominant transaction-key presentation (see above). Pre-TR-31 Futurex format. Not parsed today — this is the most impactful Futurex gap: KCV-based resolution of Futurex wrapped keys (as done for Thales) is the higher-value work, not slot discovery. Returns error if encountered. |
-| **X9.143 / TR-31 key block** | Field carrying an ASCII TR-31 block | Not parsed | Newer Excrypt firmware supports inline TR-31 in some commands. Proxy does not parse Futurex's TR-31 wrappers today — the Thales `'S'` prefix detection in `parse_legacy_key` does not apply because Futurex fields are parameter-tagged, not positional. |
-| **User-space key table slot reference** | Integer slot ID in `BD` field, or label resolved server-side | Label-path lookup against the parameter value | Secondary / management mode — the key table holds longer-lived keys; transaction commands more often carry a wrapped working key (rows above). `KMAP` + `GPKR` are *general-purpose* key-table commands (Key Map / General Purpose Key Read), not implemented today, so the operator pins the slot ID (or its label) to an ARN in `key_mappings`. |
-| **Atalla Key Block (AKB)** | Different framing | Not parsed | |
-
-For Futurex, the only resolution mechanism the proxy currently uses is operator-provided `key_mappings` matching the wire-form parameter value.
+> **Other vendors.** This document covers the open-source Thales payShield core.
+> Futurex Excrypt (and, on the roadmap, Atalla) key presentation is handled by the
+> separate enterprise bolt-on and documented there.
 
 ---
 
@@ -126,9 +102,6 @@ At startup the proxy paginates `list_keys` (data plane unaffected — this is a 
 
 These are not bugs — they are documented limits of the current implementation. Tracked in GitHub issues where noted.
 
-- **Atalla Key Block (AKB)** parsing — not implemented for either vendor. Open an issue if your application relies on AKB.
-- **Futurex wrapped working keys (the higher-value gap)** — the dominant transaction-key presentation (a key wrapped under the HSM master key, carried in the request) is not parsed for Futurex, so the proxy can't extract a KCV to match a pre-imported APC key the way it does for Thales. Operators must pin the literal wire form in `key_mappings`. KCV-based resolution of Futurex wrapped keys is the most impactful Futurex work.
-- **Futurex inline TR-31** — Excrypt commands that carry TR-31 blocks in parameter fields are not parsed. Falls back to label resolution against the raw parameter value.
-- **Futurex slot auto-discovery** — `KMAP` + `GPKR` enumeration is not implemented ([#13](https://github.com/J8k3/aws-payment-cryptography-hsm-proxy/issues/13)). These are *general-purpose* key-table commands and address the secondary (resident-key) mode, not the per-request working-key path — a management convenience, not core transaction handling. Today operators pin slot IDs in `key_mappings`.
+- **Atalla Key Block (AKB)** parsing — not implemented. Open an issue if your application relies on AKB.
 - **TKB without `KC`** — parses but yields no KCV, so KCV-path resolution is unavailable. Operator must pin the literal block bytes if they want it to resolve.
 - **TDES DUKPT direction** — `dukpt_mac.rs` (GW) hardcodes `Request` variant. Host-response MACs would need `Response`. APC handles the variant derivation internally; the proxy just chooses which to ask for.
