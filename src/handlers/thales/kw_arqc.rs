@@ -200,10 +200,11 @@ impl Handler for KwArqcHandler {
                       mints a valid ARQC via generate_auth_request_cryptogram under a created E0 IMK \
                       (DeriveKey mode), the proxy's KW handler verifies it through APC and ACCEPTS \
                       (00), and a one-bit-corrupted ARQC is REJECTED (01), across randomized inputs \
-                      — sweeping scheme '0' (EMV2000) and '2' (EMV Common), both Option A \
-                      (arqc_verify_kw_differential). Scheme 'C' (UnionPay, Vers 4.2 — p.471) is \
-                      mapped onto APC's native UnionPay session method, added 2026-07-15, but is \
-                      not yet swept by that differential. The Option-B schemes ('1'/'3') need a PAN > 16 \
+                      — sweeping schemes '0'/'1' (EMV2000), '2'/'3' (EMV Common) and 'C' \
+                      (UnionPay, Vers 4.2 — p.471), all Option A \
+                      (arqc_verify_kw_differential). Scheme 'C' maps onto APC's native UnionPay \
+                      session method, added 2026-07-15; it was gated as having no APC equivalent \
+                      before that. The Option-B schemes ('1'/'3') need a PAN > 16 \
                       digits, which the 8-byte BCD PAN field can't carry (see the EMV PAN-length \
                       gap), and the ARPC Method 1/2 generation path stays mock-tested; those are the \
                       next step.",

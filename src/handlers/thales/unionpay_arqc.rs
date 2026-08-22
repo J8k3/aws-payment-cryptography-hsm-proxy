@@ -124,11 +124,13 @@ impl Handler for UnionPayArqcHandler {
                       generate_auth_request_cryptogram (UnionPay, Option A) under a created IMK-AC \
                       (E0, DeriveKey mode), the proxy's JS handler verifies it through APC and \
                       ACCEPTS (00), and a one-bit-corrupted ARQC is REJECTED (01), across \
-                      randomized PAN / PSN / ATC / txn length. That run was green under the \
-                      EMV2000 approximation, used because APC had no UnionPay method before \
-                      2026-07-15; the differential now mints and verifies with the native \
-                      UnionPay method on both sides and MUST be re-run before this mapping \
-                      counts as verified.",
+                      randomized PAN / PSN / ATC / txn length (32/32, us-east-1). CUP was \
+                      mapped onto EMV2000 until APC added a native UnionPay method on \
+                      2026-07-15. A live cross-check settles that the earlier mapping was not \
+                      wrong: minting under EMV2000 and verifying under UnionPay ACCEPTS all 32 \
+                      cases while a one-bit-corrupted ARQC is still REJECTED, so APC's UnionPay \
+                      derivation is functionally identical to EMV2000 over PAN + PAN seq + ATC. \
+                      The switch is for faithfulness to the scheme, not a behaviour change.",
             wire: WireGrounding::DiffXprov,
             crypto: CryptoGrounding::Apc,
             proof: Proof::LiveTest("arqc_verify_js_differential"),
