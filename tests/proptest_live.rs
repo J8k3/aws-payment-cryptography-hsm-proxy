@@ -4157,10 +4157,16 @@ async fn arqc_verify_ks_differential() -> anyhow::Result<()> {
 
 // ── ARQC accept-path JS (UnionPay, live differential) ────────────────────────
 //
-// JS uses the SAME Emv2000 + Option A derivation as KS, so the ARQC is minted the
-// same way; only the wire frame differs (UnionPay/CUP layout, per PUGD0538-003
-// §7 p.122). APC mints a valid ARQC, the proxy JS handler verifies it and ACCEPTS,
-// and a corrupted ARQC is rejected (JT / error 01).
+// JS is UnionPay/CUP + Option A (PUGD0538-003 §7 p.122). APC mints a valid ARQC,
+// the proxy JS handler verifies it and ACCEPTS, and a corrupted ARQC is rejected
+// (JT / error 01).
+//
+// The mint side uses SessionKeyUnionPay, matching what the handler now sends. It
+// previously used SessionKeyEmv2000 on both sides, because APC had no UnionPay
+// method until 2026-07-15 and CUP was approximated onto EMV2000 (same three
+// inputs). Minting with UnionPay while the handler still sent EMV2000 — or the
+// reverse — is exactly the discriminator: the two agree only if the derivations
+// are identical, and a mismatch surfaces as a rejected valid cryptogram.
 const JS_E0_WIRE_LABEL: &str = "U0000000000000000000000000000JSE0";
 
 /// Encode a JS (UnionPay) verify-only wire frame. Binary fields except TxnLen (2H
@@ -4194,7 +4200,7 @@ async fn arqc_verify_js_differential() -> anyhow::Result<()> {
 
     use apc_proxy::handlers::thales::common::emv_pad;
     use aws_sdk_paymentcryptographydata::types::{
-        MajorKeyDerivationMode, SessionKeyDerivation, SessionKeyEmv2000,
+        MajorKeyDerivationMode, SessionKeyDerivation, SessionKeyUnionPay,
     };
 
     let (cpc, data) = aws_clients().await;
@@ -4236,8 +4242,8 @@ async fn arqc_verify_js_differential() -> anyhow::Result<()> {
         let txn = hex_str_to_bytes(&gen_hex_message(&mut rng, txn_len));
         let padded_txn_hex = hex_upper(&emv_pad(&txn));
 
-        let session = SessionKeyDerivation::Emv2000(
-            SessionKeyEmv2000::builder()
+        let session = SessionKeyDerivation::UnionPay(
+            SessionKeyUnionPay::builder()
                 .primary_account_number(&pan)
                 .pan_sequence_number(&seq)
                 .application_transaction_counter(&atc_hex)

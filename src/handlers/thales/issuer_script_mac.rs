@@ -235,9 +235,16 @@ fn parse_ku(payload: &[u8]) -> Result<SmiFields, ProxyError> {
             )))
         }
         b'6' => {
+            // APC gained SessionKeyDerivationMode::UNION_PAY on 2026-07-15, so the
+            // session method now exists. What is still missing is the seed: the KU
+            // spec enumerates the Integrity Session Key Data for schemes '0'-'5'
+            // (ATC / RANDi / AC) but says nothing for '6' (PUGD0537-004 Rev A
+            // p.475), and APC's SessionKeyDerivationValue requires exactly one of
+            // ATC or AC. Settle it with a live differential before un-gating —
+            // guessing picks a different key and silently emits a wrong MAC.
             return Err(ProxyError::Unsupported(
                 "KU: scheme '6' (UnionPay) is gated in KU; use JU for UnionPay".into(),
-            ))
+            ));
         }
         other => {
             return Err(ProxyError::MalformedPayload(format!(
@@ -350,13 +357,18 @@ impl Handler for IssuerScriptMacHandler {
                      p.480), so it cannot be faithfully mapped without a payShield reference. \
                      Modes 1–4 add confidentiality / PIN change and need APC's separate \
                      GenerateMacEmvPinChange operation plus an E1 key. KU '3'/'4' (JCB CVN01/02) \
-                     and '6' (UnionPay-in-KU) have no APC session-key method. Gated rather than \
-                     emit a MAC under the wrong key.",
+                     have no APC session-key method. KU '6' (UnionPay-in-KU) now has one — APC \
+                     added SessionKeyDerivationMode::UNION_PAY on 2026-07-15 — but the KU spec \
+                     does not state the Integrity Session Key Data for scheme '6', and the \
+                     SessionKeyDerivationValue union requires exactly one of ATC or AC; gated \
+                     pending a live differential. Gated rather than emit a MAC under the wrong \
+                     key.",
                 wire: WireGrounding::None,
                 crypto: CryptoGrounding::None,
                 proof: Proof::Gated(
                     "KY IV-SMI/key-tree not modelled by APC EmvMac; confidentiality/PIN-change \
-                     need GenerateMacEmvPinChange; JCB/UnionPay-in-KU have no APC session method",
+                     need GenerateMacEmvPinChange; JCB has no APC session method; UnionPay-in-KU \
+                     awaits a live differential for its session-key seed",
                 ),
             },
         ]

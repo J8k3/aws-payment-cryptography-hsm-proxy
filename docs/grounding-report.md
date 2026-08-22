@@ -134,7 +134,7 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 
 - **JS verifies a UnionPay (CUP) Authorisation Request Cryptogram → APC verify_auth_request_cryptogram. Response code JT.**
   - wire `diff-xprov` · crypto `apc` · live test `arqc_verify_js_differential`
-  - PUGD0538-003 §7 p.122. Verified live end-to-end: APC mints a valid ARQC via generate_auth_request_cryptogram (Emv2000, Option A) under a created IMK-AC (E0, DeriveKey mode), the proxy's JS handler verifies it through APC and ACCEPTS (00), and a one-bit-corrupted ARQC is REJECTED (01), across randomized PAN / PSN / ATC / txn length.
+  - PUGD0538-003 §7 p.122. Verified live end-to-end: APC mints a valid ARQC via generate_auth_request_cryptogram (UnionPay, Option A) under a created IMK-AC (E0, DeriveKey mode), the proxy's JS handler verifies it through APC and ACCEPTS (00), and a one-bit-corrupted ARQC is REJECTED (01), across randomized PAN / PSN / ATC / txn length. That run was green under the EMV2000 approximation, used because APC had no UnionPay method before 2026-07-15; the differential now mints and verifies with the native UnionPay method on both sides and MUST be re-run before this mapping counts as verified.
 
 ## `JU`, `KU`, `KY`
 
@@ -142,8 +142,8 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
   - wire `diff-xprov` · crypto `apc` · live test `issuer_script_mac_differential`
   - PUGD0537-004 Rev A p.475 (KU); PUGD0538-003 §7 p.124 (JU). Verified live: a created E2 IMK-SMI (DeriveKey mode) + EmvMac returns a MAC for each session method, and the SessionKeyDerivationValue union requires ATC for EMV2000/AMEX/VISA and ApplicationCryptogram for EMV_COMMON/MASTERCARD. The differential confirms the proxy's wire parse + EmvMac mapping equals a direct APC generate_mac. Crypto grade is `apc` (agrees with APC): unlike the ARQC family there is not yet an independent from-spec SMI-derivation anchor.
 - **KY, all confidentiality / PIN-change modes (1–4), KU schemes '3'/'4'/'6' return Unsupported (68).**
-  - wire `none` · crypto `none` · gated (68): KY IV-SMI/key-tree not modelled by APC EmvMac; confidentiality/PIN-change need GenerateMacEmvPinChange; JCB/UnionPay-in-KU have no APC session method
-  - KY Mode-0 EMV2000 secure-messaging derivation takes an IV-SMI and a branch/height key-tree that APC's EmvMac does not model (PUGD0537-004 Rev A p.480), so it cannot be faithfully mapped without a payShield reference. Modes 1–4 add confidentiality / PIN change and need APC's separate GenerateMacEmvPinChange operation plus an E1 key. KU '3'/'4' (JCB CVN01/02) and '6' (UnionPay-in-KU) have no APC session-key method. Gated rather than emit a MAC under the wrong key.
+  - wire `none` · crypto `none` · gated (68): KY IV-SMI/key-tree not modelled by APC EmvMac; confidentiality/PIN-change need GenerateMacEmvPinChange; JCB has no APC session method; UnionPay-in-KU awaits a live differential for its session-key seed
+  - KY Mode-0 EMV2000 secure-messaging derivation takes an IV-SMI and a branch/height key-tree that APC's EmvMac does not model (PUGD0537-004 Rev A p.480), so it cannot be faithfully mapped without a payShield reference. Modes 1–4 add confidentiality / PIN change and need APC's separate GenerateMacEmvPinChange operation plus an E1 key. KU '3'/'4' (JCB CVN01/02) have no APC session-key method. KU '6' (UnionPay-in-KU) now has one — APC added SessionKeyDerivationMode::UNION_PAY on 2026-07-15 — but the KU spec does not state the Integrity Session Key Data for scheme '6', and the SessionKeyDerivationValue union requires exactly one of ATC or AC; gated pending a live differential. Gated rather than emit a MAC under the wrong key.
 
 ## `K0`
 
@@ -168,9 +168,9 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 
 ## `KW`
 
-- **KW verifies an ARQC and optionally generates an ARPC for the EMV / Cloud-Based SKD methods → APC verify_auth_request_cryptogram. The Scheme ID selects the session method (EMV2000 / EMV Common); the explicit Derivation Method byte ('A'/'B') selects the EMV Option A/B major key and is authoritative (#23) rather than inferring it from the Scheme ID's even/odd convention. Cloud / LUK / Option-C / JCB / UnionPay SKD schemes are rejected as having no APC equivalent.**
+- **KW verifies an ARQC and optionally generates an ARPC for the EMV / Cloud-Based SKD methods → APC verify_auth_request_cryptogram. The Scheme ID selects the session method (EMV2000 / EMV Common / UnionPay); the explicit Derivation Method byte ('A'/'B') selects the EMV Option A/B major key and is authoritative (#23) rather than inferring it from the Scheme ID's even/odd convention. Cloud / LUK / Option-C / JCB schemes are rejected as having no APC equivalent.**
   - wire `diff-xprov` · crypto `apc` · live test `arqc_verify_kw_differential`
-  - PUGD0537-004 Rev A p.471 (KW). Verified live for the Option-A schemes: APC mints a valid ARQC via generate_auth_request_cryptogram under a created E0 IMK (DeriveKey mode), the proxy's KW handler verifies it through APC and ACCEPTS (00), and a one-bit-corrupted ARQC is REJECTED (01), across randomized inputs — sweeping scheme '0' (EMV2000) and '2' (EMV Common), both Option A (arqc_verify_kw_differential). The Option-B schemes ('1'/'3') need a PAN > 16 digits, which the 8-byte BCD PAN field can't carry (see the EMV PAN-length gap), and the ARPC Method 1/2 generation path stays mock-tested; those are the next step.
+  - PUGD0537-004 Rev A p.471 (KW). Verified live for the Option-A schemes: APC mints a valid ARQC via generate_auth_request_cryptogram under a created E0 IMK (DeriveKey mode), the proxy's KW handler verifies it through APC and ACCEPTS (00), and a one-bit-corrupted ARQC is REJECTED (01), across randomized inputs — sweeping scheme '0' (EMV2000) and '2' (EMV Common), both Option A (arqc_verify_kw_differential). Scheme 'C' (UnionPay, Vers 4.2 — p.471) is mapped onto APC's native UnionPay session method, added 2026-07-15, but is not yet swept by that differential. The Option-B schemes ('1'/'3') need a PAN > 16 digits, which the 8-byte BCD PAN field can't carry (see the EMV PAN-length gap), and the ARPC Method 1/2 generation path stays mock-tested; those are the next step.
 
 ## `LQ`, `LS`
 

@@ -35,7 +35,7 @@ use crate::key_map::KeyDescriptor;
 ///     ARC        2B binary Authorization Response Code
 ///
 /// APC: verify_auth_request_cryptogram with TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS,
-///      SessionKeyDerivation::Emv2000, MajorKeyDerivationMode::EmvOptionA.
+///      SessionKeyDerivation::UnionPay, MajorKeyDerivationMode::EmvOptionA.
 /// No ARPC Method 2 (CSU) — JS has no CSU field.
 pub struct UnionPayArqcHandler;
 
@@ -121,10 +121,14 @@ impl Handler for UnionPayArqcHandler {
             decision: "JS verifies a UnionPay (CUP) Authorisation Request Cryptogram → APC \
                        verify_auth_request_cryptogram. Response code JT.",
             because: "PUGD0538-003 §7 p.122. Verified live end-to-end: APC mints a valid ARQC via \
-                      generate_auth_request_cryptogram (Emv2000, Option A) under a created IMK-AC \
+                      generate_auth_request_cryptogram (UnionPay, Option A) under a created IMK-AC \
                       (E0, DeriveKey mode), the proxy's JS handler verifies it through APC and \
                       ACCEPTS (00), and a one-bit-corrupted ARQC is REJECTED (01), across \
-                      randomized PAN / PSN / ATC / txn length.",
+                      randomized PAN / PSN / ATC / txn length. That run was green under the \
+                      EMV2000 approximation, used because APC had no UnionPay method before \
+                      2026-07-15; the differential now mints and verifies with the native \
+                      UnionPay method on both sides and MUST be re-run before this mapping \
+                      counts as verified.",
             wire: WireGrounding::DiffXprov,
             crypto: CryptoGrounding::Apc,
             proof: Proof::LiveTest("arqc_verify_js_differential"),
@@ -154,9 +158,11 @@ async fn handle_js(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
 
     use aws_sdk_paymentcryptographydata::types::MajorKeyDerivationMode;
 
-    // UnionPay/CUP uses EMV2000 session-key derivation (Option A, no UN).
+    // UnionPay/CUP session-key derivation (Option A, PAN + PAN seq + ATC, no UN).
+    // Previously mapped onto EMV2000 — same three inputs — because APC had no
+    // UnionPay method; it added one on 2026-07-15, so use it natively.
     let session_key_attrs = match build_session_key(
-        EmvSession::Emv2000,
+        EmvSession::UnionPay,
         &fields.pan,
         &fields.pan_seq,
         &fields.atc,
@@ -174,7 +180,7 @@ async fn handle_js(payload: &[u8], state: &Arc<AppState>) -> HandlerResult {
         Err(e) => return HandlerResult::from_proxy_error(&e),
     };
 
-    debug!(key = %key_arn, "JS: verify_auth_request_cryptogram (UnionPay/CUP Emv2000)");
+    debug!(key = %key_arn, "JS: verify_auth_request_cryptogram (UnionPay/CUP)");
 
     verify_arqc(
         state,
