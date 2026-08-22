@@ -211,7 +211,21 @@ fn parse_ku(payload: &[u8]) -> Result<SmiFields, ProxyError> {
     // layout (PUGD0538-003 §7 p.124), which is what fixes the seed here.
     if scheme == b'6' {
         let atc = bytes_to_hex(r.take(2, "ATC")?);
-        r.byte("padding flag")?; // consumed; APC pads the message itself
+
+        // Padding Flag (1N): '1' = host already padded the message. Same meaning as
+        // JU's, and it must be honoured — padding an already-padded message MACs
+        // the wrong data.
+        let already_padded = match r.byte("padding flag")? {
+            b'0' => false,
+            b'1' => true,
+            other => {
+                return Err(ProxyError::MalformedPayload(format!(
+                    "KU: invalid padding flag '{}'",
+                    other as char
+                )))
+            }
+        };
+
         let message_raw = r.parse_with(|b, o| {
             read_len_prefixed_message("KU", b, o).map(|(m, next)| (m, next - o))
         })?;
@@ -224,7 +238,7 @@ fn parse_ku(payload: &[u8]) -> Result<SmiFields, ProxyError> {
                 session_mode: SessionKeyDerivationMode::UnionPay,
                 value: SmiValue::Atc(atc),
             },
-            message: message_for_apc(message_raw, false),
+            message: message_for_apc(message_raw, already_padded),
         });
     }
 
@@ -634,12 +648,33 @@ mod tests {
         assert!(matches!(f.mapping.value, SmiValue::Atc(ref a) if a == "002A"));
     }
 
+    /// The Padding Flag must be honoured, not just consumed: '1' means the host
+    /// already padded, so the proxy must not pad again.
     #[test]
-    fn ku_unionpay_scheme6_accepts_either_padding_flag() {
-        for flag in *b"01" {
-            let f = parse_ku(&ku6_payload([0x12, 0x34], flag, &[0xAB])).unwrap();
-            assert!(matches!(f.mapping.value, SmiValue::Atc(ref a) if a == "1234"));
-        }
+    fn ku_unionpay_scheme6_honours_padding_flag() {
+        let msg = [0xABu8];
+
+        let unpadded = parse_ku(&ku6_payload([0x12, 0x34], b'0', &msg)).unwrap();
+        let prepadded = parse_ku(&ku6_payload([0x12, 0x34], b'1', &msg)).unwrap();
+
+        assert_eq!(
+            *prepadded.message, "AB",
+            "flag '1' must pass the message through"
+        );
+        assert_eq!(
+            *unpadded.message,
+            bytes_to_hex(&emv_pad(&msg)),
+            "flag '0' must EMV-pad the message"
+        );
+        assert_ne!(*unpadded.message, *prepadded.message);
+    }
+
+    #[test]
+    fn ku_unionpay_scheme6_rejects_invalid_padding_flag() {
+        assert!(matches!(
+            parse_ku(&ku6_payload([0x12, 0x34], b'2', &[0xAB])),
+            Err(ProxyError::MalformedPayload(_))
+        ));
     }
 
     #[test]

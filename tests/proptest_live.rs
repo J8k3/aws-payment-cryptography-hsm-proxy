@@ -4316,7 +4316,7 @@ async fn arqc_verify_js_differential() -> anyhow::Result<()> {
 //         2  KU '1' Mastercard -> MASTERCARD + AC (8-byte RANDi)
 //         3  KU '2' Amex       -> AMEX       + ATC
 //         4  KU '5' JCB CVN04  -> EMV_COMMON + AC (length-prefixed message)
-//         5  KU '6' UnionPay   -> UNION_PAY  + ATC (2B ATC + padding flag)
+//         5  KU '6' UnionPay   -> UNION_PAY  + ATC (2B ATC; padding flag alternates)
 const SMI_E2_WIRE_LABEL: &str = "U0000000000000000000000000000SME2";
 
 /// Encode a JU Mode-0 wire: mode '0' scheme '1' key PAN/Seq(8B) ATC(2B)
@@ -4359,14 +4359,35 @@ fn encode_ku(
 /// other KU schemes: the session-key-data field is the 2-byte ATC rather than the
 /// 8-byte form, a Padding Flag follows it (KU carries that flag for no other
 /// scheme), and the message is 4H length-prefixed.
-fn encode_ku6(key_label: &str, pan_seq: &[u8], atc: [u8; 2], msg: &[u8]) -> Vec<u8> {
+/// `pre_padded` selects the Padding Flag path: `false` sends the raw message under
+/// flag '0' (the proxy EMV-pads it), `true` sends the already-padded bytes under
+/// flag '1' (the proxy must pass them through). Both must yield the same MAC, so
+/// the same oracle covers each — which is what makes the flag actually tested
+/// rather than merely consumed.
+fn encode_ku6(
+    key_label: &str,
+    pan_seq: &[u8],
+    atc: [u8; 2],
+    msg: &[u8],
+    pre_padded: bool,
+) -> Vec<u8> {
+    use apc_proxy::handlers::thales::common::emv_pad;
+
+    let padded;
+    let (flag, body): (u8, &[u8]) = if pre_padded {
+        padded = emv_pad(msg);
+        (b'1', &padded)
+    } else {
+        (b'0', msg)
+    };
+
     let mut v = vec![b'0', b'6'];
     v.extend_from_slice(key_label.as_bytes());
     v.extend_from_slice(pan_seq);
     v.extend_from_slice(&atc);
-    v.push(b'0'); // padding flag: not padded
-    v.extend_from_slice(format!("{:04X}", msg.len()).as_bytes());
-    v.extend_from_slice(msg);
+    v.push(flag);
+    v.extend_from_slice(format!("{:04X}", body.len()).as_bytes());
+    v.extend_from_slice(body);
     v.push(0x3B);
     v
 }
@@ -4475,7 +4496,8 @@ async fn issuer_script_mac_differential() -> anyhow::Result<()> {
             ),
             5 => (
                 b"KU",
-                encode_ku6(&e2_label, &pan_seq, atc, &msg),
+                // Alternate the Padding Flag across cases so both paths are covered.
+                encode_ku6(&e2_label, &pan_seq, atc, &msg, case_idx % 12 >= 6),
                 SessionKeyDerivationMode::UnionPay,
                 SessionKeyDerivationValue::ApplicationTransactionCounter(atc_hex.clone()),
             ),
