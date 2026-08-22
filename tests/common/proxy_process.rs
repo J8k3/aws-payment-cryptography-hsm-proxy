@@ -11,10 +11,24 @@
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
-static NEXT_PORT: AtomicU16 = AtomicU16::new(19500);
+/// Ask the OS for a free loopback port, then release it.
+///
+/// This replaces a fixed-base `AtomicU16` counter. That counter was a *per-test-
+/// binary* static seeded at the same value in every binary, and cargo runs the
+/// integration crates (`forward_tls`, `passthrough`, `tls`, `inbound_limits`)
+/// as concurrent processes — so two binaries handed out identical ports. The
+/// loser's bind failed, and because the readiness poll only checks that
+/// *something* accepts on the port, it would connect to the other binary's
+/// proxy and the test would then assert against the wrong process.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .expect("read ephemeral addr")
+        .port()
+}
 
 // `tests/common/` is compiled separately for each test binary; a field used
 // by passthrough.rs looks dead from tls.rs's perspective. Allow at the type
@@ -67,7 +81,7 @@ impl ProxyProcess {
     /// host:port (the test's mock HSM). Blocks until the proxy is accepting
     /// connections (poll on TCP connect) or panics on timeout.
     pub fn spawn(input: &ProxyConfigInput<'_>) -> Self {
-        let port = NEXT_PORT.fetch_add(1, Ordering::SeqCst);
+        let port = free_port();
         let tempdir = tempdir_holder::TempDirHolder::new();
         let config_path = tempdir.path.join("proxy.yaml");
         let discovery_log_path = tempdir.path.join("discovery.jsonl");
@@ -124,7 +138,7 @@ impl ProxyProcess {
         std::fs::write(&config_path, yaml).expect("write temp proxy.yaml");
 
         let binary = locate_binary();
-        let child = Command::new(&binary)
+        let mut child = Command::new(&binary)
             .arg("--config")
             .arg(&config_path)
             .env("RUST_LOG", "apc_proxy=warn") // quieter than info for test output
@@ -135,9 +149,14 @@ impl ProxyProcess {
 
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("parse addr");
 
-        // Wait for the listener — poll TCP connect.
+        // Wait for the listener — poll TCP connect. Check liveness first: if the
+        // child died (e.g. it could not bind), a successful connect would mean we
+        // reached somebody else's listener, so fail loudly instead of testing it.
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
+            if let Some(status) = child.try_wait().expect("poll proxy child") {
+                panic!("proxy exited before it began listening on {addr} (status {status})");
+            }
             assert!(
                 Instant::now() <= deadline,
                 "proxy {addr} did not start listening within 15s"
@@ -154,6 +173,25 @@ impl ProxyProcess {
             child,
             _tempdir: tempdir,
         }
+    }
+
+    /// `spawn` for use inside an async test.
+    ///
+    /// Not `async` itself — `block_in_place` is synchronous — but it must be
+    /// called from within a multi-thread runtime.
+    ///
+    /// `spawn` blocks — it polls the listener with `TcpStream::connect_timeout`
+    /// and `thread::sleep`. Calling it straight from a `#[tokio::test]` body
+    /// blocks a runtime worker, which can starve an in-test `MockHsm` accept
+    /// task long enough for the proxy's forward-leg TLS handshake to give up.
+    /// The proxy then answers with a framed error 41 and the assertion fails —
+    /// but only under load, which made it look like a flaky test rather than a
+    /// fixture bug.
+    ///
+    /// `block_in_place` hands the worker off so the mock keeps being polled. It
+    /// requires the multi-thread runtime, which every caller already uses.
+    pub fn spawn_in_async_test(input: &ProxyConfigInput<'_>) -> Self {
+        tokio::task::block_in_place(|| Self::spawn(input))
     }
 
     pub fn read_discovery_log(&self) -> String {

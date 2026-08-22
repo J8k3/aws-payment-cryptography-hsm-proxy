@@ -4,10 +4,14 @@
 //! spawns the real `apc-proxy` binary as a subprocess pointing at the mock,
 //! sends a client frame, and asserts the proxy forwarded correctly, returned
 //! the mock's reply verbatim, and wrote a redacted discovery log entry.
+//!
+//! payShield-specific: this crate exercises Thales wire frames, so it is
+//! feature-gated and compiles to nothing under `--no-default-features`.
+#![cfg(feature = "thales")]
 
 mod common;
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::TcpStream;
 use std::time::Duration;
 
@@ -36,10 +40,7 @@ fn send_recv(addr: std::net::SocketAddr, frame: &[u8]) -> Vec<u8> {
     conn.set_read_timeout(Some(Duration::from_secs(10)))
         .expect("set read timeout");
     conn.write_all(frame).expect("write frame");
-    let mut resp = vec![0u8; 4096];
-    let n = conn.read(&mut resp).expect("read response");
-    resp.truncate(n);
-    resp
+    common::read_framed(&mut conn)
 }
 
 /// Thales: an unhandled command (`XX`) with `discover.enabled=true` should be
@@ -53,7 +54,7 @@ async fn thales_unhandled_command_is_forwarded_and_logged() {
 
     let mock = MockHsm::spawn(MockBehavior::Respond(canned_reply.clone()), 1).await;
 
-    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+    let proxy = ProxyProcess::spawn_in_async_test(&ProxyConfigInput {
         vendor: "thales_payshield",
         hsm_host: "127.0.0.1",
         hsm_port: mock.addr.port(),
@@ -108,7 +109,7 @@ async fn thales_unhandled_command_returns_error_when_hsm_unreachable() {
     let unreachable_port = probe.local_addr().expect("local_addr").port();
     drop(probe);
 
-    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+    let proxy = ProxyProcess::spawn_in_async_test(&ProxyConfigInput {
         vendor: "thales_payshield",
         hsm_host: "127.0.0.1",
         hsm_port: unreachable_port,
@@ -149,7 +150,7 @@ async fn thales_unhandled_command_returns_error_when_hsm_unreachable() {
 async fn thales_unhandled_command_returns_error_on_hsm_read_timeout() {
     let mock = MockHsm::spawn(MockBehavior::AcceptThenHang, 1).await;
 
-    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+    let proxy = ProxyProcess::spawn_in_async_test(&ProxyConfigInput {
         vendor: "thales_payshield",
         hsm_host: "127.0.0.1",
         hsm_port: mock.addr.port(),

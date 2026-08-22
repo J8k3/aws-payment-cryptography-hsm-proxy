@@ -161,7 +161,7 @@ pub fn server_config_from_cert_pem(
     key_pem: &str,
     client_ca_pem: Option<&str>,
 ) -> Arc<rustls::ServerConfig> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    super::install_default_crypto_provider();
 
     let cert_chain: Vec<rustls::pki_types::CertificateDer<'static>> =
         rustls_pemfile::certs(&mut std::io::BufReader::new(cert_pem.as_bytes()))

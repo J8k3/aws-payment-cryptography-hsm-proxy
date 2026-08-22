@@ -2,10 +2,14 @@
 //! (`discover.tls`). The mock HSM serves TLS / mTLS; the proxy is
 //! configured to validate the mock's cert against the same CA fixture and
 //! optionally present a client cert.
+//!
+//! payShield-specific: this crate exercises Thales wire frames, so it is
+//! feature-gated and compiles to nothing under `--no-default-features`.
+#![cfg(feature = "thales")]
 
 mod common;
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -56,10 +60,7 @@ fn send_recv(addr: std::net::SocketAddr, frame: &[u8]) -> Vec<u8> {
     conn.set_read_timeout(Some(Duration::from_secs(10)))
         .expect("set read timeout");
     conn.write_all(frame).expect("write frame");
-    let mut resp = vec![0u8; 4096];
-    let n = conn.read(&mut resp).expect("read response");
-    resp.truncate(n);
-    resp
+    common::read_framed(&mut conn)
 }
 
 fn read_pem(path: &std::path::Path) -> String {
@@ -90,7 +91,7 @@ async fn forward_tls_happy_path() {
     )
     .await;
 
-    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+    let proxy = ProxyProcess::spawn_in_async_test(&ProxyConfigInput {
         vendor: "thales_payshield",
         hsm_host: "localhost",
         hsm_port: mock.addr.port(),
@@ -149,7 +150,7 @@ async fn forward_mtls_happy_path() {
     )
     .await;
 
-    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+    let proxy = ProxyProcess::spawn_in_async_test(&ProxyConfigInput {
         vendor: "thales_payshield",
         hsm_host: "localhost",
         hsm_port: mock.addr.port(),
@@ -203,7 +204,7 @@ async fn forward_tls_rejects_untrusted_hsm_cert() {
     )
     .await;
 
-    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+    let proxy = ProxyProcess::spawn_in_async_test(&ProxyConfigInput {
         vendor: "thales_payshield",
         hsm_host: "localhost",
         hsm_port: mock.addr.port(),

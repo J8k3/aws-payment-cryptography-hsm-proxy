@@ -20,3 +20,30 @@ jobs:
         run: cargo build
       - name: Test
         run: cargo test
+
+  # The `thales` and `ring`/`aws-lc-rs` features exist so the core can be built
+  # without payShield (a bolt-on-only deployment) and against either crypto
+  # provider. The default job above never exercises those combinations, so they
+  # silently stopped compiling; this matrix keeps every advertised combination
+  # honest.
+  feature-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: no-vendor (framework only)
+            features: --no-default-features --features ring
+          - name: thales + aws-lc-rs
+            features: --no-default-features --features aws-lc-rs,thales
+          - name: all-features
+            features: --all-features
+    name: features / ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
+      - name: Test
+        run: cargo test ${{ matrix.features }}

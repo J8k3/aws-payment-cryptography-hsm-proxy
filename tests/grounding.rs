@@ -14,6 +14,11 @@ fn manifest(rel: &str) -> std::path::PathBuf {
 
 /// The generated report must match the committed `docs/grounding-report.md`. If a
 /// `grounding()` changed without regenerating, this fails (no silent drift).
+///
+/// The committed report documents the payShield handler set, so this is gated:
+/// with `--no-default-features` the registry is empty and there is nothing to
+/// compare against.
+#[cfg(feature = "thales")]
 #[test]
 fn grounding_report_is_current() {
     let generated = Registry::build().grounding_report();
@@ -53,6 +58,9 @@ fn live_test_proofs_reference_real_tests() {
 
 /// Coverage: handlers we've verified against live APC must carry grounding, so a
 /// future edit that drops the evidence is caught.
+///
+/// These are payShield command codes, so this is gated alongside the report.
+#[cfg(feature = "thales")]
 #[test]
 fn verified_handlers_carry_grounding() {
     let reg = Registry::build();

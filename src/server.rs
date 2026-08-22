@@ -480,7 +480,10 @@ fn log_discovery_command(
     }
 }
 
-#[cfg(test)]
+// The one test here drives a real payShield frame through the dispatch path, so
+// the whole module is Thales-gated — without it `cargo test --no-default-features`
+// fails to compile.
+#[cfg(all(test, feature = "thales"))]
 mod tests {
     use super::*;
     use crate::handlers::AppState;

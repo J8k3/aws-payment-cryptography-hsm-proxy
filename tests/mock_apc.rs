@@ -12,7 +12,10 @@
 //! The mock server is intentionally minimal — it routes by HTTP path and
 //! returns pre-configured JSON bodies. It does not validate request bodies
 //! or AWS SigV4 signatures.
-
+//!
+//! payShield-specific: this crate exercises Thales wire frames, so it is
+//! feature-gated and compiles to nothing under `--no-default-features`.
+#![cfg(feature = "thales")]
 // Tests live outside the prod source tree; panic IS the intended failure mode
 // and the runner already reports file:line.
 #![allow(clippy::unwrap_used)]

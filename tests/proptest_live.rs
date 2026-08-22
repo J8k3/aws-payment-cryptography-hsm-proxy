@@ -28,7 +28,10 @@
 //! a direct APC SDK call built from the same field values, and tears down
 //! every test key before exiting. A final `assert_no_surviving` check
 //! enforces the zero-surviving-key invariant the plan calls out.
-
+//!
+//! payShield-specific: this crate exercises Thales wire frames, so it is
+//! feature-gated and compiles to nothing under `--no-default-features`.
+#![cfg(feature = "thales")]
 // Tests live outside the prod source tree; panic IS the intended failure mode
 // and the runner already reports file:line.
 #![allow(clippy::unwrap_used)]

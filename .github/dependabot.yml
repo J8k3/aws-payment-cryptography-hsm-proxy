@@ -1,0 +1,28 @@
+version: 2
+updates:
+  # The AWS SDK crates ship very frequently and carry the APC API surface this
+  # proxy maps onto — a new session-key derivation or MAC attribute arrives as
+  # an SDK bump, so these are worth seeing weekly rather than discovering by
+  # hand months later.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      aws-sdk:
+        patterns:
+          - "aws-*"
+      rustls:
+        patterns:
+          - "rustls*"
+          - "tokio-rustls"
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
