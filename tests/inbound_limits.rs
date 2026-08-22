@@ -7,6 +7,10 @@
 //! (The unbounded-accumulation cap is exercised by the Futurex bolt-on's tests:
 //! only a bracket-delimited, length-less stream can grow without completing a
 //! frame; a length-prefixed Thales frame is bounded to 65_537 bytes.)
+//!
+//! Gated on `thales`: the test spawns the real binary, and with no vendor module
+//! compiled in there is no `cfg.vendor` for it to match, so it cannot start.
+#![cfg(feature = "thales")]
 
 mod common;
 

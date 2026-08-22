@@ -144,6 +144,6 @@ impl TlsCerts {
     }
 
     fn install_default_crypto() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        super::install_default_crypto_provider();
     }
 }

@@ -4,6 +4,10 @@
 //! the degradation paths; the KCV semantics themselves are grounded on
 //! PUGD0537-004 Rev A (see the module docs) — there is no live payShield in
 //! this environment.
+//!
+//! The KCV probe is a payShield-specific facility, so this whole test crate is
+//! Thales-gated: with `--no-default-features` it compiles to nothing.
+#![cfg(feature = "thales")]
 
 mod common;
 

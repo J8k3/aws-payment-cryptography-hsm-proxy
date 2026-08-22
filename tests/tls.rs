@@ -5,6 +5,10 @@
 //! a `tokio-rustls` client that trusts the test CA and sends a Thales B2
 //! heartbeat (the lightest possible round-trip — no APC call). The handshake
 //! completing and the heartbeat round-trip succeeding is what we're proving.
+//!
+//! payShield-specific: this crate exercises Thales wire frames, so it is
+//! feature-gated and compiles to nothing under `--no-default-features`.
+#![cfg(feature = "thales")]
 
 mod common;
 
@@ -55,7 +59,7 @@ async fn inbound_tls_b2_heartbeat() {
     let dir = TempDir::new();
     let certs = TlsCerts::generate(&dir.path, "localhost");
 
-    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+    let proxy = ProxyProcess::spawn_in_async_test(&ProxyConfigInput {
         vendor: "thales_payshield",
         hsm_host: "127.0.0.1",
         hsm_port: 1, // unused — B2 is handled locally
@@ -83,9 +87,7 @@ async fn inbound_tls_b2_heartbeat() {
     let frame = thales_b2_frame();
     stream.write_all(&frame).await.expect("write B2 frame");
 
-    let mut resp = vec![0u8; 4096];
-    let n = stream.read(&mut resp).await.expect("read TLS response");
-    resp.truncate(n);
+    let resp = common::read_framed_async(&mut stream).await;
 
     assert!(
         resp.len() >= 8,
@@ -111,7 +113,7 @@ async fn inbound_tls_rejects_plaintext_client() {
     let dir = TempDir::new();
     let certs = TlsCerts::generate(&dir.path, "localhost");
 
-    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+    let proxy = ProxyProcess::spawn_in_async_test(&ProxyConfigInput {
         vendor: "thales_payshield",
         hsm_host: "127.0.0.1",
         hsm_port: 1,
@@ -178,7 +180,7 @@ async fn inbound_mtls_b2_heartbeat_with_valid_client_cert() {
     let server_certs = TlsCerts::generate(&dir.path, "localhost");
     let client_cert = server_certs.issue_client_cert(&dir.path, "test-client");
 
-    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+    let proxy = ProxyProcess::spawn_in_async_test(&ProxyConfigInput {
         vendor: "thales_payshield",
         hsm_host: "127.0.0.1",
         hsm_port: 1,
@@ -206,9 +208,7 @@ async fn inbound_mtls_b2_heartbeat_with_valid_client_cert() {
     let frame = thales_b2_frame();
     stream.write_all(&frame).await.expect("write B2 frame");
 
-    let mut resp = vec![0u8; 4096];
-    let n = stream.read(&mut resp).await.expect("read response");
-    resp.truncate(n);
+    let resp = common::read_framed_async(&mut stream).await;
 
     assert!(resp.len() >= 8, "expected framed response");
     let error_code = &resp[6..8];
@@ -228,7 +228,7 @@ async fn inbound_mtls_rejects_client_without_cert() {
     let dir = TempDir::new();
     let server_certs = TlsCerts::generate(&dir.path, "localhost");
 
-    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+    let proxy = ProxyProcess::spawn_in_async_test(&ProxyConfigInput {
         vendor: "thales_payshield",
         hsm_host: "127.0.0.1",
         hsm_port: 1,
@@ -289,7 +289,7 @@ async fn inbound_mtls_rejects_client_with_wrong_ca_cert() {
     let other_ca = TlsCerts::generate(&other_dir.path, "other-localhost");
     let untrusted_client = other_ca.issue_client_cert(&client_dir.path, "untrusted-client");
 
-    let proxy = ProxyProcess::spawn(&ProxyConfigInput {
+    let proxy = ProxyProcess::spawn_in_async_test(&ProxyConfigInput {
         vendor: "thales_payshield",
         hsm_host: "127.0.0.1",
         hsm_port: 1,
