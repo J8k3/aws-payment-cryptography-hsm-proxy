@@ -4311,11 +4311,12 @@ async fn arqc_verify_js_differential() -> anyhow::Result<()> {
 // derivation). This differential confirms the proxy's wire parse + EmvMac mapping
 // equals a direct APC generate_mac(EmvMac) with the same fields, swept across the
 // reachable Scheme IDs:
-//   idx%5==0  JU '1' UnionPay  -> EMV2000    + ATC
+//   idx%6==0  JU '1' UnionPay  -> EMV2000    + ATC
 //         1  KU '0' Visa       -> VISA       + ATC
 //         2  KU '1' Mastercard -> MASTERCARD + AC (8-byte RANDi)
 //         3  KU '2' Amex       -> AMEX       + ATC
 //         4  KU '5' JCB CVN04  -> EMV_COMMON + AC (length-prefixed message)
+//         5  KU '6' UnionPay   -> UNION_PAY  + ATC (2B ATC + padding flag)
 const SMI_E2_WIRE_LABEL: &str = "U0000000000000000000000000000SME2";
 
 /// Encode a JU Mode-0 wire: mode '0' scheme '1' key PAN/Seq(8B) ATC(2B)
@@ -4349,6 +4350,22 @@ fn encode_ku(
     if length_prefixed {
         v.extend_from_slice(format!("{:04X}", msg.len()).as_bytes());
     }
+    v.extend_from_slice(msg);
+    v.push(0x3B);
+    v
+}
+
+/// Encode a KU Mode-0 wire for scheme '6' (UnionPay). Its shape differs from the
+/// other KU schemes: the session-key-data field is the 2-byte ATC rather than the
+/// 8-byte form, a Padding Flag follows it (KU carries that flag for no other
+/// scheme), and the message is 4H length-prefixed.
+fn encode_ku6(key_label: &str, pan_seq: &[u8], atc: [u8; 2], msg: &[u8]) -> Vec<u8> {
+    let mut v = vec![b'0', b'6'];
+    v.extend_from_slice(key_label.as_bytes());
+    v.extend_from_slice(pan_seq);
+    v.extend_from_slice(&atc);
+    v.push(b'0'); // padding flag: not padded
+    v.extend_from_slice(format!("{:04X}", msg.len()).as_bytes());
     v.extend_from_slice(msg);
     v.push(0x3B);
     v
@@ -4425,7 +4442,7 @@ async fn issuer_script_mac_differential() -> anyhow::Result<()> {
         let padded_msg_hex = hex_upper(&emv_pad(&msg));
 
         // (command, wire, session_mode, session_value) per swept scheme.
-        let variant = case_idx % 5;
+        let variant = case_idx % 6;
         let (cmd, wire, session_mode, session_value): (
             &[u8],
             Vec<u8>,
@@ -4454,6 +4471,12 @@ async fn issuer_script_mac_differential() -> anyhow::Result<()> {
                 b"KU",
                 encode_ku(&e2_label, b'2', &pan_seq, atc_skd, &msg, false),
                 SessionKeyDerivationMode::Amex,
+                SessionKeyDerivationValue::ApplicationTransactionCounter(atc_hex.clone()),
+            ),
+            5 => (
+                b"KU",
+                encode_ku6(&e2_label, &pan_seq, atc, &msg),
+                SessionKeyDerivationMode::UnionPay,
                 SessionKeyDerivationValue::ApplicationTransactionCounter(atc_hex.clone()),
             ),
             _ => (

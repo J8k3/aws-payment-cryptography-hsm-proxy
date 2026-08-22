@@ -52,9 +52,10 @@ use crate::key_map::KeyDescriptor;
 ///   KU '1' Mastercard M/Chip → MC       + AC    (session-key data = 8-byte RANDi → AC)
 ///   KU '2' Amex AEIPS        → AMEX     + ATC   (session-key data = 2-byte ATC, left-zero-padded to 8B)
 ///   KU '5' JCB CVN04         → EMV_COMMON + AC  (session-key data = 8-byte Application Cryptogram)
+///   KU '6' UnionPay          → UNION_PAY  + ATC (2-byte ATC + Padding Flag — own wire shape)
 ///
-/// Gated: KU '3'/'4' (JCB CVN01/02 — no APC session mode: no-session-key / JCB SKD),
-/// KU '6' (UnionPay-in-KU) and everything on KY.
+/// Gated: KU '3'/'4' (JCB CVN01/02 — no APC session mode: no-session-key / JCB SKD)
+/// and everything on KY.
 pub struct IssuerScriptMacHandler;
 
 /// The value that seeds APC's session-key derivation, as required per mode.
@@ -201,6 +202,32 @@ fn parse_ku(payload: &[u8]) -> Result<SmiFields, ProxyError> {
         read_pan_seq("KU", b, o).map(|(pan, seq, next)| ((pan, seq), next - o))
     })?;
 
+    // Scheme '6' (UnionPay) has its own wire shape: the Integrity Session Key Data
+    // field is the 2-byte ATC rather than the 8-byte form, and a Padding Flag
+    // follows it — KU carries that flag for no other scheme (PUGD0537-004 Rev A
+    // p.475). The core manual enumerates the field's meaning for '0'-'5' and omits
+    // '6', but JU — the same CUP 4.2 scheme as a legacy command — spells the field
+    // out as "ATC 2B Application Transaction Counter" over an otherwise identical
+    // layout (PUGD0538-003 §7 p.124), which is what fixes the seed here.
+    if scheme == b'6' {
+        let atc = bytes_to_hex(r.take(2, "ATC")?);
+        r.byte("padding flag")?; // consumed; APC pads the message itself
+        let message_raw = r.parse_with(|b, o| {
+            read_len_prefixed_message("KU", b, o).map(|(m, next)| (m, next - o))
+        })?;
+        r.expect_byte(0x3B, "delimiter")?;
+        return Ok(SmiFields {
+            key_id,
+            pan,
+            pan_seq,
+            mapping: SmiMapping {
+                session_mode: SessionKeyDerivationMode::UnionPay,
+                value: SmiValue::Atc(atc),
+            },
+            message: message_for_apc(message_raw, false),
+        });
+    }
+
     // Integrity Session Key Data — 8 bytes for schemes 0/1/2/5.
     let skd = r.take(8, "integrity session key data")?;
 
@@ -233,18 +260,6 @@ fn parse_ku(payload: &[u8]) -> Result<SmiFields, ProxyError> {
                  (no-session-key / JCB SKD)",
                 scheme as char
             )))
-        }
-        b'6' => {
-            // APC gained SessionKeyDerivationMode::UNION_PAY on 2026-07-15, so the
-            // session method now exists. What is still missing is the seed: the KU
-            // spec enumerates the Integrity Session Key Data for schemes '0'-'5'
-            // (ATC / RANDi / AC) but says nothing for '6' (PUGD0537-004 Rev A
-            // p.475), and APC's SessionKeyDerivationValue requires exactly one of
-            // ATC or AC. Settle it with a live differential before un-gating —
-            // guessing picks a different key and silently emits a wrong MAC.
-            return Err(ProxyError::Unsupported(
-                "KU: scheme '6' (UnionPay) is gated in KU; use JU for UnionPay".into(),
-            ));
         }
         other => {
             return Err(ProxyError::MalformedPayload(format!(
@@ -335,7 +350,7 @@ impl Handler for IssuerScriptMacHandler {
                      MAC → APC generate_mac with EmvMac attributes; APC performs the whole \
                      IMK-SMI → SK-SMI derivation. Scheme → session method: JU '1' → EMV2000+ATC; \
                      KU '0' → VISA+ATC, '1' → Mastercard+AC(RANDi), '2' → AMEX+ATC, '5' → \
-                     EMV_COMMON+AC.",
+                     EMV_COMMON+AC, '6' → UNION_PAY+ATC.",
                 because:
                     "PUGD0537-004 Rev A p.475 (KU); PUGD0538-003 §7 p.124 (JU). Verified live: a \
                      created E2 IMK-SMI (DeriveKey mode) + EmvMac returns a MAC for each session \
@@ -349,26 +364,20 @@ impl Handler for IssuerScriptMacHandler {
                 proof: Proof::LiveTest("issuer_script_mac_differential"),
             },
             Evidence {
-                decision:
-                    "KY, all confidentiality / PIN-change modes (1–4), KU schemes '3'/'4'/'6' \
+                decision: "KY, all confidentiality / PIN-change modes (1–4), KU schemes '3'/'4' \
                      return Unsupported (68).",
                 because: "KY Mode-0 EMV2000 secure-messaging derivation takes an IV-SMI and a \
                      branch/height key-tree that APC's EmvMac does not model (PUGD0537-004 Rev A \
                      p.480), so it cannot be faithfully mapped without a payShield reference. \
                      Modes 1–4 add confidentiality / PIN change and need APC's separate \
                      GenerateMacEmvPinChange operation plus an E1 key. KU '3'/'4' (JCB CVN01/02) \
-                     have no APC session-key method. KU '6' (UnionPay-in-KU) now has one — APC \
-                     added SessionKeyDerivationMode::UNION_PAY on 2026-07-15 — but the KU spec \
-                     does not state the Integrity Session Key Data for scheme '6', and the \
-                     SessionKeyDerivationValue union requires exactly one of ATC or AC; gated \
-                     pending a live differential. Gated rather than emit a MAC under the wrong \
-                     key.",
+                     have no APC session-key method. Gated rather than emit a MAC under the \
+                     wrong key.",
                 wire: WireGrounding::None,
                 crypto: CryptoGrounding::None,
                 proof: Proof::Gated(
                     "KY IV-SMI/key-tree not modelled by APC EmvMac; confidentiality/PIN-change \
-                     need GenerateMacEmvPinChange; JCB has no APC session method; UnionPay-in-KU \
-                     awaits a live differential for its session-key seed",
+                     need GenerateMacEmvPinChange; JCB has no APC session method",
                 ),
             },
         ]
@@ -591,13 +600,45 @@ mod tests {
     }
 
     #[test]
-    fn ku_gates_jcb_and_unionpay_schemes() {
+    fn ku_gates_jcb_schemes() {
         let skd = [0u8; 8];
-        for s in *b"346" {
+        for s in *b"34" {
             assert!(matches!(
                 parse_ku(&ku_payload(s, skd, &[0xAB], false)),
                 Err(ProxyError::Unsupported(_))
             ));
+        }
+    }
+
+    /// KU scheme '6' (UnionPay): 2-byte ATC then a Padding Flag, then a 4H
+    /// length-prefixed message — a different wire shape from schemes '0'-'5'.
+    fn ku6_payload(atc: [u8; 2], padding_flag: u8, msg: &[u8]) -> Vec<u8> {
+        let mut v = vec![b'0', b'6'];
+        v.extend_from_slice(&key32());
+        v.extend_from_slice(&PAN_SEQ_BCD);
+        v.extend_from_slice(&atc);
+        v.push(padding_flag);
+        v.extend_from_slice(format!("{:04X}", msg.len()).as_bytes());
+        v.extend_from_slice(msg);
+        v.push(0x3B);
+        v
+    }
+
+    #[test]
+    fn ku_unionpay_scheme6_atc() {
+        let f = parse_ku(&ku6_payload([0x00, 0x2A], b'0', &[0xDE, 0xAD])).unwrap();
+        assert!(matches!(
+            f.mapping.session_mode,
+            SessionKeyDerivationMode::UnionPay
+        ));
+        assert!(matches!(f.mapping.value, SmiValue::Atc(ref a) if a == "002A"));
+    }
+
+    #[test]
+    fn ku_unionpay_scheme6_accepts_either_padding_flag() {
+        for flag in *b"01" {
+            let f = parse_ku(&ku6_payload([0x12, 0x34], flag, &[0xAB])).unwrap();
+            assert!(matches!(f.mapping.value, SmiValue::Atc(ref a) if a == "1234"));
         }
     }
 

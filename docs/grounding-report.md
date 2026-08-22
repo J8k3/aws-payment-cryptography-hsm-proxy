@@ -138,12 +138,12 @@ Evidence for *why* each handler behaves as it does and *how* it was verified. Ge
 
 ## `JU`, `KU`, `KY`
 
-- **JU (UnionPay CUP) and KU Mode-0 (integrity only) generate an issuer-script MAC → APC generate_mac with EmvMac attributes; APC performs the whole IMK-SMI → SK-SMI derivation. Scheme → session method: JU '1' → EMV2000+ATC; KU '0' → VISA+ATC, '1' → Mastercard+AC(RANDi), '2' → AMEX+ATC, '5' → EMV_COMMON+AC.**
+- **JU (UnionPay CUP) and KU Mode-0 (integrity only) generate an issuer-script MAC → APC generate_mac with EmvMac attributes; APC performs the whole IMK-SMI → SK-SMI derivation. Scheme → session method: JU '1' → EMV2000+ATC; KU '0' → VISA+ATC, '1' → Mastercard+AC(RANDi), '2' → AMEX+ATC, '5' → EMV_COMMON+AC, '6' → UNION_PAY+ATC.**
   - wire `diff-xprov` · crypto `apc` · live test `issuer_script_mac_differential`
   - PUGD0537-004 Rev A p.475 (KU); PUGD0538-003 §7 p.124 (JU). Verified live: a created E2 IMK-SMI (DeriveKey mode) + EmvMac returns a MAC for each session method, and the SessionKeyDerivationValue union requires ATC for EMV2000/AMEX/VISA and ApplicationCryptogram for EMV_COMMON/MASTERCARD. The differential confirms the proxy's wire parse + EmvMac mapping equals a direct APC generate_mac. Crypto grade is `apc` (agrees with APC): unlike the ARQC family there is not yet an independent from-spec SMI-derivation anchor.
-- **KY, all confidentiality / PIN-change modes (1–4), KU schemes '3'/'4'/'6' return Unsupported (68).**
-  - wire `none` · crypto `none` · gated (68): KY IV-SMI/key-tree not modelled by APC EmvMac; confidentiality/PIN-change need GenerateMacEmvPinChange; JCB has no APC session method; UnionPay-in-KU awaits a live differential for its session-key seed
-  - KY Mode-0 EMV2000 secure-messaging derivation takes an IV-SMI and a branch/height key-tree that APC's EmvMac does not model (PUGD0537-004 Rev A p.480), so it cannot be faithfully mapped without a payShield reference. Modes 1–4 add confidentiality / PIN change and need APC's separate GenerateMacEmvPinChange operation plus an E1 key. KU '3'/'4' (JCB CVN01/02) have no APC session-key method. KU '6' (UnionPay-in-KU) now has one — APC added SessionKeyDerivationMode::UNION_PAY on 2026-07-15 — but the KU spec does not state the Integrity Session Key Data for scheme '6', and the SessionKeyDerivationValue union requires exactly one of ATC or AC; gated pending a live differential. Gated rather than emit a MAC under the wrong key.
+- **KY, all confidentiality / PIN-change modes (1–4), KU schemes '3'/'4' return Unsupported (68).**
+  - wire `none` · crypto `none` · gated (68): KY IV-SMI/key-tree not modelled by APC EmvMac; confidentiality/PIN-change need GenerateMacEmvPinChange; JCB has no APC session method
+  - KY Mode-0 EMV2000 secure-messaging derivation takes an IV-SMI and a branch/height key-tree that APC's EmvMac does not model (PUGD0537-004 Rev A p.480), so it cannot be faithfully mapped without a payShield reference. Modes 1–4 add confidentiality / PIN change and need APC's separate GenerateMacEmvPinChange operation plus an E1 key. KU '3'/'4' (JCB CVN01/02) have no APC session-key method. Gated rather than emit a MAC under the wrong key.
 
 ## `K0`
 
