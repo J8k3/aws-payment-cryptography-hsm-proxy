@@ -11,34 +11,11 @@ mod common;
 
 use std::io::Write;
 use std::net::TcpStream;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use common::mock_hsm::{self, MockBehavior, MockHsm, TransportMode};
 use common::proxy_process::{ForwardTlsInput, ProxyConfigInput, ProxyProcess};
 use common::tls_certs::TlsCerts;
-
-struct TempDir {
-    path: PathBuf,
-}
-
-impl TempDir {
-    fn new() -> Self {
-        let pid = std::process::id();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let path = std::env::temp_dir().join(format!("apc-proxy-fwdtls-test-{pid}-{nanos}"));
-        std::fs::create_dir_all(&path).expect("create temp dir");
-        Self { path }
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
 
 fn thales_frame(cmd: [u8; 2], payload: &[u8]) -> Vec<u8> {
     let body_len = 2 + cmd.len() + payload.len();
@@ -72,7 +49,7 @@ fn read_pem(path: &std::path::Path) -> String {
 /// returns the mock's response verbatim.
 #[tokio::test(flavor = "multi_thread")]
 async fn forward_tls_happy_path() {
-    let dir = TempDir::new();
+    let dir = common::tempdir::TempDir::with_prefix("apc-proxy-fwdtls-test");
     let certs = TlsCerts::generate(&dir.path, "localhost");
 
     let server_cfg = mock_hsm::server_config_from_cert_pem(
@@ -129,7 +106,7 @@ async fn forward_tls_happy_path() {
 /// validates against its own CA. Happy path round-trip.
 #[tokio::test(flavor = "multi_thread")]
 async fn forward_mtls_happy_path() {
-    let dir = TempDir::new();
+    let dir = common::tempdir::TempDir::with_prefix("apc-proxy-fwdtls-test");
     let certs = TlsCerts::generate(&dir.path, "localhost");
     let client_cert = certs.issue_client_cert(&dir.path, "proxy-client");
 
@@ -185,8 +162,8 @@ async fn forward_tls_rejects_untrusted_hsm_cert() {
     // Two separate temp dirs — TlsCerts writes server.crt/key/ca.crt with
     // fixed names, so reusing one dir would have the second call overwrite
     // the first and both "fixtures" would resolve to the same files on disk.
-    let mock_dir = TempDir::new();
-    let proxy_trust_dir = TempDir::new();
+    let mock_dir = common::tempdir::TempDir::with_prefix("apc-proxy-fwdtls-test");
+    let proxy_trust_dir = common::tempdir::TempDir::with_prefix("apc-proxy-fwdtls-test");
     let mock_certs = TlsCerts::generate(&mock_dir.path, "localhost");
     // Different CA entirely — the proxy will be told to trust this one.
     let proxy_trust = TlsCerts::generate(&proxy_trust_dir.path, "localhost");

@@ -3,6 +3,7 @@
 
 pub mod mock_hsm;
 pub mod proxy_process;
+pub mod tempdir;
 pub mod tls_certs;
 
 /// Install the rustls crypto provider selected by cargo feature, mirroring
