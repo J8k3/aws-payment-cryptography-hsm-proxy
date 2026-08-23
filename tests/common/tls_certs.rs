@@ -19,8 +19,10 @@ pub struct TlsCerts {
     /// client so it trusts the server cert.
     pub ca_cert_der: rustls::pki_types::CertificateDer<'static>,
     // Retained so we can sign additional certs (client certs) with the same CA.
-    ca_key: rcgen::KeyPair,
-    ca_cert: rcgen::Certificate,
+    // rcgen 0.14 replaced the (cert, key) pair passed to `signed_by` with an
+    // `Issuer`; `CertifiedIssuer` is that plus the CA's own certificate, and it
+    // derefs to `Issuer`, so it carries everything the pair used to.
+    ca: rcgen::CertifiedIssuer<'static, rcgen::KeyPair>,
 }
 
 #[allow(dead_code)]
@@ -48,8 +50,7 @@ impl TlsCerts {
         ca_params
             .distinguished_name
             .push(rcgen::DnType::CommonName, "apc-proxy test CA");
-        let ca_cert = ca_params
-            .self_signed(&ca_key)
+        let ca = rcgen::CertifiedIssuer::self_signed(ca_params, ca_key)
             .unwrap_or_else(|e| panic!("self-sign ca: {e}"));
 
         // Leaf server cert signed by the CA.
@@ -61,7 +62,7 @@ impl TlsCerts {
             .distinguished_name
             .push(rcgen::DnType::CommonName, server_name);
         let leaf_cert = leaf_params
-            .signed_by(&leaf_key, &ca_cert, &ca_key)
+            .signed_by(&leaf_key, &ca)
             .unwrap_or_else(|e| panic!("sign leaf: {e}"));
 
         let cert_path = dir.join("server.crt");
@@ -69,17 +70,16 @@ impl TlsCerts {
         let ca_cert_pem_path = dir.join("ca.crt");
         std::fs::write(&cert_path, leaf_cert.pem()).expect("write cert");
         std::fs::write(&key_path, leaf_key.serialize_pem()).expect("write key");
-        std::fs::write(&ca_cert_pem_path, ca_cert.pem()).expect("write ca cert");
+        std::fs::write(&ca_cert_pem_path, ca.pem()).expect("write ca cert");
 
-        let ca_cert_der = rustls::pki_types::CertificateDer::from(ca_cert.der().to_vec());
+        let ca_cert_der = rustls::pki_types::CertificateDer::from(ca.der().to_vec());
 
         Self {
             cert_path,
             key_path,
             ca_cert_pem_path,
             ca_cert_der,
-            ca_key,
-            ca_cert,
+            ca,
         }
     }
 
@@ -115,7 +115,7 @@ impl TlsCerts {
             .distinguished_name
             .push(rcgen::DnType::CommonName, name);
         let cert = params
-            .signed_by(&client_key, &self.ca_cert, &self.ca_key)
+            .signed_by(&client_key, &self.ca)
             .unwrap_or_else(|e| panic!("sign client cert: {e}"));
 
         let cert_path = dir.join(format!("{name}.crt"));
