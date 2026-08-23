@@ -206,6 +206,96 @@ Both must exit 0. A warning is a bug waiting to happen — treat it as one.
 
 Never add a blanket `#![allow(...)]` at the file or crate level without explicit user approval.
 
+## Tracking AWS Payment Cryptography Releases
+
+AWS ships APC changes that silently invalidate this proxy's mappings. Two proven cases: APC
+had no UnionPay session-key method until 2026-07-15, and `ReuseLastGeneratedToken` appeared on
+`GetParametersForImport`/`Export` on 2026-04-03 without any new operation. Check periodically —
+this is not automated here.
+
+### Step 1 — what changed
+
+**[awsapichanges.info](https://awsapichanges.info/)** — pre-digested, one page per service.
+Start here; it reads in seconds:
+- <https://awsapichanges.info/archive/service/controlplane.payment-cryptography/>
+- <https://awsapichanges.info/archive/service/dataplane.payment-cryptography/>
+
+It lists "N new, M updated methods" per release with the AWS blurb. Caveat: it does **not**
+distinguish documentation-only updates from real shape changes, so confirm anything that matters.
+
+**botocore git history** — authoritative, exact diffs. The Rust SDK is generated from the same
+service models, so botocore is the fastest way to read a precise shape change:
+
+```bash
+gh api "repos/boto/botocore/commits?path=botocore/data/payment-cryptography&since=<DATE>" \
+  -q '.[] | "\(.commit.author.date[0:10])  \(.sha[0:8])"'
+# data plane: path=botocore/data/payment-cryptography-data
+gh api repos/boto/botocore/commits/<sha> \
+  -q '.files[]|select(.filename|test("payment-cryptography"))|.patch'
+```
+
+### Step 2 — what the typed SDK does and does not protect you from
+
+`aws-sdk-paymentcryptography{,data}` is generated and typed, which removes one failure class
+entirely and leaves three open.
+
+**Cannot happen here:** a wrong parameter name. A builder method that does not exist is a
+compile error. (The Python MCP server has no such protection — its `export_key` sent
+`KeyIdentifier` instead of `ExportKeyIdentifier` and was broken from the 2023 service launch
+until 2026-08-23, because a `MagicMock` accepts any keyword argument.)
+
+**Still open:**
+
+1. **A new optional parameter is simply never set.** Nothing warns. This is the
+   `ReuseLastGeneratedToken` case — the builder gained a method and no existing code called it.
+2. **A new operation is not wired to any handler.** Nothing warns.
+3. **A new enum variant falls through a `match`.** The SDK models enums as non-exhaustive with
+   an `Unknown` variant, so a new `SessionKeyDerivationMode` compiles fine and fails at runtime.
+   Prefer an explicit arm that returns `unsupported` over a silent catch-all.
+
+For 1 and 2, diff the builder surface against what the handlers call after bumping the SDK.
+
+### Step 3 — the SDK version pin is part of the answer
+
+A feature is unreachable until the crate carrying its model is pulled in. `Cargo.toml` already
+records why one floor exists:
+
+```toml
+aws-sdk-paymentcryptographydata = "1.110" # >=1.110 for generate_auth_request_cryptogram
+```
+
+Map a model date to a crate version via crates.io, then check `Cargo.lock` for what actually
+resolved:
+
+```bash
+# crates.io rejects requests without a User-Agent — the header is required, not optional.
+curl -s -H "User-Agent: apc-hsm-proxy-release-check" \
+  https://crates.io/api/v1/crates/aws-sdk-paymentcryptographydata/versions \
+  | python3 -c "import json,sys; [print(v['num'], v['created_at'][:10]) for v in json.load(sys.stdin)['versions'][:15]]"
+grep -A2 'name = "aws-sdk-paymentcryptographydata"' Cargo.lock
+```
+
+Record the reason in the `Cargo.toml` comment whenever a floor is raised for a specific feature.
+
+### Step 4 — settle mapping questions with a live differential test
+
+When AWS adds a method that overlaps one already in use, a live test answers what documentation
+cannot. The JS/UnionPay case is the template: mint an ARQC under the old method, verify under
+the new one, confirm accept across randomized inputs, and confirm a one-bit-corrupted cryptogram
+is still rejected. That is what established EMV2000 and UnionPay derive identically over
+PAN + PAN seq + ATC, so the switch was for scheme faithfulness rather than a behaviour change —
+see `arqc_verify_js_differential` and the grounding block in
+`src/handlers/thales/unionpay_arqc.rs`. Without the negative control an "accept" proves nothing.
+
+Write the outcome back to the MCP server per **Knowledge Contribution** above.
+
+### Cross-check against the MCP server
+
+`aws-payment-cryptography-mcp` has `tests/test_api_surface.py`, which fails CI when AWS adds an
+operation or a parameter to an operation it implements. It covers the Python server only, but a
+failure there is an early warning for this repo — the same model change usually lands in the
+Rust SDK within days.
+
 ## Implementation State and Gap Analysis
 
 ### How to determine what is implemented
