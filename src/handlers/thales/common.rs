@@ -9,7 +9,7 @@ use crate::key_map::{KeyBlockMeta, KeyDescriptor};
 use aws_sdk_paymentcryptographydata::types::{
     CryptogramAuthResponse, CryptogramVerificationArpcMethod1, CryptogramVerificationArpcMethod2,
     MajorKeyDerivationMode, SessionKeyAmex, SessionKeyDerivation, SessionKeyEmv2000,
-    SessionKeyEmvCommon, SessionKeyMastercard, SessionKeyVisa,
+    SessionKeyEmvCommon, SessionKeyMastercard, SessionKeyUnionPay, SessionKeyVisa,
 };
 
 /// Apply EMV (ISO 9797-1 method 2) padding to ARQC MAC input: append a single
@@ -73,6 +73,12 @@ pub enum EmvSession {
     Amex,
     /// Visa (PAN + PAN seq) — APC's `SessionKeyVisa`, no ATC/UN in derivation.
     Visa,
+    /// UnionPay / CUP (PAN + PAN seq + ATC) — APC's `SessionKeyUnionPay`, no UN.
+    ///
+    /// APC added this on 2026-07-15; before that the closest available method was
+    /// EMV2000, which takes the same three inputs, so CUP was mapped onto it as an
+    /// approximation. It now has a native method.
+    UnionPay,
 }
 
 /// Map an AWS SDK builder error to a `ProxyError`. Shared by the handlers that
@@ -88,9 +94,9 @@ pub(crate) fn build_err(e: aws_sdk_paymentcryptographydata::error::BuildError) -
 /// Build the APC `SessionKeyDerivation` for `method`.
 ///
 /// `un` (unpredictable number) is consumed only by the Mastercard method; `atc`
-/// is consumed by EMV Common / EMV2000 / Mastercard, but not by Amex or Visa
-/// (both derive from PAN + PAN seq only). Other arguments unused by a given
-/// method are ignored.
+/// is consumed by EMV Common / EMV2000 / Mastercard / UnionPay, but not by Amex
+/// or Visa (both derive from PAN + PAN seq only). Other arguments unused by a
+/// given method are ignored.
 pub fn build_session_key(
     method: EmvSession,
     pan: &str,
@@ -135,6 +141,14 @@ pub fn build_session_key(
             SessionKeyVisa::builder()
                 .primary_account_number(pan)
                 .pan_sequence_number(pan_seq)
+                .build()
+                .map_err(build_err)?,
+        ),
+        EmvSession::UnionPay => SessionKeyDerivation::UnionPay(
+            SessionKeyUnionPay::builder()
+                .primary_account_number(pan)
+                .pan_sequence_number(pan_seq)
+                .application_transaction_counter(atc)
                 .build()
                 .map_err(build_err)?,
         ),

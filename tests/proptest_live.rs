@@ -4157,10 +4157,16 @@ async fn arqc_verify_ks_differential() -> anyhow::Result<()> {
 
 // ── ARQC accept-path JS (UnionPay, live differential) ────────────────────────
 //
-// JS uses the SAME Emv2000 + Option A derivation as KS, so the ARQC is minted the
-// same way; only the wire frame differs (UnionPay/CUP layout, per PUGD0538-003
-// §7 p.122). APC mints a valid ARQC, the proxy JS handler verifies it and ACCEPTS,
-// and a corrupted ARQC is rejected (JT / error 01).
+// JS is UnionPay/CUP + Option A (PUGD0538-003 §7 p.122). APC mints a valid ARQC,
+// the proxy JS handler verifies it and ACCEPTS, and a corrupted ARQC is rejected
+// (JT / error 01).
+//
+// The mint side uses SessionKeyUnionPay, matching what the handler now sends. It
+// previously used SessionKeyEmv2000 on both sides, because APC had no UnionPay
+// method until 2026-07-15 and CUP was approximated onto EMV2000 (same three
+// inputs). Minting with UnionPay while the handler still sent EMV2000 — or the
+// reverse — is exactly the discriminator: the two agree only if the derivations
+// are identical, and a mismatch surfaces as a rejected valid cryptogram.
 const JS_E0_WIRE_LABEL: &str = "U0000000000000000000000000000JSE0";
 
 /// Encode a JS (UnionPay) verify-only wire frame. Binary fields except TxnLen (2H
@@ -4194,7 +4200,7 @@ async fn arqc_verify_js_differential() -> anyhow::Result<()> {
 
     use apc_proxy::handlers::thales::common::emv_pad;
     use aws_sdk_paymentcryptographydata::types::{
-        MajorKeyDerivationMode, SessionKeyDerivation, SessionKeyEmv2000,
+        MajorKeyDerivationMode, SessionKeyDerivation, SessionKeyUnionPay,
     };
 
     let (cpc, data) = aws_clients().await;
@@ -4236,8 +4242,8 @@ async fn arqc_verify_js_differential() -> anyhow::Result<()> {
         let txn = hex_str_to_bytes(&gen_hex_message(&mut rng, txn_len));
         let padded_txn_hex = hex_upper(&emv_pad(&txn));
 
-        let session = SessionKeyDerivation::Emv2000(
-            SessionKeyEmv2000::builder()
+        let session = SessionKeyDerivation::UnionPay(
+            SessionKeyUnionPay::builder()
                 .primary_account_number(&pan)
                 .pan_sequence_number(&seq)
                 .application_transaction_counter(&atc_hex)
@@ -4305,11 +4311,12 @@ async fn arqc_verify_js_differential() -> anyhow::Result<()> {
 // derivation). This differential confirms the proxy's wire parse + EmvMac mapping
 // equals a direct APC generate_mac(EmvMac) with the same fields, swept across the
 // reachable Scheme IDs:
-//   idx%5==0  JU '1' UnionPay  -> EMV2000    + ATC
+//   idx%6==0  JU '1' UnionPay  -> EMV2000    + ATC
 //         1  KU '0' Visa       -> VISA       + ATC
 //         2  KU '1' Mastercard -> MASTERCARD + AC (8-byte RANDi)
 //         3  KU '2' Amex       -> AMEX       + ATC
 //         4  KU '5' JCB CVN04  -> EMV_COMMON + AC (length-prefixed message)
+//         5  KU '6' UnionPay   -> UNION_PAY  + ATC (2B ATC; padding flag alternates)
 const SMI_E2_WIRE_LABEL: &str = "U0000000000000000000000000000SME2";
 
 /// Encode a JU Mode-0 wire: mode '0' scheme '1' key PAN/Seq(8B) ATC(2B)
@@ -4344,6 +4351,43 @@ fn encode_ku(
         v.extend_from_slice(format!("{:04X}", msg.len()).as_bytes());
     }
     v.extend_from_slice(msg);
+    v.push(0x3B);
+    v
+}
+
+/// Encode a KU Mode-0 wire for scheme '6' (UnionPay). Its shape differs from the
+/// other KU schemes: the session-key-data field is the 2-byte ATC rather than the
+/// 8-byte form, a Padding Flag follows it (KU carries that flag for no other
+/// scheme), and the message is 4H length-prefixed.
+/// `pre_padded` selects the Padding Flag path: `false` sends the raw message under
+/// flag '0' (the proxy EMV-pads it), `true` sends the already-padded bytes under
+/// flag '1' (the proxy must pass them through). Both must yield the same MAC, so
+/// the same oracle covers each — which is what makes the flag actually tested
+/// rather than merely consumed.
+fn encode_ku6(
+    key_label: &str,
+    pan_seq: &[u8],
+    atc: [u8; 2],
+    msg: &[u8],
+    pre_padded: bool,
+) -> Vec<u8> {
+    use apc_proxy::handlers::thales::common::emv_pad;
+
+    let padded;
+    let (flag, body): (u8, &[u8]) = if pre_padded {
+        padded = emv_pad(msg);
+        (b'1', &padded)
+    } else {
+        (b'0', msg)
+    };
+
+    let mut v = vec![b'0', b'6'];
+    v.extend_from_slice(key_label.as_bytes());
+    v.extend_from_slice(pan_seq);
+    v.extend_from_slice(&atc);
+    v.push(flag);
+    v.extend_from_slice(format!("{:04X}", body.len()).as_bytes());
+    v.extend_from_slice(body);
     v.push(0x3B);
     v
 }
@@ -4419,7 +4463,7 @@ async fn issuer_script_mac_differential() -> anyhow::Result<()> {
         let padded_msg_hex = hex_upper(&emv_pad(&msg));
 
         // (command, wire, session_mode, session_value) per swept scheme.
-        let variant = case_idx % 5;
+        let variant = case_idx % 6;
         let (cmd, wire, session_mode, session_value): (
             &[u8],
             Vec<u8>,
@@ -4448,6 +4492,13 @@ async fn issuer_script_mac_differential() -> anyhow::Result<()> {
                 b"KU",
                 encode_ku(&e2_label, b'2', &pan_seq, atc_skd, &msg, false),
                 SessionKeyDerivationMode::Amex,
+                SessionKeyDerivationValue::ApplicationTransactionCounter(atc_hex.clone()),
+            ),
+            5 => (
+                b"KU",
+                // Alternate the Padding Flag across cases so both paths are covered.
+                encode_ku6(&e2_label, &pan_seq, atc, &msg, case_idx % 12 >= 6),
+                SessionKeyDerivationMode::UnionPay,
                 SessionKeyDerivationValue::ApplicationTransactionCounter(atc_hex.clone()),
             ),
             _ => (
@@ -5033,6 +5084,7 @@ async fn arqc_verify_kw_differential() -> anyhow::Result<()> {
     use apc_proxy::handlers::thales::common::emv_pad;
     use aws_sdk_paymentcryptographydata::types::{
         MajorKeyDerivationMode, SessionKeyDerivation, SessionKeyEmv2000, SessionKeyEmvCommon,
+        SessionKeyUnionPay,
     };
 
     let (cpc, data) = aws_clients().await;
@@ -5076,33 +5128,42 @@ async fn arqc_verify_kw_differential() -> anyhow::Result<()> {
         let txn = hex_str_to_bytes(&gen_hex_message(&mut rng, txn_len));
         let padded_txn_hex = hex_upper(&emv_pad(&txn));
 
-        // Sweep all four A/B-convention schemes with an explicit Derivation Method
-        // byte of 'A'. Under the Scheme-ID even/odd convention, '1' and '3' (odd)
-        // would derive Option B and fail (no >16-digit PAN); honoring the explicit
-        // byte (#23) gives Option A, so they verify. The Scheme ID selects only the
-        // session-key method: '0'/'1' → EMV2000, '2'/'3' → EMV Common.
-        let (scheme, method_label) = match case_idx % 4 {
+        // Sweep the four A/B-convention schemes plus 'C' (UnionPay), all with an
+        // explicit Derivation Method byte of 'A'. Under the Scheme-ID even/odd
+        // convention, '1' and '3' (odd) would derive Option B and fail (no
+        // >16-digit PAN); honoring the explicit byte (#23) gives Option A, so they
+        // verify. The Scheme ID selects only the session-key method: '0'/'1' →
+        // EMV2000, '2'/'3' → EMV Common, 'C' → UnionPay (PUGD0537-004 Rev A p.471;
+        // APC added the native UnionPay method 2026-07-15).
+        let (scheme, method_label) = match case_idx % 5 {
             0 => (b'0', "sch0 EMV2000"),
             1 => (b'1', "sch1 EMV2000 (odd, byte=A)"),
             2 => (b'2', "sch2 EMV-Common"),
-            _ => (b'3', "sch3 EMV-Common (odd, byte=A)"),
+            3 => (b'3', "sch3 EMV-Common (odd, byte=A)"),
+            _ => (b'C', "schC UnionPay"),
         };
-        let session = if scheme == b'2' || scheme == b'3' {
-            SessionKeyDerivation::EmvCommon(
+        let session = match scheme {
+            b'2' | b'3' => SessionKeyDerivation::EmvCommon(
                 SessionKeyEmvCommon::builder()
                     .primary_account_number(&pan)
                     .pan_sequence_number(&seq)
                     .application_transaction_counter(&atc_hex)
                     .build()?,
-            )
-        } else {
-            SessionKeyDerivation::Emv2000(
+            ),
+            b'C' => SessionKeyDerivation::UnionPay(
+                SessionKeyUnionPay::builder()
+                    .primary_account_number(&pan)
+                    .pan_sequence_number(&seq)
+                    .application_transaction_counter(&atc_hex)
+                    .build()?,
+            ),
+            _ => SessionKeyDerivation::Emv2000(
                 SessionKeyEmv2000::builder()
                     .primary_account_number(&pan)
                     .pan_sequence_number(&seq)
                     .application_transaction_counter(&atc_hex)
                     .build()?,
-            )
+            ),
         };
 
         let arqc_hex = data

@@ -24,7 +24,8 @@ use crate::key_map::KeyDescriptor;
 ///                              '0'=Option A + EMV2000   '1'=Option B + EMV2000
 ///                              '2'=Option A + EMV Common '3'=Option B + EMV Common
 ///                              '5'=MC cloud: Option A + EMV Common
-///                              (Option C '9', JCB, UnionPay, cloud/LUK: no APC map)
+///                              'C'=Option A + UnionPay (CUP Vers 4.2)
+///                              (Option C '9', JCB, cloud/LUK: no APC map)
 ///   Derivation Method 1A ASCII 'A'/'B' (consumed; see note below)
 ///   Key Type         3H ASCII  consumed
 ///   Key              var       16H | 'U'+32H | 'T'+48H
@@ -97,9 +98,14 @@ fn parse_kw(payload: &[u8]) -> Result<KwFields, ProxyError> {
     let session = match scheme {
         b'0' | b'1' => EmvSession::Emv2000,
         b'2' | b'3' | b'5' => EmvSession::EmvCommon, // '5' = Mastercard cloud
-        b'4' | b'6' | b'7' | b'8' | b'9' | b'A' | b'B' | b'C' => {
+        // 'C' = Union Pay (Vers 4.2): "EMV Option 'A' Card Key Derivation and
+        // Union Pay session key" (PUGD0537-004 Rev A p.471). APC gained a native
+        // UnionPay session method on 2026-07-15; before that this arm had no
+        // equivalent and was rejected with the rest of the group below.
+        b'C' => EmvSession::UnionPay,
+        b'4' | b'6' | b'7' | b'8' | b'9' | b'A' | b'B' => {
             return Err(ProxyError::Unsupported(format!(
-                "KW scheme '{}' (cloud/LUK/Option-C/JCB/UnionPay SKD) has no APC equivalent",
+                "KW scheme '{}' (cloud/LUK/Option-C/JCB SKD) has no APC equivalent",
                 scheme as char
             )))
         }
@@ -185,17 +191,20 @@ impl Handler for KwArqcHandler {
         &[Evidence {
             decision: "KW verifies an ARQC and optionally generates an ARPC for the EMV / \
                        Cloud-Based SKD methods → APC verify_auth_request_cryptogram. The Scheme ID \
-                       selects the session method (EMV2000 / EMV Common); the explicit Derivation \
-                       Method byte ('A'/'B') selects the EMV Option A/B major key and is \
+                       selects the session method (EMV2000 / EMV Common / UnionPay); the explicit \
+                       Derivation Method byte ('A'/'B') selects the EMV Option A/B major key and is \
                        authoritative (#23) rather than inferring it from the Scheme ID's even/odd \
-                       convention. Cloud / LUK / Option-C / JCB / UnionPay SKD schemes are rejected \
-                       as having no APC equivalent.",
+                       convention. Cloud / LUK / Option-C / JCB schemes are rejected as having no \
+                       APC equivalent.",
             because: "PUGD0537-004 Rev A p.471 (KW). Verified live for the Option-A schemes: APC \
                       mints a valid ARQC via generate_auth_request_cryptogram under a created E0 IMK \
                       (DeriveKey mode), the proxy's KW handler verifies it through APC and ACCEPTS \
                       (00), and a one-bit-corrupted ARQC is REJECTED (01), across randomized inputs \
-                      — sweeping scheme '0' (EMV2000) and '2' (EMV Common), both Option A \
-                      (arqc_verify_kw_differential). The Option-B schemes ('1'/'3') need a PAN > 16 \
+                      — sweeping schemes '0'/'1' (EMV2000), '2'/'3' (EMV Common) and 'C' \
+                      (UnionPay, Vers 4.2 — p.471), all Option A \
+                      (arqc_verify_kw_differential). Scheme 'C' maps onto APC's native UnionPay \
+                      session method, added 2026-07-15; it was gated as having no APC equivalent \
+                      before that. The Option-B schemes ('1'/'3') need a PAN > 16 \
                       digits, which the 8-byte BCD PAN field can't carry (see the EMV PAN-length \
                       gap), and the ARPC Method 1/2 generation path stays mock-tested; those are the \
                       next step.",
@@ -353,12 +362,20 @@ mod tests {
 
     #[test]
     fn kw_rejects_unsupported_scheme() {
-        // Option C / JCB / UnionPay / cloud-LUK have no APC equivalent.
+        // Option C / JCB / cloud-LUK have no APC equivalent.
         let payload = kw_prefix(b'0', b'9', b'A', &single_key(), &[]);
         assert!(matches!(
             parse_kw(&payload),
             Err(ProxyError::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn kw_scheme_c_maps_to_unionpay() {
+        // 'C' = Union Pay (Vers 4.2) — PUGD0537-004 Rev A p.471. Gated until APC
+        // added a native UnionPay session method (2026-07-15).
+        let f = parse_kw(&kw_prefix(b'0', b'C', b'A', &single_key(), &[])).unwrap();
+        assert_eq!(f.session, EmvSession::UnionPay);
     }
 
     #[test]
