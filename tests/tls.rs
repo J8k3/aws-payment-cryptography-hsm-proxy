@@ -19,30 +19,6 @@ use tokio_rustls::TlsConnector;
 use common::proxy_process::{ProxyConfigInput, ProxyProcess, TlsInput};
 use common::tls_certs::TlsCerts;
 
-/// Minimal owned temp dir holder — mirrors the one in `proxy_process.rs`
-/// without exposing it. Cleans up on drop.
-struct TempDir {
-    path: std::path::PathBuf,
-}
-
-impl TempDir {
-    fn new() -> Self {
-        let pid = std::process::id();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let path = std::env::temp_dir().join(format!("apc-proxy-tls-test-{pid}-{nanos}"));
-        std::fs::create_dir_all(&path).expect("create temp dir");
-        Self { path }
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
 fn thales_b2_frame() -> Vec<u8> {
     // [2B length][2B header][2B command "B2"]; no payload, body_len = 2+2 = 4.
     let mut out = Vec::with_capacity(6);
@@ -56,7 +32,7 @@ fn thales_b2_frame() -> Vec<u8> {
 /// must round-trip with error code 00.
 #[tokio::test(flavor = "multi_thread")]
 async fn inbound_tls_b2_heartbeat() {
-    let dir = TempDir::new();
+    let dir = common::tempdir::TempDir::with_prefix("apc-proxy-tls-test");
     let certs = TlsCerts::generate(&dir.path, "localhost");
 
     let proxy = ProxyProcess::spawn_in_async_test(&ProxyConfigInput {
@@ -110,7 +86,7 @@ async fn inbound_tls_b2_heartbeat() {
 /// plaintext when TLS is configured.
 #[tokio::test(flavor = "multi_thread")]
 async fn inbound_tls_rejects_plaintext_client() {
-    let dir = TempDir::new();
+    let dir = common::tempdir::TempDir::with_prefix("apc-proxy-tls-test");
     let certs = TlsCerts::generate(&dir.path, "localhost");
 
     let proxy = ProxyProcess::spawn_in_async_test(&ProxyConfigInput {
@@ -176,7 +152,7 @@ async fn inbound_tls_rejects_plaintext_client() {
 /// one signed by the same CA, B2 round-trips with error code 00.
 #[tokio::test(flavor = "multi_thread")]
 async fn inbound_mtls_b2_heartbeat_with_valid_client_cert() {
-    let dir = TempDir::new();
+    let dir = common::tempdir::TempDir::with_prefix("apc-proxy-tls-test");
     let server_certs = TlsCerts::generate(&dir.path, "localhost");
     let client_cert = server_certs.issue_client_cert(&dir.path, "test-client");
 
@@ -225,7 +201,7 @@ async fn inbound_mtls_b2_heartbeat_with_valid_client_cert() {
 /// no Thales response should ever reach the client.
 #[tokio::test(flavor = "multi_thread")]
 async fn inbound_mtls_rejects_client_without_cert() {
-    let dir = TempDir::new();
+    let dir = common::tempdir::TempDir::with_prefix("apc-proxy-tls-test");
     let server_certs = TlsCerts::generate(&dir.path, "localhost");
 
     let proxy = ProxyProcess::spawn_in_async_test(&ProxyConfigInput {
@@ -282,9 +258,9 @@ async fn inbound_mtls_rejects_client_with_wrong_ca_cert() {
     // the first on disk. Without this split, the test would pass for the
     // wrong reason (server cert mismatch with client's expected CA, not
     // client cert mismatch with server's expected CA).
-    let server_dir = TempDir::new();
-    let other_dir = TempDir::new();
-    let client_dir = TempDir::new();
+    let server_dir = common::tempdir::TempDir::with_prefix("apc-proxy-tls-test");
+    let other_dir = common::tempdir::TempDir::with_prefix("apc-proxy-tls-test");
+    let client_dir = common::tempdir::TempDir::with_prefix("apc-proxy-tls-test");
     let server_certs = TlsCerts::generate(&server_dir.path, "localhost");
     let other_ca = TlsCerts::generate(&other_dir.path, "other-localhost");
     let untrusted_client = other_ca.issue_client_cert(&client_dir.path, "untrusted-client");

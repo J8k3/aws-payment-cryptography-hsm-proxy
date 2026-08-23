@@ -38,7 +38,7 @@ pub struct ProxyProcess {
     pub addr: SocketAddr,
     pub discovery_log_path: PathBuf,
     child: Child,
-    _tempdir: tempdir_holder::TempDirHolder,
+    _tempdir: super::tempdir::TempDir,
 }
 
 pub struct ProxyConfigInput<'a> {
@@ -82,7 +82,7 @@ impl ProxyProcess {
     /// connections (poll on TCP connect) or panics on timeout.
     pub fn spawn(input: &ProxyConfigInput<'_>) -> Self {
         let port = free_port();
-        let tempdir = tempdir_holder::TempDirHolder::new();
+        let tempdir = super::tempdir::TempDir::with_prefix("apc-proxy-test");
         let config_path = tempdir.path.join("proxy.yaml");
         let discovery_log_path = tempdir.path.join("discovery.jsonl");
 
@@ -220,35 +220,4 @@ fn locate_binary() -> PathBuf {
         "apc-proxy"
     };
     PathBuf::from("target/debug").join(exe)
-}
-
-mod tempdir_holder {
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-
-    /// Minimal owned temp dir without pulling in the `tempfile` crate as a
-    /// dev-dep. Cleans up on drop. Path uniqueness comes from PID + a
-    /// monotonic counter; collisions across runs are not a concern since the
-    /// dir is removed in Drop.
-    pub struct TempDirHolder {
-        pub path: PathBuf,
-    }
-
-    impl TempDirHolder {
-        pub fn new() -> Self {
-            let seq = SEQ.fetch_add(1, Ordering::SeqCst);
-            let pid = std::process::id();
-            let path = std::env::temp_dir().join(format!("apc-proxy-test-{pid}-{seq}"));
-            std::fs::create_dir_all(&path).expect("create temp dir");
-            Self { path }
-        }
-    }
-
-    impl Drop for TempDirHolder {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
 }
