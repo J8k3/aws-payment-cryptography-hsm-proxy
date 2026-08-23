@@ -60,7 +60,8 @@ use aws_sdk_paymentcryptographydata::types::{
     PinBlockFormatForPinData, PinGenerationAttributes, PinVerificationAttributes,
     SymmetricEncryptionAttributes, TranslationIsoFormats, TranslationPinDataIsoFormat034, VisaPin,
 };
-use rand::{rngs::StdRng, Rng, SeedableRng};
+// rand 0.10 moved `random_range` / `random_bool` off `Rng` onto `RngExt`.
+use rand::{rngs::StdRng, RngExt, SeedableRng};
 
 // ── Gating ───────────────────────────────────────────────────────────────────
 
