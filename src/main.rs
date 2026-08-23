@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         .init();
 
     if cli.verify_only {
-        let ok = verify::run(&cfg).await?;
+        let ok = verify::run(&cfg, None).await?;
         std::process::exit(i32::from(!ok));
     }
 

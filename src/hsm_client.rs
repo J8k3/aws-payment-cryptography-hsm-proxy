@@ -87,18 +87,6 @@ impl HsmClient {
     }
 }
 
-/// Forward a raw frame to the real HSM and return its response bytes —
-/// one-shot convenience for the passthrough leg, which builds per call.
-pub(crate) async fn forward_to_hsm(
-    frame: &[u8],
-    cfg: &DiscoverConfig,
-    protocol: &dyn Protocol,
-) -> Result<Vec<u8>> {
-    HsmClient::from_discover(cfg)?
-        .exchange(frame, protocol)
-        .await
-}
-
 /// Send the frame, read until the protocol says the response is complete or
 /// the connection closes. Generic over the stream type so the same logic
 /// runs for plain TCP and TLS-wrapped TCP.

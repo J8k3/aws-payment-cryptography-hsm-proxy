@@ -23,8 +23,10 @@
 
 use anyhow::Result;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::config::ProxyConfig;
+use crate::forward::ForwardLeg;
 #[cfg(feature = "thales")]
 use crate::hsm_client::HsmClient;
 #[cfg(feature = "thales")]
@@ -55,7 +57,18 @@ impl Report {
 
 /// Run the verification pass. Returns Ok(true) if everything is ready to
 /// serve, Ok(false) if any check failed (caller exits non-zero).
-pub async fn run(cfg: &ProxyConfig) -> Result<bool> {
+///
+/// `forward` mirrors [`server::run_with`](crate::server::run_with)'s parameter:
+/// `None` probes the endpoint in the `discover` block through the core's
+/// single-endpoint leg, which is what verify has always done. A deployment that
+/// serves through a substituted [`ForwardLeg`] should verify through the same
+/// one, or it is not checking the path it will actually use.
+pub async fn run(cfg: &ProxyConfig, forward: Option<Arc<dyn ForwardLeg>>) -> Result<bool> {
+    // The KCV probe is Thales-only, so without that feature there is nothing to
+    // probe and the injected leg has no consumer.
+    #[cfg(not(feature = "thales"))]
+    let _ = forward;
+
     println!("apc-proxy verify-only against {}", cfg.aws.region);
     println!("─────────────────────────────────────────────────────────────");
 
@@ -101,7 +114,7 @@ pub async fn run(cfg: &ProxyConfig) -> Result<bool> {
     // `hsm` goes to None after the first fatal probe outcome, so a dead HSM
     // produces one warning instead of one per mapping.
     #[cfg(feature = "thales")]
-    let mut hsm = hsm_probe_target(cfg, &mut report);
+    let mut hsm = hsm_probe_target(cfg, &mut report, forward);
     let mut per_arn_checked: BTreeMap<String, KeyCheck> = BTreeMap::new();
     for (label, arn_or_alias) in &cfg.key_mappings {
         if !per_arn_checked.contains_key(arn_or_alias) {
@@ -125,7 +138,7 @@ pub async fn run(cfg: &ProxyConfig) -> Result<bool> {
                 #[cfg(feature = "thales")]
                 {
                     let outcome = match &hsm {
-                        Some(client) => Some(hsm_probe::thales_kcv(client, label).await),
+                        Some(leg) => Some(hsm_probe::thales_kcv(leg.as_ref(), label).await),
                         None => None,
                     };
                     match outcome {
@@ -291,7 +304,11 @@ async fn check_one_key(client: &aws_sdk_paymentcryptography::Client, identifier:
 /// — server::run refuses to start on an unknown vendor, and verify must not
 /// report a config as ready when the proxy would not boot it.
 #[cfg(feature = "thales")]
-fn hsm_probe_target(cfg: &ProxyConfig, report: &mut Report) -> Option<HsmClient> {
+fn hsm_probe_target(
+    cfg: &ProxyConfig,
+    report: &mut Report,
+    injected: Option<Arc<dyn ForwardLeg>>,
+) -> Option<Arc<dyn ForwardLeg>> {
     let discover = cfg.discover.as_ref()?;
     // The HSM-side KCV cross-check is implemented only for the Thales probe. For
     // any other vendor (e.g. a bolt-on), skip probing — `key_mappings` are still
@@ -305,13 +322,23 @@ fn hsm_probe_target(cfg: &ProxyConfig, report: &mut Report) -> Option<HsmClient>
         ));
         return None;
     }
+    // An injected leg is used as-is: it already encapsulates its own endpoints,
+    // so there is no `discover` client to build and nothing here to validate.
+    if let Some(leg) = injected {
+        report.pass(
+            "HSM-side KCV cross-check enabled against the supplied forward leg (BU probe)"
+                .to_string(),
+        );
+        return Some(leg);
+    }
+
     match HsmClient::from_discover(discover) {
         Ok(client) => {
             report.pass(format!(
                 "HSM-side KCV cross-check enabled against {}:{} (BU probe)",
                 discover.hsm_host, discover.hsm_port
             ));
-            Some(client)
+            Some(Arc::new(client))
         }
         Err(e) => {
             report.fail(format!(

@@ -40,7 +40,7 @@
 //! payShield in the test environment, so unlike the handler differentials this
 //! is framing-level verification only — the KCV semantics rest on the manual.
 
-use crate::hsm_client::HsmClient;
+use crate::forward::ForwardLeg;
 use crate::protocol::thales::ThalesPayShield;
 use crate::protocol::Protocol;
 
@@ -69,7 +69,7 @@ pub enum ProbeOutcome {
 }
 
 /// Probe the source payShield for the KCV of one `key_mappings` key form.
-pub async fn thales_kcv(client: &HsmClient, key_form: &str) -> ProbeOutcome {
+pub async fn thales_kcv(leg: &dyn ForwardLeg, key_form: &str) -> ProbeOutcome {
     let Some(candidates) = bu_candidates(key_form) else {
         return ProbeOutcome::UnsupportedForm;
     };
@@ -77,7 +77,7 @@ pub async fn thales_kcv(client: &HsmClient, key_form: &str) -> ProbeOutcome {
     let protocol = ThalesPayShield;
     for payload in candidates {
         let frame = protocol.frame_request(PROBE_HEADER, b"BU", payload.as_bytes());
-        let resp = match client.exchange(&frame, &protocol).await {
+        let resp = match leg.exchange(&frame, &protocol).await {
             Ok(bytes) => bytes,
             Err(e) => return ProbeOutcome::Unreachable(e.to_string()),
         };
