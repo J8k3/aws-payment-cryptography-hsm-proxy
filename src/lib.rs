@@ -13,6 +13,7 @@
 
 pub mod config;
 pub mod error;
+pub mod forward;
 pub mod handlers;
 pub mod hsm_client;
 /// The HSM-side KCV cross-check probe is Thales-specific (a payShield `BU`

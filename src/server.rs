@@ -18,8 +18,9 @@ use tracing::{debug, error, info, warn, Instrument};
 static REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
 
 use crate::config::{DiscoverConfig, ProxyConfig, TlsConfig};
+use crate::forward::{ForwardLeg, NoForwardLeg, SingleEndpointLeg};
 use crate::handlers::{AppState, Registry};
-use crate::hsm_client::{default_crypto_provider, forward_to_hsm};
+use crate::hsm_client::default_crypto_provider;
 use crate::key_map::KeyMap;
 use crate::protocol::Protocol;
 use crate::vendor::VendorModule;
@@ -83,7 +84,7 @@ pub async fn run(cfg: ProxyConfig) -> Result<()> {
     let modules: Vec<Arc<dyn VendorModule>> = vec![Arc::new(crate::handlers::thales::ThalesModule)];
     #[cfg(not(feature = "thales"))]
     let modules: Vec<Arc<dyn VendorModule>> = Vec::new();
-    run_with(cfg, modules).await
+    run_with(cfg, modules, None).await
 }
 
 /// Run the proxy against an explicit set of [`VendorModule`]s. This is the seam a
@@ -91,7 +92,17 @@ pub async fn run(cfg: ProxyConfig) -> Result<()> {
 /// — alongside or instead of the built-in ones — and calls this. The module whose
 /// [`VendorModule::vendor`] matches `cfg.vendor` is selected; its handlers (plus
 /// the vendor-agnostic stubs) are registered, and its protocol frames the wire.
-pub async fn run_with(cfg: ProxyConfig, modules: Vec<Arc<dyn VendorModule>>) -> Result<()> {
+///
+/// `forward` is the same kind of seam for the passthrough leg. `None` uses the
+/// core's [`SingleEndpointLeg`] — a fresh connection per command, which is what
+/// the proxy has always done — so passing `None` is exactly today's behaviour.
+/// Supplying one lets a deployment substitute, say, a pooled multi-endpoint leg
+/// without forking the core; see [`ForwardLeg`] for the contract it must meet.
+pub async fn run_with(
+    cfg: ProxyConfig,
+    modules: Vec<Arc<dyn VendorModule>>,
+    forward: Option<Arc<dyn ForwardLeg>>,
+) -> Result<()> {
     let mut aws_builder = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(aws_config::Region::new(cfg.aws.region.clone()));
     if let Some(ref profile) = cfg.aws.profile {
@@ -158,6 +169,15 @@ pub async fn run_with(cfg: ProxyConfig, modules: Vec<Arc<dyn VendorModule>>) -> 
 
     let discover = cfg.discover.map(Arc::new);
 
+    // Default to the core's single-endpoint leg. It only matters when discovery
+    // forwarding is on; with no `discover` block there is nothing to forward, so
+    // a leg that always errors is the honest stand-in rather than a fake config.
+    let forward: Arc<dyn ForwardLeg> = match (forward, discover.as_ref()) {
+        (Some(injected), _) => injected,
+        (None, Some(d)) => Arc::new(SingleEndpointLeg::new(Arc::clone(d))),
+        (None, None) => Arc::new(NoForwardLeg),
+    };
+
     let addr = format!("{}:{}", cfg.listen.host, cfg.listen.port);
     let listener = TcpListener::bind(&addr).await?;
 
@@ -202,30 +222,22 @@ pub async fn run_with(cfg: ProxyConfig, modules: Vec<Arc<dyn VendorModule>>) -> 
         };
         info!(%peer, "connection accepted");
 
-        let state = Arc::clone(&state);
-        let registry = Arc::clone(&registry);
-        let protocol = Arc::clone(&protocol);
         let tls_acceptor = tls_acceptor.clone();
-        let discover = discover.clone();
-
-        let discovery_log = discovery_log.clone();
+        let ctx = ConnCtx {
+            state: Arc::clone(&state),
+            registry: Arc::clone(&registry),
+            protocol: Arc::clone(&protocol),
+            discover: discover.clone(),
+            forward: Arc::clone(&forward),
+            discovery_log: discovery_log.clone(),
+            idle_timeout,
+        };
         tokio::spawn(async move {
             // Held for the connection's lifetime; released on task exit.
             let _permit = permit;
             let result = if let Some(acceptor) = tls_acceptor {
                 match timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(socket)).await {
-                    Ok(Ok(stream)) => {
-                        handle_connection(
-                            stream,
-                            state,
-                            registry,
-                            protocol,
-                            discover,
-                            discovery_log,
-                            idle_timeout,
-                        )
-                        .await
-                    }
+                    Ok(Ok(stream)) => handle_connection(stream, ctx).await,
                     Ok(Err(e)) => {
                         error!(%peer, err = %e, "TLS handshake failed");
                         return;
@@ -236,16 +248,7 @@ pub async fn run_with(cfg: ProxyConfig, modules: Vec<Arc<dyn VendorModule>>) -> 
                     }
                 }
             } else {
-                handle_connection(
-                    socket,
-                    state,
-                    registry,
-                    protocol,
-                    discover,
-                    discovery_log,
-                    idle_timeout,
-                )
-                .await
+                handle_connection(socket, ctx).await
             };
 
             if let Err(e) = result {
@@ -333,18 +336,36 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 1024;
 /// outbound handshake timeout in `hsm_client`.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-async fn handle_connection<S>(
-    mut socket: S,
+/// Everything a connection task needs, cloned once per accepted connection.
+///
+/// Bundled rather than passed positionally: the list crossed clippy's argument
+/// limit when the forward leg joined it, and grouping keeps the two spawn call
+/// sites from drifting apart.
+#[derive(Clone)]
+struct ConnCtx {
     state: Arc<AppState>,
     registry: Arc<Registry>,
     protocol: Arc<dyn Protocol>,
     discover: Option<Arc<DiscoverConfig>>,
+    forward: Arc<dyn ForwardLeg>,
     discovery_log: Option<Arc<DiscoveryLog>>,
     idle_timeout: Option<Duration>,
-) -> Result<()>
+}
+
+async fn handle_connection<S>(mut socket: S, ctx: ConnCtx) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let ConnCtx {
+        state,
+        registry,
+        protocol,
+        discover,
+        forward,
+        discovery_log,
+        idle_timeout,
+    } = ctx;
+
     let mut buf = Vec::with_capacity(4096);
     let mut read_buf = [0u8; 4096];
 
@@ -435,7 +456,7 @@ where
                                     &payload,
                                     discovery_log.as_deref(),
                                 );
-                                match forward_to_hsm(&buf[..frame_len], dcfg, &*protocol).await {
+                                match forward.exchange(&buf[..frame_len], &*protocol).await {
                                     Ok(resp) => resp,
                                     Err(e) => {
                                         warn!(err = %e, "discovery forward failed, returning error");
@@ -561,9 +582,22 @@ mod tests {
             .unwrap();
         client.shutdown().await.unwrap(); // EOF so the handler loop exits
 
-        handle_connection(server, state, registry, protocol, None, None, None)
-            .await
-            .unwrap();
+        handle_connection(
+            server,
+            ConnCtx {
+                state,
+                registry,
+                protocol,
+                discover: None,
+                // This test drives only registered/gated commands, so the leg is
+                // never exercised; NoForwardLeg makes that explicit.
+                forward: Arc::new(crate::forward::NoForwardLeg),
+                discovery_log: None,
+                idle_timeout: None,
+            },
+        )
+        .await
+        .unwrap();
 
         let text = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
 

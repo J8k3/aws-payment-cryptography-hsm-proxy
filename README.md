@@ -294,7 +294,9 @@ Loads the config, calls `get_key` against APC for every `key_mappings` entry, an
 
 **A new command for the Thales vendor:** create `src/handlers/thales/<command>.rs`, implement the `Handler` trait (`handle()` receives the command code and payload bytes, returns `HandlerResult`), add the module to `src/handlers/thales/mod.rs`, and list the handler in `ThalesModule::handlers()`. Add the command to the Supported Commands table above.
 
-**A new vendor:** implement `VendorModule` (its `vendor` string, framing `Protocol`, and `Handler`s) in a crate that depends on this one, then pass it to `server::run_with(cfg, vec![...])`. That is exactly how the Futurex bolt-on is built — the core needs no change.
+**A new vendor:** implement `VendorModule` (its `vendor` string, framing `Protocol`, and `Handler`s) in a crate that depends on this one, then pass it to `server::run_with(cfg, vec![...], None)`. That is exactly how the Futurex bolt-on is built — the core needs no change.
+
+**A different forward leg:** implement `ForwardLeg` — "send one framed command to the backend HSM, return its complete response" — and pass it as `run_with`'s third argument instead of `None`. `None` uses the core's single-endpoint leg, a fresh connection per command. A pooled or multi-endpoint leg substitutes here without forking the core; read the trait's contract first, since reusing a connection means taking on the exclusivity, zero-residual, and poison-on-anomaly obligations that a fresh connection satisfies for free.
 
 **Thales reference:** `src/handlers/thales/cvv.rs` — handles CW/CY (CVV generate/verify), NY (static CVC3 generate), and RY (CVV2 calculate or verify) and shows the standard parse → key-map resolve → APC call → `HandlerResult` pattern. Most Thales handlers follow this structure.
 
