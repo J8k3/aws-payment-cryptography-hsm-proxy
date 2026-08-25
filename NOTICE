@@ -6,3 +6,28 @@ you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
+
+Additional notices. These are informational; they do not modify the
+License or add conditions to it:
+
+1. Pre-employment work. This project was created by Jacob Marks prior to, and independently of, any employment commenced after its creation.
+   It was created on the author's personal time and personal
+   equipment and is not the work product of any employer.
+
+2. Scope of rights. All rights in this software are licensed solely
+   under the Apache License, Version 2.0. No additional rights,
+   permissions, or licenses are granted by implication, estoppel,
+   acquiescence, or otherwise.
+
+3. No permission by silence. Any use or incorporation of this
+   software by an employer of the author -- in any product, service,
+   or internal system -- is governed exclusively by the License. The
+   author's awareness of, or silence regarding, any such use does not
+   constitute the author permitting, authorizing, or acquiescing to
+   any rights beyond the License, whether by act or by inaction. The
+   author requests, but does not require, written notice of any such
+   use at jacob.marks@gmail.com.
+
+4. Trademarks. "AWS" and "AWS Payment Cryptography" are trademarks of
+   Amazon.com, Inc. or its affiliates. This is an independent project,
+   not affiliated with, endorsed by, or sponsored by Amazon.
