@@ -7,7 +7,7 @@
 
 A Rust TCP proxy that decouples HSM-dependent payment applications from the cryptographic platform underneath them. Your application keeps sending the wire protocol it already speaks (Thales payShield 10K host commands), and the proxy translates those commands to [AWS Payment Cryptography (APC)](https://docs.aws.amazon.com/payment-cryptography/latest/userguide/what-is.html) on the outbound side, without changing the application. The wire protocol becomes a stable interface and the platform behind it becomes swappable, so you gain portability across payment HSM platforms instead of trading one vendor lock-in for another.
 
-> **Two editions.** This repository is the **open-source core** (Apache-2.0), covering Thales payShield 10K. **APC Proxy Enterprise** is a separately licensed, commercial add-on for teams that need more — additional HSM vendors (Futurex Excrypt today; Atalla on the roadmap) and production-scale capabilities such as multi-HSM connection pooling. It is built on this exact core through a stable extension seam, so nothing is forked. See [**Enterprise edition**](#enterprise-edition).
+> **Scope.** This repository is the complete open-source project (Apache-2.0), covering Thales payShield 10K. It is built around a stable extension seam (`VendorModule`) so additional vendor surfaces can plug in without forking the core; see [**Extensions**](#extensions).
 
 **If you are refactoring the application, use the APC SDK directly.** That is the better path: lower latency, simpler deployment, no protocol translation layer. This proxy exists for the case where refactoring is not on the table — the application is a black box, a third-party system, or the migration budget doesn't cover application changes.
 
@@ -124,7 +124,7 @@ discover:
 {"ts":1715688000,"vendor":"thales_payshield","cmd":"NC","params":{"payload_len":16,"note":"fields are positional and command-specific; payload not parsed in discovery mode"}}
 ```
 
-Each vendor's protocol produces its own log-safe view of the payload — command codes and byte lengths only, never values. Thales payloads are positional and command-specific, so only the command code and payload length are recorded. (A parameter-tagged vendor such as Futurex, via the enterprise bolt-on, logs each parameter's 2-char code and length with the value redacted.)
+Each vendor's protocol produces its own log-safe view of the payload — command codes and byte lengths only, never values. Thales payloads are positional and command-specific, so only the command code and payload length are recorded. (A parameter-tagged vendor such as Futurex, plugged in as a `VendorModule`, would log each parameter's 2-char code and length with the value redacted.)
 
 **Feed `discovery.jsonl` to the [AWS Payment Cryptography MCP](https://github.com/J8k3/aws-payment-cryptography-mcp).** Call `hsm_analyze_discovery_log` with the file contents. The tool returns: which commands already have handlers in this repo, which need to be written, the APC operation and key type for each, and the exact file path and handler structure to implement. The AI writes the Rust handler code for each command you need.
 
@@ -198,35 +198,24 @@ Wire framing: `[2B length][2B header][2B command code][payload]` — length coun
 | JS | ARQC verify + ARPC generate (UnionPay / CUP) | `VerifyAuthRequestCryptogram` |
 | B2 | Heartbeat / diagnostics | Echo response |
 
-### Enterprise edition
+### Extensions
 
 The open-source core in this repository is **Thales payShield 10K only**, and can
-be built with no other vendor compiled in. **APC Proxy Enterprise** is a
-separately licensed, closed-source add-on for organizations that need more. It
-depends on this core as a library and plugs in through the same stable extension
-seam the built-in Thales support uses (`VendorModule`) — the core is never forked.
+be built with no other vendor compiled in. The core exposes a stable extension
+seam (`VendorModule`) through which additional vendor protocols can plug in
+without forking — a vendor contributes its `vendor` string, framing `Protocol`,
+and `Handler`s, exactly the way the built-in Thales support (`ThalesModule`)
+is registered.
 
-**Available now:**
+Beyond the core, the maintainer has private extension work behind this seam —
+an early Futurex Excrypt surface and an Atalla investigation. It is not part of
+this repository and is not currently available. An earlier version of this
+README framed that work as a commercial "Enterprise edition"; that framing is
+retired.
 
-- **Futurex Excrypt** support — its wire protocol and handlers registered as a
-  `VendorModule`, running against the same APC backend as the open core.
-
-**On the roadmap:**
-
-- **Atalla** HSM support, added the same way.
-- **Multi-HSM connection pooling** — stateless proxy instances fronting a pool of
-  redundant HSMs, with health-weighted routing and a cross-transaction integrity
-  contract (exclusive checkout, poison-on-anomaly, correlation-token verification)
-  that the single-endpoint open core does not need.
-- Priority support and integration assistance for production migrations.
-
-The two editions are wire-compatible and share one configuration model, so a
-deployment can start on the open-source core and adopt Enterprise features
-without re-architecting.
-
-**Licensing & access:** APC Proxy Enterprise is available under a commercial
-license. To request access, a trial, or a quote, open an issue on this
-repository or contact the maintainer via their [GitHub profile](https://github.com/J8k3).
+Questions about the extension work, or about a migration the open core doesn't
+cover, are welcome — open an issue, or reach the maintainer through his
+[GitHub profile](https://github.com/J8k3).
 
 ---
 
